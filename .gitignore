@@ -1,0 +1,17 @@
+# Build output
+build/
+DerivedData/
+deploy-logs/
+**/xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+*.pem
+
+# Temporary files
+/tmp/
+
+# Secrets
+Secrets.swift
+**/Secrets.swift

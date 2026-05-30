@@ -1,0 +1,721 @@
+[
+  {
+    "path": "docs/methodology/переносимый-дизайн.md",
+    "type": "fact",
+    "explicit": [
+      "UX design principles",
+      "iOS development patterns",
+      "background processing suspension",
+      "audio session management",
+      "Live Activities",
+      "widget design",
+      "gesture-based interfaces",
+      "visual hierarchy",
+      "privacy in UI",
+      "hardware constraints visibility"
+    ],
+    "implicit": [
+      "activity_request_ios17_constraint",
+      "live_activity_intent_background_routing",
+      "audio_session_deactivation_watchdog",
+      "avaudiosession_hfp_a2dp_bluetooth_switching",
+      "background_intent_entry_point_detection",
+      "recording_activity_stealth_mode_mapping",
+      "gesture_first_transparency_pattern",
+      "widget_content_margins_disabled_geometry",
+      "visual_anchor_background_fill_hierarchy",
+      "docs_search_semantic_router_pattern",
+      "hardware_constraint_inline_warning_ui",
+      "persistent_idle_activity_deprecated_workaround",
+      "layout_depth_widget_responsive_behavior"
+    ],
+    "symptoms": [
+      "App shows recording mic indicator even when no recording is happening, creating false privacy signals.",
+      "Background-triggered action causes app crash (~0x8badf00d) because audio session wasn't released before suspension.",
+      "User selects AirPods and background music stops unexpectedly — hardware constraint (HFP/A2DP) invisible in UI.",
+      "Edit mode button clutters interface when users already understand long-press gestures from iOS home screen.",
+      "Current day indicator blends into surrounding text on small widget screens; bold font insufficient for visibility.",
+      "Widget content truncated because system default 16pt margins leave only ~120×120px available on 2×2 layout."
+    ],
+    "related_components": [
+      "src/ios/VoiceRecordingLiveActivity.swift",
+      "src/ios/RecordingActivityManager.swift",
+      "docs/knowledge/fact-live-activity.md",
+      "docs/knowledge/fact-audio-session.md",
+      "docs/knowledge/fix-background-intent-crashes.md",
+      "docs/knowledge/fact-habit-tracker.md",
+      "docs/knowledge/fact-habit-widget.md",
+      "CLAUDE.md"
+    ],
+    "hash": "187675395c51838babdacf1848f28a0e73b8a1896acebacf304fb01bc3a169e9"
+  },
+  {
+    "path": "docs/methodology/сценарии-использования.md",
+    "type": "fact",
+    "explicit": [
+      "voice recording workflows",
+      "Action Button intent handling",
+      "app lifecycle management",
+      "audio session routing",
+      "background intent execution",
+      "Live Activity state machine",
+      "clipboard synchronization",
+      "Soniox transcription integration",
+      "AirPods Bluetooth profile management",
+      "process suspension safety"
+    ],
+    "implicit": [
+      "action_button_cold_launch_recording",
+      "audio_session_category_switching",
+      "airpods_hfp_a2dp_routing",
+      "background_intent_deactivation_gap",
+      "route_change_tap_rebuild",
+      "live_activity_banner_dismissal_race",
+      "soniox_finalize_text_frame_hardcap",
+      "shortcut_pipeline_assertion_race",
+      "intent_perform_pendingaction_serialization",
+      "jetsam_suspension_watchdog_flag",
+      "sync_marker_isrecording_atomicity",
+      "paste_path_foreground_vs_background_dispatch",
+      "activity_state_terminal_transition_timing",
+      "app_group_pendingaction_stale_contamination",
+      "audio_session_route_change_kvo_callback_consistency",
+      "hardware_flush_category_batch_optimization",
+      "dictation_finalize_empty_text_frame_protocol",
+      "clipboard_silent_noop_background_detection",
+      "voice_tab_focus_transition_post_stop",
+      "ws_reconnect_8sec_timeout_with_60sec_hardcap"
+    ],
+    "symptoms": [
+      "App terminated by Jetsam when stopping recording from Action Button while backgrounded",
+      "Bluetooth audio cuts out 1–2 seconds when starting first recording or stopping via background intent",
+      "Live Activity 'Готово' banner with transcript confirmation never displays after stop",
+      "Transcribed text fails to reach system clipboard when Action Button triggered the stop",
+      "AirPods remains locked in HFP microphone mode after recording ends, blocking background music permanently",
+      "Recording shows 'Starting...' indefinitely; Soniox WebSocket connection never establishes (timeout at 8s)",
+      "Tapping Action Button while viewing Voice tab stops recording unexpectedly instead of being a no-op",
+      "Second consecutive recording on same audio session exhibits artifacts, tap format mismatches, or routing glitches",
+      "After background intent completes, pendingClipboardText lingers in App Group without syncing to clipboard on foreground",
+      "AirPods disconnect mid-recording causes engine state/tap mismatch, Soniox stream hangs, or PCM packet loss"
+    ],
+    "related_components": [
+      "src/ios/RecordingCoordinator.swift",
+      "src/ios/AudioSessionManager.swift",
+      "src/ios/IntentHandler.swift",
+      "src/ios/RecordingActivityManager.swift",
+      "src/ios/DictationSession.swift",
+      "src/ios/AppGroupStorage.swift",
+      "src/ios/SonioxWebSocket.swift"
+    ],
+    "hash": "4a9999813d05ed06bfecf96b037ad5fa74fd9222538ae036c004d058d234c71c"
+  },
+  {
+    "path": "docs/methodology/диагностика-apple.md",
+    "type": "fact",
+    "explicit": [
+      "deterministic_diagnosis",
+      "exclusion_method_antipattern",
+      "xcode_tooling_management",
+      "tool_idempotence",
+      "hypothesis_driven_debugging",
+      "iterative_diagnosis_methodology"
+    ],
+    "implicit": [
+      "snapshot_xcode_state_at_entry",
+      "restore_xcode_state_at_exit",
+      "pgrep_process_detection_before_action",
+      "async_quit_polling_wait_sync",
+      "trap_cleanup_conditional_termination",
+      "deterministic_test_per_category",
+      "verdict_only_with_positive_test",
+      "contextual_info_vs_culprit_distinction",
+      "hypothesis_driven_targeted_logs",
+      "adversarial_hypothesis_refutation",
+      "observation_narrows_next_hypothesis",
+      "knowledge_expansion_until_root"
+    ],
+    "symptoms": [
+      "Diagnostic script blames VPN for iPhone unreachability when the actual cause is missing XcodeSystemResources.pkg after Xcode update",
+      "Script closes Xcode on exit even though the user had started it before the diagnostic run",
+      "Diagnostic verdict oscillates between different root causes on repeated runs due to timing-dependent state checks",
+      "VPN tunnel information is presented as culprit in verdict_action without a specific positive test proving VPN caused the observable error",
+      "Script outputs multiple possible causes instead of running deterministic tests to isolate the actual failure mechanism"
+    ],
+    "related_components": [
+      "deploy.sh",
+      "knowledge/fact-wireless-deploy.md",
+      "knowledge/fix-пробуждение-mac.md"
+    ],
+    "hash": "75df36fc6d3c86b1dab91c9585c7b69f0b8c9b559d5aad066d0e86ae28c11bcd"
+  },
+  {
+    "path": "docs/knowledge/fact-live-activity.md",
+    "type": "fact",
+    "explicit": [
+      "Live Activity",
+      "Dynamic Island",
+      "ActivityKit",
+      "WidgetKit",
+      "NSSupportsLiveActivities",
+      "relevanceScore",
+      "AlertConfiguration",
+      "widget extension"
+    ],
+    "implicit": [
+      "relevance_score_defaults_zero_reset_each_update",
+      "alert_configuration_popout_trigger_not_request",
+      "foreground_suppresses_alert_widget_kickoff_workaround",
+      "compact_minimal_view_static_symbols_only",
+      "activity_state_dismissed_guard_crash_prevention",
+      "lifecycle_end_immediate_then_request_new",
+      "widget_extension_intent_adopt_pattern",
+      "orange_mic_indicator_priority_override",
+      "ended_banner_inline_sleep_not_async_task",
+      "nsupports_live_activities_both_plist_targets"
+    ],
+    "symptoms": [
+      "Dynamic Island compact slot shows nothing even though Activity exists in Lock Screen and Notification Center",
+      "Live Activity pop-out banner never appears when starting recording from Shortcuts or Control Center, despite AlertConfiguration set",
+      "Activity disappears from Dynamic Island when app comes to foreground, reappears when backgrounded",
+      "Multiple concurrent Live Activities present (ours + Maps/Delivery/Phone), but ours always gets minimal slot instead of competing for compact",
+      "App crashes with ActivityKit exception when ending Live Activity that was already dismissed by system or stale timeout",
+      "Custom animation or ProgressView in Dynamic Island compact view causes entire Island to disappear, activity only visible in Lock Screen",
+      "Starting and stopping recording creates duplicate Activities or fails to trigger pop-out animation consistently",
+      "Timer or status text doesn't update in Dynamic Island minimal view during active recording phase"
+    ],
+    "related_components": [
+      "RecordingActivityManager",
+      "LiveActivityKickoff",
+      "ToggleVoiceRecordingShortcutIntent",
+      "docs/knowledge/fact-voice-record.md",
+      "docs/knowledge/fix-dynamic-island.md"
+    ],
+    "hash": "ae1554b36a03a4b3ec292f3131ce4f4bcef890569021784b3cf8f980ac94d83b"
+  },
+  {
+    "path": "docs/knowledge/fix-пробуждение-mac.md",
+    "type": "fix",
+    "explicit": [
+      "Wake-on-LAN",
+      "Magic packet",
+      "ARP resolution",
+      "Broadcast entitlement",
+      "Sleep detection",
+      "Apple Silicon",
+      "MAC randomization",
+      "DHCP rotation",
+      "FileVault SSH"
+    ],
+    "implicit": [
+      "wol_unicast_arp_cache_expiry",
+      "broadcast_entitlement_free_id_denied",
+      "wol_sleep_proxy_required",
+      "mac_detect_tcp_port22_probe",
+      "pmset_apple_silicon_ignores_keys",
+      "wifi_private_address_mac_randomize",
+      "dhcp_rotation_breaks_hardcoded_ip",
+      "ios_sandbox_no_raw_l2_broadcast",
+      "tahoe_filevault_ssh_wifi_unstable",
+      "udp_viability_handler_network_signal",
+      "icmp_mDNS_false_positive_with_sleep_proxy",
+      "tcp_econnrefused_indicates_awake_not_asleep"
+    ],
+    "symptoms": [
+      "User cannot wake Mac from sleep using iPhone app button despite multiple attempts",
+      "Mac status shows unavailable or asleep when actually powered on and connected to network",
+      "TCP connection refused on port 22 incorrectly interpreted as Mac being in sleep state",
+      "MAC address in app settings no longer matches actual Wi-Fi address after Private Wi-Fi Address enabled",
+      "IP address used for WoL becomes invalid after DHCP lease renewal, Mac shows unreachable next day",
+      "Broadcast magic packet fails with errno 65 even though Wi-Fi is connected on free Apple ID deployment",
+      "ARP table shows incomplete entry for sleeping Mac, unicast magic packets work for 5 minutes then silently fail"
+    ],
+    "related_components": [
+      "fact-wireless-deploy.md"
+    ],
+    "hash": "0a05342e9b086c261a9c4c3d3469bf7212d4a7ec22bbfe21a4d666b00f8d4799"
+  },
+  {
+    "path": "docs/knowledge/fact-habit-widget.md",
+    "type": "fact",
+    "explicit": [
+      "iOS 26 Habit Widget Home Screen display",
+      "Liquid Glass tinted rendering mode",
+      "widgetAccentable() modifier for monochrome palette",
+      "contentMarginsDisabled() padding optimization",
+      "App Group UserDefaults synchronization",
+      "Widget deep linking to Habits tab",
+      "Layout alignment and localization rules",
+      "Text truncation philosophy"
+    ],
+    "implicit": [
+      "widgetAccentable_tinted_monochrome_rendering",
+      "liquid_glass_white_blur_invisibility",
+      "contentMarginsDisabled_4pt_8pt_margin_tradeoff",
+      "app_group_readonly_datasource_pipeline",
+      "synchronize_then_reloadAllTimelines_order",
+      "widget_deep_link_habittracker_url_scheme",
+      "tab_router_habits_navigation_opening",
+      "text_truncation_readability_priority",
+      "spacer_vertical_alignment_float_prevention",
+      "environment_widgetRenderingMode_detection",
+      "localization_cyrillic_day_abbreviations",
+      "widget_variant_density_customization_options"
+    ],
+    "symptoms": [
+      "Widget text becomes unreadable white blur in monochrome/tinted mode on iOS 26 Home Screen",
+      "Habit widget displays stale data after saving or reordering habits in main app",
+      "Small 2×2 widget layout wastes space with excessive padding, losing ~30% of usable area",
+      "Tapping widget opens app on wrong tab (Voice tab) instead of navigating to Habits",
+      "Habit names shrink to unreadable miniature text instead of being cleanly truncated with ellipsis when space is constrained"
+    ],
+    "related_components": [
+      "main app UserDefaults(suiteName: group.com.fedor277.habittracker) saving code",
+      "TabRouter implementation for URL scheme handling",
+      "WidgetCenter.shared.reloadAllTimelines() invocation point",
+      "docs/knowledge/fact-habit-tracker.md",
+      "docs/knowledge/fix-ios-stability.md",
+      "docs/knowledge/fact-voice-record.md"
+    ],
+    "hash": "9097e1bf3718251ecd034cd0addcfda1d2709a92e34b940eeaba933e1389f940"
+  },
+  {
+    "path": "docs/knowledge/fact-habit-tracker.md",
+    "type": "fact",
+    "explicit": [
+      "Habits tab interaction model",
+      "Gesture-first UI without Edit button",
+      "Tap vs press vs drag disambiguation",
+      "Drag smoothness optimization",
+      "Gesture state lifecycle management",
+      "DragGesture coordinate space handling",
+      "LazyVStack performance optimization",
+      "DateFormatter caching",
+      "Gesture diagnostics and logging",
+      "Display mode switching (week-based vs relative)",
+      "Today highlight visual anchor",
+      "Russian day abbreviations localization"
+    ],
+    "implicit": [
+      "gesture_state_vs_state_stickiness",
+      "coordinate_space_feedback_loop",
+      "dateformatter_static_cache",
+      "lazy_vstack_recycling_vs_observer_storm",
+      "gesture_race_arbiter_tap_vs_long_press",
+      "scrollview_pan_vs_drag_gesture_priority",
+      "animation_ambient_bleed_dragged_row",
+      "location_router_x_coordinate_tap_dispatch",
+      "gesture_state_freeze_drag_snapshot",
+      "spatial_tap_gesture_location_routing",
+      "app_group_shared_store_widget_sync",
+      "diagnostics_app_group_vrlog_file"
+    ],
+    "symptoms": [
+      "Habit drag is jerky, slow, stutters, or overshoots target during movement",
+      "Gesture highlight sticks to habit row after releasing or tapping",
+      "Dragged habit moves in wrong direction, inverts, or snaps back unexpectedly",
+      "Edit sheet opens when quick-tapping checkbox or during drag start",
+      "Scrolling stops working when attempting to drag habit rows",
+      "App freezes, main thread stalls, or frame rate drops during drag with many habits",
+      "Habit checkbox toggle does not respond to quick taps or responds with delay",
+      "Widget does not update when switching display mode between week-based and relative"
+    ],
+    "related_components": [
+      "ContentView.swift",
+      "HabitRowView",
+      "GroupRowView",
+      "HabitStore",
+      "DateHelper",
+      "DiagnosticsLogView.swift",
+      "VRLog"
+    ],
+    "hash": "7ab18d66ea4c0bff48817ec4459bb10c02ffd4dde007d58a8db90336a6e46282"
+  },
+  {
+    "path": "docs/knowledge/fact-audio-session.md",
+    "type": "fact",
+    "explicit": [
+      "AVAudioSession configuration and lifecycle",
+      "setActive(true) idempotency pattern",
+      "Bluetooth profile switching A2DP to HFP",
+      "iPhone built-in vs AirPods microphone routing",
+      "Privacy indicator orange mic coupling",
+      "Blocking API on serial queue",
+      "probeInputs single-shot pattern",
+      "Route change during active recording",
+      "Input format and sample rate management"
+    ],
+    "implicit": [
+      "audio_session_activation_idempotency_category_match",
+      "bluetooth_profile_renegotiation_500ms_1s_latency",
+      "mediaserverd_synchronous_ipc_ui_freeze_main_thread",
+      "privacy_indicator_orange_mic_engine_tap_installed_coupling",
+      "airpods_unavailable_inputs_a2dp_only_detection_through_outputs",
+      "hfp_mic_selection_stops_background_music_a2dp_exclusive",
+      "input_format_sample_rate_change_route_switch_detection",
+      "input_tap_rebuild_resampler_stale_sourceRate_chipmunk_effect",
+      "probe_inputs_steals_audio_route_1second_music_interruption",
+      "single_shot_probe_hasProbed_this_launch_guard_loop_prevention",
+      "route_change_notification_infinite_loop_setPreferredInput_recursion",
+      "setpreferred_input_uid_comparison_idempotency_guard",
+      "audio_engine_configuration_change_notification_silent_format_stale",
+      "blocking_api_dispatch_queue_userInitiated_qos_completion_handler"
+    ],
+    "symptoms": [
+      "Background music unexpectedly stops or changes quality when user selects AirPods as recording microphone",
+      "AirPods visible in Bluetooth output but missing from microphone picker list despite being connected",
+      "Audio playback becomes chipmunk-pitched or slow-motion after switching microphones during active recording session",
+      "UI freezes for 1-3 seconds when opening Voice tab or attempting to change microphone input",
+      "Orange privacy indicator remains active even after Voice recording ends and session is no longer needed",
+      "Application hangs with repetitive audio route change logs when user rapidly switches between microphone options",
+      "Selected microphone input immediately reverts to previous choice or UI fails to reflect user's selection"
+    ],
+    "related_components": [
+      "docs/knowledge/fact-voice-record.md",
+      "docs/knowledge/fact-live-activity.md",
+      "docs/knowledge/fix-background-intent-crashes.md"
+    ],
+    "hash": "246c7468524a5e250486110f9e5e3bfa34d8cb3e784bd92ad65af62a6ecdf710"
+  },
+  {
+    "path": "docs/knowledge/fix-dynamic-island.md",
+    "type": "fix",
+    "explicit": [
+      "Live Activities",
+      "Dynamic Island",
+      "NSSupportsLiveActivities",
+      "relevanceScore",
+      "AlertConfiguration",
+      "ActivityKit",
+      "SwiftUI",
+      "SpringBoard",
+      "iOS privacy constraints",
+      "Widget extension",
+      "Lock Screen",
+      "Notification Center",
+      "Activity state management"
+    ],
+    "implicit": [
+      "widget_plist_nssupportsliveactivities_missing",
+      "activity_update_relevancescore_default_zero",
+      "dynamicisland_compact_swiftui_fault_springboard",
+      "swiftui_closure_runtime_crash_island_unmount",
+      "alertconfiguration_required_pop_out_animation",
+      "app_foreground_suppresses_activity_alert",
+      "activity_adopt_pattern_state_reuse_bug",
+      "timer_startedAt_stale_value_after_adopt",
+      "mic_system_indicator_orange_dot_priority",
+      "activity_demotion_minimal_slot_constraint",
+      "notification_center_lazy_rerender_latency",
+      "activity_state_full_reset_reconstruction_solution",
+      "staledate_freshness_8hour_constant",
+      "activity_activitystate_stream_diagnostic_monitoring"
+    ],
+    "symptoms": [
+      "Activity visible in Notification Center and Lock Screen but Dynamic Island compact area is blank despite activityState=.active",
+      "Activity appears in Island on Activity.request() but disappears from compact after first update() call with relevanceScore unset",
+      "SwiftUI faults in compact/minimal closures (animation, ProgressView, onAppear side effects) cause SpringBoard to silently unmount Island view entirely",
+      "Pop-out animation banner does not appear even after Activity.update() with AlertConfiguration when app is in foreground",
+      "Timer shows 27:00 instead of 0:00 after adopting an existing persistent Activity that was idle for minutes",
+      "Activity shifts from Dynamic Island compact to minimal side slot once user starts recording (mic system claim takes precedence)",
+      "Notification Center takes 4-6 seconds to update activity name and timer after Activity.update() without alertConfiguration",
+      "iOS automatically unmounts Activity from Island when SwiftUI view closure contains forced unwrapping, missing image assets, or indeterminate ProgressView"
+    ],
+    "related_components": [
+      "src/RecordingActivityManager.swift",
+      "src/LiveActivityKickoff.swift",
+      "HabitWidget/Info.plist",
+      "HabitTracker/Info.plist",
+      "src/RecordingAttributes.swift",
+      "src/views/DynamicIslandCompactView.swift",
+      "src/views/DynamicIslandMinimalView.swift",
+      "src/views/LockScreenView.swift"
+    ],
+    "hash": "a8010dd5d6eaddb0c448da630699cac03f55ad95cd9fe48631c2dc1fd5a400bb"
+  },
+  {
+    "path": "docs/knowledge/fix-ios-stability.md",
+    "type": "fix",
+    "explicit": [
+      "iOS development",
+      "SwiftUI",
+      "Widget Extension",
+      "Deployment Target",
+      "Liquid Glass",
+      "App Groups",
+      "UserDefaults",
+      "Widget refresh",
+      "Code Signing",
+      "Entitlements",
+      "Data synchronization"
+    ],
+    "implicit": [
+      "widget_deployment_target_version_mismatch",
+      "glass_rendering_theme_color_bypass",
+      "duplicate_model_json_format_sync",
+      "app_groups_entitlements_code_sign_binding",
+      "user_defaults_synchronize_cache_flush",
+      "widget_extension_framework_code_signing_blocker",
+      "container_background_widget_accent_modifiers",
+      "shared_defaults_suite_name_nil_silent",
+      "iphoneos_deployment_target_auto_sdk_upgrade",
+      "widget_timeline_refresh_memory_cache_stale",
+      "code_signing_bundle_id_framework_workaround",
+      "model_duplication_json_silent_parse_failure"
+    ],
+    "symptoms": [
+      "Widget does not appear in gallery or crashes with 'Error Domain=com.apple.dt.deviceprocesscontrolservice Code=8'",
+      "UI elements vanish or lose contrast when user switches iOS theme or appearance setting",
+      "Widget continues displaying old data seconds or minutes after app writes new values",
+      "UserDefaults(suiteName:) returns nil even though App Groups entitlements and code are present",
+      "Model structure changes in main app but widget breaks with silent JSON parsing failure",
+      "Widget refresh lags behind app state changes and requires manual system refresh to catch up"
+    ],
+    "related_components": [
+      "HabitWidget_.swift",
+      "Habit.swift",
+      "StorageData.swift",
+      ".entitlements configuration files",
+      "project.pbxproj (IPHONEOS_DEPLOYMENT_TARGET)",
+      "UserDefaults App Groups initialization",
+      "WidgetCenter.reloadAllTimelines() handlers"
+    ],
+    "hash": "4bf17b512e37ad218b28e4b149e4a90fb47c06b0c8f58358ec783d6d01a66c65"
+  },
+  {
+    "path": "docs/knowledge/fact-wireless-deploy.md",
+    "type": "fact",
+    "explicit": [
+      "iOS wireless deploy",
+      "Xcode CoreDevice",
+      "provisioning profile auto-refresh",
+      "iOS Simulator runtime",
+      "Bonjour mDNS detection",
+      "WiFi connectivity",
+      "USB vs WiFi transport selection",
+      "VPN compatibility"
+    ],
+    "implicit": [
+      "deploy_sh_auto_wake_xcode",
+      "coredevice_tunnel_state_probing",
+      "installcoordination_proxy_retry_logic",
+      "provisioning_profile_7day_cycle",
+      "simulator_runtime_version_independent",
+      "bonjour_mdns_detection_reliability",
+      "usb_wifi_transport_auto_selection",
+      "xcode_background_launch_idempotency",
+      "vpn_does_not_block_local_multicast",
+      "shared_cache_symbols_usb_priority",
+      "ios_update_tunnel_unavailable_recovery",
+      "first_certificate_manual_trust_step",
+      "devicectl_udid_only_routing",
+      "xcode_service_lifecycle_background",
+      "async_tunnel_state_transition_timing",
+      "resource_availability_ordering",
+      "tunnel_disconnected_not_blocker"
+    ],
+    "symptoms": [
+      "deploy.sh fails on build with 'Unable to find a destination matching' even though iPhone is in WiFi and previously paired",
+      "CoreDevice shows tunnelState: unavailable after Mac reboot, blocking wireless install despite iPhone being present",
+      "App icon on iPhone shows red X with 'Untrusted Developer' error after 7 days of first install",
+      "xcodebuild refuses to compile for iPhone UDID because 'iOS X.Y is not installed', even though iOS version on device is newer",
+      "device install command fails with 'Could not get service com.apple.remote.installcoordination_proxy' immediately after Xcode auto-wake",
+      "deploy.sh hangs for 90 seconds on every run with no progress output or visible reason",
+      "Copying shared cache symbols over WiFi breaks at random percentage and restarts from 0% instead of resuming from delta",
+      "scutil --dns shows local domain as 'Not Reachable' but Bonjour actually works and device connects fine"
+    ],
+    "related_components": [
+      "deploy.sh",
+      "xcodebuild",
+      "xcrun devicectl device install",
+      "CoreDevice services (background)",
+      "provisioning profile system",
+      "iOS Simulator runtime (Xcode component)",
+      "Bonjour/mDNS resolver",
+      "fix-coredevice-no-provider.md",
+      "fix-ios-stability.md",
+      "methodology/диагностика-apple.md"
+    ],
+    "hash": "0076c307e31efd37430eddfada04b41bb4e1f62e7da44bebf77cfd8591f66c39"
+  },
+  {
+    "path": "docs/knowledge/fix-background-intent-crashes.md",
+    "type": "fix",
+    "explicit": [
+      "background-intent crashes",
+      "AVAudioSession lifecycle",
+      "ActivityKit dismissed race",
+      "Swift Concurrency continuation",
+      "Pasteboard background limitation",
+      "App Group sync",
+      "AppIntent execution context"
+    ],
+    "implicit": [
+      "jetsam_0x8badf00d_watchdog",
+      "appintent_perform_assertion_release",
+      "continuation_double_resume_fatal",
+      "audio_hardware_flush_1s_gap",
+      "activity_kit_dismissed_exception",
+      "taskgroup_cancelall_orphan_continuation",
+      "pasteboard_audit_token_foreground_check",
+      "reconcile_stopping_phase_race",
+      "connectedscenes_runloop_lag",
+      "stoporiginatedfromintent_flag",
+      "alert_configuration_system_dismissed_trigger",
+      "force_quit_sigkill_no_terminate_notification"
+    ],
+    "symptoms": [
+      "App crashes 2–7 seconds after stopping recording via Action Button or Control Center, new process cold-launches with history counter increment",
+      "AppIntent continuation fatal error 'CheckedContinuation must only be resumed once' in perform() context",
+      "Recording state becomes out-of-sync when intent-triggered stop runs during willEnterForeground reconciliation",
+      "Clipboard paste returns empty after background voice recording stop, text appears only after returning to app",
+      "ActivityKit update or end throws exception when system dismisses Live Activity during intent execution",
+      "Background audio playback pauses for ~1 second immediately after voice recording stop due to hardware audio graph reconfiguration"
+    ],
+    "related_components": [
+      "src/RecordingActivityManager.swift",
+      "src/RecordingCoordinator.swift",
+      "src/ToggleVoiceRecordingShortcutIntent.swift",
+      "src/handlePendingActionIfNeeded()",
+      "src/reconcileWithControlAfterForeground()"
+    ],
+    "hash": "e53afb642ad7476129ce90fabde8ccb2aa71360350ebc4de774614879f15b7d7"
+  },
+  {
+    "path": "docs/knowledge/fact-voice-record.md",
+    "type": "fact",
+    "explicit": [
+      "Voice Record subsystem",
+      "Soniox WebSocket streaming",
+      "Live Activity",
+      "AppIntents",
+      "Shortcuts.app integration",
+      "AVAudioSession lifecycle",
+      "App Group state",
+      "Recording Coordinator",
+      "Transcription finalization",
+      "Intent execution context"
+    ],
+    "implicit": [
+      "soniox_ws_deadlock_binary_vs_text_frame",
+      "finalize_lag_empty_text_frame_60s_hard_cap",
+      "recvLoop_while_true_drain_final_tokens",
+      "lastFinalEndMs_lag_seconds_tracking",
+      "killed_state_toggle_livactivityintent_dual_conformance",
+      "appshortcuts_provider_main_target_visibility",
+      "toggle_intent_app_group_isrecording_source_of_truth",
+      "appstorage_synchronization_userdefaults_instance_mismatch",
+      "intent_perform_background_clipboard_returnsvalue_pipeline",
+      "avaudiosession_deactivate_on_intent_stop_vs_ui_stop_intent_flag",
+      "cold_launch_control_center_openappwhenrun_foreground",
+      "cold_launch_shortcut_continueInForeground_process_reap_15s",
+      "mic_picker_avaudiosession_routechange_notification_probeInputs",
+      "provisioning_embedded_mobileprovision_cms_wrapper_plist_parsing",
+      "vr_log_line_count_newline_byte_reduction",
+      "voice_tab_default_rootview_tabselection_entry_point",
+      "recording_coordinator_phase_enum_single_owner",
+      "dictation_session_hard_cap_60s_forcestop_task_cancel",
+      "ui_stopping_lag_seconds_toolbar_title_real_time_indicator",
+      "coordinator_safety_timer_65s_continuation_wait",
+      "app_group_shared_keys_cross_process_single_source_of_truth",
+      "mic_stop_immediate_in_stop_before_ws_finalize"
+    ],
+    "symptoms": [
+      "UI hangs with 'Stopping…' in Live Activity when user taps Stop, logs show entered stop() but finalize-frame never arrives and app freezes in .stopping phase for 60 seconds",
+      "Transcript ends prematurely (~30 seconds early) while PCM .wav file contains full audio; reloading from history shows complete text, suggesting live finalize tail was lost",
+      "Voice Record Shortcut not found in Shortcuts.app when adding new shortcut, marked as 'Unknown action', but same intents work via Control Center widget button",
+      "App killed with SIGKILL 15 seconds after tapping Voice Record toggle in Action Button or Shortcut, AVAudioSession never activated, recording never starts despite activity created",
+      "Developer mode toggle in Settings doesn't update navbar icons until user manually switches tabs Voice→Habits→Voice, indicating @AppStorage state not reactive across views",
+      "Text returned from background intent doesn't copy to clipboard in Shortcut pipeline even though perform() returns accumulated transcript as ReturnsValue<String>",
+      "Current active microphone in MicSourcePicker doesn't reflect real-time route changes despite AVAudioSession.routeChangeNotification being posted"
+    ],
+    "related_components": [
+      "src/ios/HabitTracker/Voice/RecordingCoordinator.swift",
+      "src/ios/HabitTracker/Voice/DictationSession.swift",
+      "src/ios/HabitTracker/Voice/VoiceRecordTabView.swift",
+      "src/ios/HabitTracker/Voice/ToggleVoiceRecordingShortcutIntent.swift",
+      "src/ios/HabitTracker/Voice/AudioRecordingIntent.swift",
+      "src/ios/HabitTracker/Voice/LiveActivityIntent.swift",
+      "src/ios/HabitTracker/Voice/MicSourcePicker.swift",
+      "src/ios/HabitTracker/Voice/AudioSessionManager.swift",
+      "src/ios/HabitTracker/Voice/RecordingActivityManager.swift",
+      "src/ios/HabitTracker/Voice/VoiceRecordConfig.swift",
+      "src/ios/HabitTracker/Voice/ProvisioningInfo.swift",
+      "src/ios/HabitTracker/Voice/VRLog.swift"
+    ],
+    "hash": "bfb683fb604ea36ba852a421548a4493da442c385547dd6e5f8c63e62319d7eb"
+  },
+  {
+    "path": "docs/knowledge/fact-xcode-disk-usage.md",
+    "type": "fact",
+    "explicit": [
+      "Xcode disk usage breakdown",
+      "iOS DeviceSupport cache",
+      "DerivedData build cache",
+      "CoreSimulator runtimes",
+      "symlink-based external storage",
+      "APFS volume mounting",
+      "dyld shared cache copying",
+      "disk space recovery"
+    ],
+    "implicit": [
+      "xcode_devicesupport_symlink",
+      "apfs_volume_simulator_runtime",
+      "dyld_shared_cache_extraction",
+      "derivedata_cache_accumulation",
+      "copying_lock_resume_mechanism",
+      "xcode_select_path_breaking",
+      "ios_version_support_safe_delete",
+      "coresimulator_volume_mounting",
+      "wifi_symbol_copy_interruption_resume",
+      "external_disk_disconnection_recovery",
+      "usb_wifi_copy_speed_reliability"
+    ],
+    "symptoms": [
+      "Mac is out of disk space; Xcode cache (iOS DeviceSupport, DerivedData) consumed 30–50 GB",
+      "iPhone symbol copying takes 15+ minutes or interrupted by WiFi; doesn't resume properly and starts from 0%",
+      "External SSD with symlinked Xcode folders disconnected or died; xcode-select is broken, builds fail",
+      "Unsure if iOS DeviceSupport can be safely moved to external disk via symlink or if it breaks Xcode",
+      "Simulator runtimes (APFS volumes on Xcode 16+) can't be symlinked and are eating 20+ GB on internal disk"
+    ],
+    "related_components": [],
+    "hash": "aa83c41016f99b65b9dfba637e107795159ca2af3d088d08fd5ca4730bcbf483"
+  },
+  {
+    "path": "docs/knowledge/fix-coredevice-no-provider.md",
+    "type": "fix",
+    "explicit": [
+      "CoreDevice",
+      "Xcode",
+      "iOS deployment",
+      "Developer disk image (DDI)",
+      "Wireless deployment",
+      "First Launch Experience",
+      "XcodeSystemResources",
+      "devicectl",
+      "provisioning parameter list"
+    ],
+    "implicit": [
+      "coredevice_provider_stack",
+      "xcode_first_launch_experience_detection",
+      "ddi_version_mismatch_false_positive",
+      "bonjour_wireless_routing",
+      "devicectl_pairing_recovery",
+      "vpn_local_network_isolation_false_alarm",
+      "devicectl_device_state_transitions",
+      "xcoderesources_installer_path_resolution",
+      "tunnelstate_unavailable_diagnosis",
+      "background_service_respawning_recovery"
+    ],
+    "symptoms": [
+      "Xcode shows yellow banner 'The developer disk image could not be mounted on this device'",
+      "devicectl prints 'No provider was found' error after Xcode update",
+      "iPhone appears as 'connected (no DDI)' in devicectl list devices, wireless deployment unavailable",
+      "Run button in Xcode is grayed out or crashes when deploying to iPhone",
+      "Wireless deployment breaks after Xcode update but device pairing is intact"
+    ],
+    "related_components": [
+      "docs/knowledge/fact-wireless-deploy.md"
+    ],
+    "hash": "417c379b4d419018c20fba7d9b2e6d71f307fad6ce8b129b7a0369730325a2f2"
+  }
+]

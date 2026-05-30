@@ -1,0 +1,26 @@
+=== Indexer started: Sun May 31 00:16:15 MSK 2026 ===
+RESPONSE for docs/knowledge/fact-wireless-deploy.md: ```json
+{
+  "path": "docs/knowledge/fact-wireless-deploy.md",
+  "type": "fact",
+  "explicit": [
+    "iOS wireless deploy",
+    "Xcode CoreDevice",
+    "provisioning profile auto-refresh",
+    "iOS Sim
+RESPONSE for docs/methodology/диагностика-apple.md: ```json
+{
+  "path": "docs/methodology/диагностика-apple.md",
+  "type": "fact",
+  "explicit": [
+    "deterministic_diagnosis",
+    "exclusion_method_antipattern",
+    "xcode_tooling_manageme
+RESPONSE for docs/knowledge/fact-habit-tracker.md: ```json
+{
+  "path": "docs/knowledge/fact-habit-tracker.md",
+  "type": "fact",
+  "explicit": [
+    "Habits tab interaction model",
+    "Gesture-first UI without Edit button",
+    "Tap vs press vs drag 

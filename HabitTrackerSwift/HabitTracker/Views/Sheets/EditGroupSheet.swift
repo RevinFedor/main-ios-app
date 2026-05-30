@@ -1,0 +1,152 @@
+import SwiftUI
+
+struct EditGroupSheet: View {
+    @EnvironmentObject var store: HabitStore
+    @Environment(\.dismiss) var dismiss
+
+    let group: HabitGroup
+
+    @State private var name: String = ""
+    @State private var selectedColor: HabitColor = .blue
+    @State private var showDeleteAlert = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                Form {
+                    Section {
+                        TextField("Название", text: $name)
+                            .font(.system(size: 17))
+                            .foregroundColor(.white)
+                            .submitLabel(.done)
+                    }
+
+                    Section {
+                        HStack {
+                            Label("Серия 100%", systemImage: "flame.fill")
+                                .foregroundStyle(.orange)
+                            Spacer()
+                            Text("\(group.streak) дней")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        HStack {
+                            Label("Привычек", systemImage: "list.bullet")
+                                .foregroundStyle(.blue)
+                            Spacer()
+                            Text("\(group.habits.count)")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    } header: {
+                        Text("Статистика")
+                    }
+
+                    Section {
+                        ColorPickerGrid(selectedColor: $selectedColor)
+                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                    } header: {
+                        Text("Цвет")
+                    }
+
+                    Section {
+                        Button(role: .destructive) {
+                            showDeleteAlert = true
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Text("Удалить группу")
+                                    .font(.system(size: 17))
+                                Spacer()
+                            }
+                        }
+                    }
+
+                    // Spacer for floating Save button
+                    Section { Color.clear.frame(height: 60) }
+                        .listRowBackground(Color.clear)
+                }
+                .scrollContentBackground(.hidden)
+                .background(Color(hex: "1C1C1E"))
+
+                saveBar
+            }
+            .background(Color(hex: "1C1C1E"))
+            .navigationTitle("Группа")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") { dismiss() }
+                        .foregroundColor(.blue)
+                }
+            }
+            .alert("Удалить группу?", isPresented: $showDeleteAlert) {
+                Button("Отмена", role: .cancel) {}
+                Button("Разгруппировать") { deleteGroup(keepHabits: true) }
+                Button("Удалить всё", role: .destructive) { deleteGroup(keepHabits: false) }
+            } message: {
+                Text("«\(group.name)» содержит \(group.habits.count) привычек")
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            name = group.name
+            selectedColor = group.colorName
+        }
+    }
+
+    private var saveBar: some View {
+        Button {
+            saveChanges()
+        } label: {
+            Text("Сохранить")
+        }
+        .buttonStyle(ProminentCTAStyle(enabled: isValid, tint: .blue))
+        .disabled(!isValid)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .background(
+            LinearGradient(
+                colors: [Color(hex: "1C1C1E").opacity(0), Color(hex: "1C1C1E")],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: 80)
+            .allowsHitTesting(false),
+            alignment: .bottom
+        )
+    }
+
+    private var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private func saveChanges() {
+        store.updateGroup(
+            group.id,
+            name: name.trimmingCharacters(in: .whitespaces),
+            color: selectedColor
+        )
+        dismiss()
+    }
+
+    private func deleteGroup(keepHabits: Bool) {
+        store.deleteGroup(group.id, keepHabits: keepHabits)
+        dismiss()
+    }
+}
+
+#Preview {
+    EditGroupSheet(
+        group: HabitGroup(
+            name: "Утро",
+            colorName: .teal,
+            habits: [
+                Habit(name: "Медитация", colorName: .teal),
+                Habit(name: "Душ", colorName: .cyan)
+            ]
+        )
+    )
+    .environmentObject(HabitStore())
+}

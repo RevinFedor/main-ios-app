@@ -1,0 +1,747 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 70;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		9F81CE662F3F64DC006EDEF5 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F81CE652F3F64DC006EDEF5 /* WidgetKit.framework */; };
+		9F81CE682F3F64DC006EDEF5 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F81CE672F3F64DC006EDEF5 /* SwiftUI.framework */; };
+		9F81CE752F3F64DE006EDEF5 /* HabitWidget.Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 9F81CE632F3F64DC006EDEF5 /* HabitWidget.Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A1B2C3D401 /* HabitTrackerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E1 /* HabitTrackerApp.swift */; };
+		A1B2C3D402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E2 /* ContentView.swift */; };
+		A1B2C3D403 /* Habit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E3 /* Habit.swift */; };
+		A1B2C3D404 /* HabitGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E4 /* HabitGroup.swift */; };
+		A1B2C3D405 /* HabitStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5 /* HabitStore.swift */; };
+		A1B2C3D406 /* DateHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E6 /* DateHelper.swift */; };
+		A1B2C3D407 /* DaysHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E7 /* DaysHeaderView.swift */; };
+		A1B2C3D408 /* HabitRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E8 /* HabitRowView.swift */; };
+		A1B2C3D409 /* GroupRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E9 /* GroupRowView.swift */; };
+		A1B2C3D420 /* ButtonStyles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4FA /* ButtonStyles.swift */; };
+		A1B2C3D421 /* DiagnosticsLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3DA01 /* DiagnosticsLogView.swift */; };
+		A1B2C3D410 /* AddHabitSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EA /* AddHabitSheet.swift */; };
+		A1B2C3D411 /* EditHabitSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EB /* EditHabitSheet.swift */; };
+		A1B2C3D412 /* EditGroupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EC /* EditGroupSheet.swift */; };
+		A1B2C3D413 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4ED /* SettingsSheet.swift */; };
+		A1B2C3D416 /* CalendarSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EE /* CalendarSheet.swift */; };
+		A1B2C3D414 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4F0 /* Assets.xcassets */; };
+		A1B2C3D415 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4F1 /* Preview Assets.xcassets */; };
+		A1B2C3D501 /* AppGroupContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F01 /* AppGroupContainer.swift */; };
+		A1B2C3D502 /* AudioSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F02 /* AudioSessionManager.swift */; };
+		A1B2C3D503 /* DictationSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F03 /* DictationSession.swift */; };
+		A1B2C3D504 /* RecordingActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F04 /* RecordingActivityManager.swift */; };
+		A1B2C3D505 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F05 /* RecordingCoordinator.swift */; };
+		A1B2C3D506 /* Secrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F06 /* Secrets.swift */; };
+		A1B2C3D507 /* SonioxTokenMint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F07 /* SonioxTokenMint.swift */; };
+		A1B2C3D508 /* TranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F08 /* TranscriptStore.swift */; };
+		A1B2C3D509 /* VoiceRecordTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F09 /* VoiceRecordTabView.swift */; };
+		A1B2C3D50A /* VoiceSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0A /* VoiceSettingsSheet.swift */; };
+		A1B2C3D50B /* TranscriptHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0B /* TranscriptHistoryView.swift */; };
+		A1B2C3D50C /* VoiceRecordConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0C /* VoiceRecordConfig.swift */; };
+		A1B2C3D50D /* RecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0D /* RecordingAttributes.swift */; };
+		A1B2C3D50E /* VoiceRecordIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0E /* VoiceRecordIntents.swift */; };
+		A1B2C3D50F /* ReloadSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0F /* ReloadSession.swift */; };
+		A1B2C3D510 /* TabRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F10 /* TabRouter.swift */; };
+		A1B2C3D511 /* VRLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F11 /* VRLog.swift */; };
+		A1B2C3D512 /* VoiceRecordShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F12 /* VoiceRecordShortcuts.swift */; };
+		A1B2C3D513 /* LiveActivityKickoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F13 /* LiveActivityKickoff.swift */; };
+		A1B2C3D514 /* ProvisioningInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F14 /* ProvisioningInfo.swift */; };
+		A1B2C3D515 /* ProvisioningExpiryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F15 /* ProvisioningExpiryView.swift */; };
+		A1B2C3D516 /* MicSourcePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F16 /* MicSourcePicker.swift */; };
+		A1B2C3D517 /* PersistentActivityToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F17 /* PersistentActivityToggle.swift */; };
+		A1B2C3D518 /* AudioSessionIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F18 /* AudioSessionIndicator.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9F81CE732F3F64DE006EDEF5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1B2C3D480 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9F81CE622F3F64DC006EDEF5;
+			remoteInfo = HabitWidget.Extension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9F81CE762F3F64DE006EDEF5 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				9F81CE752F3F64DE006EDEF5 /* HabitWidget.Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		9F81CE632F3F64DC006EDEF5 /* HabitWidget.Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HabitWidget.Extension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F81CE652F3F64DC006EDEF5 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		9F81CE672F3F64DC006EDEF5 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		A1B2C3D4D0 /* HabitTracker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HabitTracker.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4E1 /* HabitTrackerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitTrackerApp.swift; sourceTree = "<group>"; };
+		A1B2C3D4E2 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A1B2C3D4E3 /* Habit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Habit.swift; sourceTree = "<group>"; };
+		A1B2C3D4E4 /* HabitGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitGroup.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5 /* HabitStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitStore.swift; sourceTree = "<group>"; };
+		A1B2C3D4E6 /* DateHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateHelper.swift; sourceTree = "<group>"; };
+		A1B2C3D4E7 /* DaysHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaysHeaderView.swift; sourceTree = "<group>"; };
+		A1B2C3D4E8 /* HabitRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitRowView.swift; sourceTree = "<group>"; };
+		A1B2C3D4E9 /* GroupRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupRowView.swift; sourceTree = "<group>"; };
+		A1B2C3D4FA /* ButtonStyles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ButtonStyles.swift; sourceTree = "<group>"; };
+		A1B2C3DA01 /* DiagnosticsLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLogView.swift; sourceTree = "<group>"; };
+		A1B2C3D4EA /* AddHabitSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddHabitSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D4EB /* EditHabitSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditHabitSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D4EC /* EditGroupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditGroupSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D4ED /* SettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D4EE /* CalendarSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D4F0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A1B2C3D4F1 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		A1B2C3D4F2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1B2C3D5F01 /* AppGroupContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupContainer.swift; sourceTree = "<group>"; };
+		A1B2C3D5F02 /* AudioSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionManager.swift; sourceTree = "<group>"; };
+		A1B2C3D5F03 /* DictationSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationSession.swift; sourceTree = "<group>"; };
+		A1B2C3D5F04 /* RecordingActivityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActivityManager.swift; sourceTree = "<group>"; };
+		A1B2C3D5F05 /* RecordingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
+		A1B2C3D5F06 /* Secrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secrets.swift; sourceTree = "<group>"; };
+		A1B2C3D5F07 /* SonioxTokenMint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonioxTokenMint.swift; sourceTree = "<group>"; };
+		A1B2C3D5F08 /* TranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptStore.swift; sourceTree = "<group>"; };
+		A1B2C3D5F09 /* VoiceRecordTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordTabView.swift; sourceTree = "<group>"; };
+		A1B2C3D5F0A /* VoiceSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceSettingsSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D5F0B /* TranscriptHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptHistoryView.swift; sourceTree = "<group>"; };
+		A1B2C3D5F0C /* VoiceRecordConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoiceRecordConfig.swift; path = "../../HabitWidget./VoiceRecordConfig.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F0D /* RecordingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RecordingAttributes.swift; path = "../../HabitWidget./RecordingAttributes.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F0E /* VoiceRecordIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoiceRecordIntents.swift; path = "../../HabitWidget./VoiceRecordIntents.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F0F /* ReloadSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReloadSession.swift; sourceTree = "<group>"; };
+		A1B2C3D5F10 /* TabRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRouter.swift; sourceTree = "<group>"; };
+		A1B2C3D5F11 /* VRLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VRLog.swift; path = "../../HabitWidget./VRLog.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F12 /* VoiceRecordShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoiceRecordShortcuts.swift; path = "../../HabitWidget./VoiceRecordShortcuts.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F13 /* LiveActivityKickoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LiveActivityKickoff.swift; path = "../../HabitWidget./LiveActivityKickoff.swift"; sourceTree = "<group>"; };
+		A1B2C3D5F14 /* ProvisioningInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningInfo.swift; sourceTree = "<group>"; };
+		A1B2C3D5F15 /* ProvisioningExpiryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningExpiryView.swift; sourceTree = "<group>"; };
+		A1B2C3D5F16 /* MicSourcePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicSourcePicker.swift; sourceTree = "<group>"; };
+		A1B2C3D5F17 /* PersistentActivityToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistentActivityToggle.swift; sourceTree = "<group>"; };
+		A1B2C3D5F18 /* AudioSessionIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionIndicator.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9F81CE792F3F64DE006EDEF5 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+				VoiceRecordShortcuts.swift,
+			);
+			target = 9F81CE622F3F64DC006EDEF5 /* HabitWidget.Extension */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		9F81CE692F3F64DC006EDEF5 /* HabitWidget. */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (9F81CE792F3F64DE006EDEF5 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = HabitWidget.; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9F81CE602F3F64DC006EDEF5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9F81CE682F3F64DC006EDEF5 /* SwiftUI.framework in Frameworks */,
+				9F81CE662F3F64DC006EDEF5 /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4A0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		9F81CE642F3F64DC006EDEF5 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				9F81CE652F3F64DC006EDEF5 /* WidgetKit.framework */,
+				9F81CE672F3F64DC006EDEF5 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B0 = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4B1 /* HabitTracker */,
+				9F81CE692F3F64DC006EDEF5 /* HabitWidget. */,
+				9F81CE642F3F64DC006EDEF5 /* Frameworks */,
+				A1B2C3D4B2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B1 /* HabitTracker */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E1 /* HabitTrackerApp.swift */,
+				A1B2C3D4F2 /* Info.plist */,
+				A1B2C3D4B3 /* Models */,
+				A1B2C3D4B4 /* Views */,
+				A1B2C3D5B0 /* VoiceRecord */,
+				A1B2C3D4F0 /* Assets.xcassets */,
+				A1B2C3D4B5 /* Preview Content */,
+			);
+			path = HabitTracker;
+			sourceTree = "<group>";
+		};
+		A1B2C3D5B0 /* VoiceRecord */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D5F06 /* Secrets.swift */,
+				A1B2C3D5F0C /* VoiceRecordConfig.swift */,
+				A1B2C3D5F01 /* AppGroupContainer.swift */,
+				A1B2C3D5F02 /* AudioSessionManager.swift */,
+				A1B2C3D5F07 /* SonioxTokenMint.swift */,
+				A1B2C3D5F03 /* DictationSession.swift */,
+				A1B2C3D5F0D /* RecordingAttributes.swift */,
+				A1B2C3D5F04 /* RecordingActivityManager.swift */,
+				A1B2C3D5F0E /* VoiceRecordIntents.swift */,
+				A1B2C3D5F12 /* VoiceRecordShortcuts.swift */,
+				A1B2C3D5F13 /* LiveActivityKickoff.swift */,
+				A1B2C3D5F14 /* ProvisioningInfo.swift */,
+				A1B2C3D5F05 /* RecordingCoordinator.swift */,
+				A1B2C3D5F08 /* TranscriptStore.swift */,
+				A1B2C3D5F0F /* ReloadSession.swift */,
+				A1B2C3D5F10 /* TabRouter.swift */,
+				A1B2C3D5F11 /* VRLog.swift */,
+			);
+			path = VoiceRecord;
+			sourceTree = "<group>";
+		};
+		A1B2C3D5B1 /* VoiceRecord */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D5F09 /* VoiceRecordTabView.swift */,
+				A1B2C3D5F0A /* VoiceSettingsSheet.swift */,
+				A1B2C3D5F0B /* TranscriptHistoryView.swift */,
+				A1B2C3D5F16 /* MicSourcePicker.swift */,
+				A1B2C3D5F17 /* PersistentActivityToggle.swift */,
+				A1B2C3D5F18 /* AudioSessionIndicator.swift */,
+			);
+			path = VoiceRecord;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4D0 /* HabitTracker.app */,
+				9F81CE632F3F64DC006EDEF5 /* HabitWidget.Extension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B3 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E3 /* Habit.swift */,
+				A1B2C3D4E4 /* HabitGroup.swift */,
+				A1B2C3D4E5 /* HabitStore.swift */,
+				A1B2C3D4E6 /* DateHelper.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B4 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E2 /* ContentView.swift */,
+				A1B2C3D5F15 /* ProvisioningExpiryView.swift */,
+				A1B2C3D4B6 /* Components */,
+				A1B2C3D4B7 /* Sheets */,
+				A1B2C3D5B1 /* VoiceRecord */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B5 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4F1 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B6 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E7 /* DaysHeaderView.swift */,
+				A1B2C3D4E8 /* HabitRowView.swift */,
+				A1B2C3D4E9 /* GroupRowView.swift */,
+				A1B2C3D4FA /* ButtonStyles.swift */,
+			A1B2C3DA01 /* DiagnosticsLogView.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		A1B2C3D4B7 /* Sheets */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4EA /* AddHabitSheet.swift */,
+				A1B2C3D4EB /* EditHabitSheet.swift */,
+				A1B2C3D4EC /* EditGroupSheet.swift */,
+				A1B2C3D4ED /* SettingsSheet.swift */,
+				A1B2C3D4EE /* CalendarSheet.swift */,
+			);
+			path = Sheets;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9F81CE622F3F64DC006EDEF5 /* HabitWidget.Extension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9F81CE7A2F3F64DE006EDEF5 /* Build configuration list for PBXNativeTarget "HabitWidget.Extension" */;
+			buildPhases = (
+				9F81CE5F2F3F64DC006EDEF5 /* Sources */,
+				9F81CE602F3F64DC006EDEF5 /* Frameworks */,
+				9F81CE612F3F64DC006EDEF5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9F81CE692F3F64DC006EDEF5 /* HabitWidget. */,
+			);
+			name = HabitWidget.Extension;
+			packageProductDependencies = (
+			);
+			productName = HabitWidget.Extension;
+			productReference = 9F81CE632F3F64DC006EDEF5 /* HabitWidget.Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		A1B2C3D4C0 /* HabitTracker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D490 /* Build configuration list for PBXNativeTarget "HabitTracker" */;
+			buildPhases = (
+				A1B2C3D4C1 /* Sources */,
+				A1B2C3D4A0 /* Frameworks */,
+				A1B2C3D4C2 /* Resources */,
+				9F81CE762F3F64DE006EDEF5 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9F81CE742F3F64DE006EDEF5 /* PBXTargetDependency */,
+			);
+			name = HabitTracker;
+			productName = HabitTracker;
+			productReference = A1B2C3D4D0 /* HabitTracker.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1B2C3D480 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2620;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					9F81CE622F3F64DC006EDEF5 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					A1B2C3D4C0 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = A1B2C3D481 /* Build configuration list for PBXProject "HabitTracker" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				ru,
+			);
+			mainGroup = A1B2C3D4B0;
+			productRefGroup = A1B2C3D4B2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1B2C3D4C0 /* HabitTracker */,
+				9F81CE622F3F64DC006EDEF5 /* HabitWidget.Extension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9F81CE612F3F64DC006EDEF5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4C2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D414 /* Assets.xcassets in Resources */,
+				A1B2C3D415 /* Preview Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9F81CE5F2F3F64DC006EDEF5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4C1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D401 /* HabitTrackerApp.swift in Sources */,
+				A1B2C3D402 /* ContentView.swift in Sources */,
+				A1B2C3D403 /* Habit.swift in Sources */,
+				A1B2C3D404 /* HabitGroup.swift in Sources */,
+				A1B2C3D405 /* HabitStore.swift in Sources */,
+				A1B2C3D406 /* DateHelper.swift in Sources */,
+				A1B2C3D407 /* DaysHeaderView.swift in Sources */,
+				A1B2C3D408 /* HabitRowView.swift in Sources */,
+				A1B2C3D409 /* GroupRowView.swift in Sources */,
+				A1B2C3D420 /* ButtonStyles.swift in Sources */,
+				A1B2C3D421 /* DiagnosticsLogView.swift in Sources */,
+				A1B2C3D410 /* AddHabitSheet.swift in Sources */,
+				A1B2C3D411 /* EditHabitSheet.swift in Sources */,
+				A1B2C3D412 /* EditGroupSheet.swift in Sources */,
+				A1B2C3D413 /* SettingsSheet.swift in Sources */,
+				A1B2C3D416 /* CalendarSheet.swift in Sources */,
+				A1B2C3D506 /* Secrets.swift in Sources */,
+				A1B2C3D50C /* VoiceRecordConfig.swift in Sources */,
+				A1B2C3D501 /* AppGroupContainer.swift in Sources */,
+				A1B2C3D502 /* AudioSessionManager.swift in Sources */,
+				A1B2C3D507 /* SonioxTokenMint.swift in Sources */,
+				A1B2C3D503 /* DictationSession.swift in Sources */,
+				A1B2C3D50D /* RecordingAttributes.swift in Sources */,
+				A1B2C3D504 /* RecordingActivityManager.swift in Sources */,
+				A1B2C3D50E /* VoiceRecordIntents.swift in Sources */,
+				A1B2C3D512 /* VoiceRecordShortcuts.swift in Sources */,
+				A1B2C3D513 /* LiveActivityKickoff.swift in Sources */,
+				A1B2C3D514 /* ProvisioningInfo.swift in Sources */,
+				A1B2C3D515 /* ProvisioningExpiryView.swift in Sources */,
+				A1B2C3D516 /* MicSourcePicker.swift in Sources */,
+				A1B2C3D517 /* PersistentActivityToggle.swift in Sources */,
+				A1B2C3D518 /* AudioSessionIndicator.swift in Sources */,
+				A1B2C3D505 /* RecordingCoordinator.swift in Sources */,
+				A1B2C3D508 /* TranscriptStore.swift in Sources */,
+				A1B2C3D50F /* ReloadSession.swift in Sources */,
+				A1B2C3D510 /* TabRouter.swift in Sources */,
+				A1B2C3D511 /* VRLog.swift in Sources */,
+				A1B2C3D509 /* VoiceRecordTabView.swift in Sources */,
+				A1B2C3D50A /* VoiceSettingsSheet.swift in Sources */,
+				A1B2C3D50B /* TranscriptHistoryView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9F81CE742F3F64DE006EDEF5 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9F81CE622F3F64DC006EDEF5 /* HabitWidget.Extension */;
+			targetProxy = 9F81CE732F3F64DE006EDEF5 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		9F81CE772F3F64DE006EDEF5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = "HabitWidget./HabitWidget.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = BFRL65L66U;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HabitWidget./Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = HabitWidget.;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.habittracker.swift.HabitWidget-";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WIDGET_EXTENSION DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		9F81CE782F3F64DE006EDEF5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = "HabitWidget./HabitWidget.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = BFRL65L66U;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HabitWidget./Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = HabitWidget.;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.habittracker.swift.HabitWidget-";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "WIDGET_EXTENSION $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A1B2C3D482 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A1B2C3D483 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A1B2C3D491 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HabitTracker/HabitTracker.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"HabitTracker/Preview Content\"";
+				DEVELOPMENT_TEAM = BFRL65L66U;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HabitTracker/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Habit Tracker";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.habittracker.swift;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1B2C3D492 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HabitTracker/HabitTracker.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"HabitTracker/Preview Content\"";
+				DEVELOPMENT_TEAM = BFRL65L66U;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HabitTracker/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Habit Tracker";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.habittracker.swift;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9F81CE7A2F3F64DE006EDEF5 /* Build configuration list for PBXNativeTarget "HabitWidget.Extension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9F81CE772F3F64DE006EDEF5 /* Debug */,
+				9F81CE782F3F64DE006EDEF5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D481 /* Build configuration list for PBXProject "HabitTracker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D482 /* Debug */,
+				A1B2C3D483 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D490 /* Build configuration list for PBXNativeTarget "HabitTracker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D491 /* Debug */,
+				A1B2C3D492 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A1B2C3D480 /* Project object */;
+}
