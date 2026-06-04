@@ -246,6 +246,24 @@ struct VoiceRecordTabView: View {
                             .tint(isCopiedFlash ? .green : .blue)
                             .animation(.easeInOut(duration: 0.15), value: isCopiedFlash)
 
+                            // +Notes: promote the just-recorded entry to a note
+                            // (its auto-derived title is kept). It's a toggle —
+                            // once added it shows a filled/checked state, and a
+                            // second tap removes it from Notes.
+                            let isNote = recorder.lastEntryIsNote
+                            Button {
+                                recorder.toggleLastEntryNote()
+                            } label: {
+                                if isNote {
+                                    Label("In Notes", systemImage: "checkmark.circle.fill")
+                                } else {
+                                    Label("Notes", systemImage: "note.text.badge.plus")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(isNote ? .yellow : .blue)
+                            .animation(.easeInOut(duration: 0.15), value: isNote)
+
                             ShareLink(item: combined) {
                                 Label("Share", systemImage: "square.and.arrow.up")
                             }

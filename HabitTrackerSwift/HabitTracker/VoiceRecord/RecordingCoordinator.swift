@@ -124,6 +124,7 @@ final class RecordingCoordinator: ObservableObject {
         VRLog.d("Coord", "start() — go")
         finalText = ""
         partialText = ""
+        lastEntryId = nil   // new recording → +Notes targets the upcoming entry
         bufferedSeconds = 0
         lastError = nil
         isWSConnected = false

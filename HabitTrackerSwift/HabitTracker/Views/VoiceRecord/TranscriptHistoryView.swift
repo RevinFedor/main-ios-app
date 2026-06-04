@@ -440,7 +440,11 @@ private struct EntryRow: View {
             Image(systemName: isCopiedFlash ? "checkmark" : "doc.on.doc")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(isCopiedFlash ? .green : .secondary)
-                .frame(minWidth: 16)
+                // Fixed icon box so the doc↔checkmark swap can't change the
+                // chip's height/width — the two glyphs have different intrinsic
+                // sizes, and letting them drive layout made the capsule (and the
+                // whole List row) re-measure and jump up-then-down on each flip.
+                .frame(width: 16, height: 16)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(
