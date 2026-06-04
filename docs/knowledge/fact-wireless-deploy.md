@@ -9,12 +9,31 @@
 
 Логи каждого запуска: `deploy-logs/deploy-<timestamp>.log` (диагностика, ANSI стрипается) и `deploy-logs/build-<timestamp>.log` (xcodebuild). Папка в `.gitignore`.
 
-## Free dev cycle: 7 дней
+## Free dev cycle: 7 дней — что именно истекает
 
-Provisioning profile у бесплатного Apple ID живёт ~7 дней. После — иконка приложения на iPhone становится с крестиком, запуск выдаёт "Untrusted Developer". Решение: запустить `./deploy.sh` снова — `xcodebuild -allowProvisioningUpdates` (в скрипте) выпускает свежий profile автоматически. USB-кабель не нужен.
+Лимитирует НЕ сертификат, а **provisioning profile**. Это два разных артефакта с разным сроком — частый источник путаницы:
+
+- **Apple Development certificate** (login keychain) живёт **~1 год** (`security find-certificate -c "Apple Development" -p | openssl x509 -dates`). Не он причина 7-дневного цикла.
+- **Provisioning profile** бесплатного Apple ID живёт **7 дней** (`~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.mobileprovision`, поле `ExpirationDate`). Вот он. После истечения иконка на iPhone с крестиком, запуск → "Untrusted Developer".
+
+Счётчик в `ProvisioningExpiryView` (оба Settings sheets) парсит `Bundle.main/embedded.mobileprovision` → `ExpirationDate`. То что показано в app = дата вшитого в установленный .app профиля.
+
+### Обычный `./deploy.sh` НЕ сбрасывает счётчик до 7 дней
+
+`xcodebuild -allowProvisioningUpdates` перевыпускает профиль **только когда он невалиден** (истёк / отсутствует / сертификат не подходит). Пока профиль валиден — xcodebuild берёт **кэш с диска** (`UserData/Provisioning Profiles/`), даже если до истечения 1 день. «Мало дней осталось» для xcodebuild не триггер.
+
+Реальный случай из сессии: юзер собрал билд 3 июня 22:00, но счётчик показывал «1 день, истекает 4 июня 16:16». Проверка `security cms -D -i .../HabitTracker.app/embedded.mobileprovision` показала `created=2026-05-28`, `expires=2026-06-04T13:16Z` (=16:16 MSK). Билд 3 июня **переиспользовал старый профиль от 28 мая**. Это опровергло интуицию «любой ребилд = свежие 7 дней» — она неверна.
+
+### Форсить renewal до 7 дней: `./deploy.sh --renew`
+
+Удаляет **только наши** кэшированные профили (матч по `application-identifier` = `*.com.habittracker.swift[.*]`, чужие проекты не трогает — точка-якорь защищает от prefix-совпадений вроде `swiftEVIL`), после чего у xcodebuild нет кэша → он выпускает свежие профили датой «сегодня» → счётчик = 7 дней. Можно запускать когда угодно (хоть на 6-м дне, не обязательно ждать нуля).
+
+**Данные на iPhone сохраняются.** Удаляются профили **на Mac**, не приложение. Bundle-id не меняется → reinstall это upgrade-install, sandbox (UserDefaults + App Group = привычки + история голоса) не пересоздаётся.
+
+**Что НЕ надо для renewal:** удалять иконку с iPhone руками. Это hard-wipe — sandbox удалится вместе с приложением, все данные пропадут. Данные теряются ТОЛЬКО при: ручном удалении иконки, смене bundle-id, смене App Group id, смене team/Apple ID. `--renew` ни в один случай не попадает.
 
 При **первом** запуске нового сертификата iOS требует ручного Trust:
-Настройки → Основные → пролистать вниз → VPN и управление устройством → ПО разработчика → выбрать Apple ID → Доверять.
+Настройки → Основные → пролистать вниз → VPN и управление устройством → ПО разработчика → выбрать Apple ID → Доверять. (Renewal профиля тем же сертификатом повторный Trust НЕ требует — Trust привязан к сертификату, а он живёт год.)
 
 ## Сборка требует iOS Simulator
 

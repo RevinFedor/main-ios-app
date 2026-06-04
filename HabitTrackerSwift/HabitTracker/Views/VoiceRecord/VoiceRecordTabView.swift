@@ -264,6 +264,20 @@ struct VoiceRecordTabView: View {
                     proxy.scrollTo("bottomAnchor", anchor: .bottom)
                 }
             }
+            // When recording ends, the Copy / +Notes / Share row appears below
+            // the transcript, making the content taller. Without this the view
+            // stays scrolled where it was and those buttons end up clipped off
+            // the bottom (the user had to scroll further by hand). Scroll to the
+            // bottom anchor once the action row has laid out.
+            .onChange(of: recorder.isRecording) { _, recording in
+                guard !recording, !combined.isEmpty else { return }
+                Task {
+                    try? await Task.sleep(for: .seconds(0.05))
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                    }
+                }
+            }
         }
     }
 

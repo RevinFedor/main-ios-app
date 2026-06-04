@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import SwiftUI
 import UIKit
 import WidgetKit
 
@@ -39,6 +40,10 @@ final class RecordingCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isWSConnected: Bool = false
     @Published private(set) var history: [TranscriptEntry] = []
+    // Id of the most recently appended recording — the one whose transcript is
+    // still shown on the main screen after stop. Drives the +Notes toggle so it
+    // promotes/demotes exactly that entry. Reset when a new recording starts.
+    @Published private(set) var lastEntryId: UUID? = nil
     @Published private(set) var reloadingId: UUID? = nil
     @Published private(set) var autoCopiedAt: Date? = nil
     // True only while the current stop was triggered by a background AppIntent
@@ -254,27 +259,57 @@ final class RecordingCoordinator: ObservableObject {
         history = TranscriptStore.shared.loadAll()
     }
 
-    // Which neighbour a merge targets. history is sorted newest-first, so the
-    // entry shown ABOVE a row is newer (index−1) and the one BELOW is older
-    // (index+1). The arrow icons map to visual direction, not chronology.
-    enum MergeDirection { case up, down }
-
-    // Merge an entry with its visual neighbour (up = the card above, down =
-    // the card below). No-op at the respective edge of the list. Store.merge
-    // handles chronological text/audio concat + averaged date; we just resolve
-    // the neighbour by position and refresh.
-    func mergeEntry(id: UUID, direction: MergeDirection) {
-        guard let idx = history.firstIndex(where: { $0.id == id }) else { return }
-        let neighborIdx = direction == .up ? idx - 1 : idx + 1
-        guard history.indices.contains(neighborIdx) else {
-            VRLog.d("Coord", "merge \(direction) ignored — at edge (idx=\(idx))")
+    // Merge the SOURCE entry into the TARGET entry. The source (the tapped
+    // card) is secondary: its text appends to the END of the target, and the
+    // target keeps its title, date and position. The caller resolves source &
+    // target from the VISIBLE list (which may be filtered by tab), so we take
+    // both ids explicitly rather than recomputing a neighbour from full
+    // history. See Store.mergeDirectional — matches the user's "приоритет у той
+    // заметки, в которую идёт мердж" model.
+    //
+    // async + Task.detached: mergeDirectional concatenates two .wav payloads
+    // and rewrites JSON, and loadAll() re-reads it — all synchronous disk I/O.
+    // Doing that on the main actor froze the UI for ~0.5–1s right as the merge
+    // animation should start (the main thread couldn't commit the first frame
+    // until the I/O finished). We hand the heavy work to a background task and
+    // only hop back to the main actor to publish `history`, so the animation
+    // starts at the next vsync and the file work is invisible.
+    func mergeEntry(sourceId: UUID, targetId: UUID) async {
+        guard sourceId != targetId,
+              history.contains(where: { $0.id == sourceId }),
+              history.contains(where: { $0.id == targetId }) else {
+            VRLog.d("Coord", "merge ignored — missing source/target")
             return
         }
-        let neighborId = history[neighborIdx].id
-        VRLog.d("Coord", "merge \(direction): \(id) + \(neighborId)")
-        TranscriptStore.shared.merge(id, neighborId)
+        VRLog.d("Coord", "merge: source=\(sourceId) → target=\(targetId)")
+        let reloaded = await Task.detached(priority: .userInitiated) {
+            TranscriptStore.shared.mergeDirectional(source: sourceId, into: targetId)
+            return TranscriptStore.shared.loadAll()
+        }.value
+        // Back on the main actor. Animate the data swap so List plays its
+        // native row-removal (neighbours slide up to close the gap).
+        withAnimation(.easeInOut(duration: 0.28)) {
+            history = reloaded
+        }
+    }
+
+    // Whether the most-recent recording (the one shown on the main screen) is
+    // currently a note. Drives the +Notes button's toggled state.
+    var lastEntryIsNote: Bool {
+        guard let id = lastEntryId else { return false }
+        return history.first(where: { $0.id == id })?.isNote ?? false
+    }
+
+    // +Notes button: toggle the latest recording's note status. Promote with
+    // the explicit flag (title untouched), or demote. No-op if the entry has a
+    // custom title (it's a note regardless of the flag) — handled by isNote.
+    func toggleLastEntryNote() {
+        guard let id = lastEntryId else { return }
+        let makeNote = !lastEntryIsNote
+        TranscriptStore.shared.setNoteFlag(id: id, flag: makeNote)
         history = TranscriptStore.shared.loadAll()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        VRLog.d("Coord", "toggleLastEntryNote: \(id) → note=\(makeNote)")
     }
 
     // Change a history entry's timestamp (from the date editor sheet). Resorts.
@@ -524,7 +559,8 @@ extension RecordingCoordinator: DictationSessionDelegate {
                 }
             }
             if !text.isEmpty || savedAudioPath != nil {
-                TranscriptStore.shared.append(text: text, audioPath: savedAudioPath)
+                let appended = TranscriptStore.shared.append(text: text, audioPath: savedAudioPath)
+                self.lastEntryId = appended.id
                 self.history = TranscriptStore.shared.loadAll()
             }
             // Always-active session pattern: never deactivate. Only re-apply

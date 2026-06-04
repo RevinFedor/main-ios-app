@@ -1,26 +1,17 @@
-=== Indexer started: Sun May 31 00:16:15 MSK 2026 ===
-RESPONSE for docs/knowledge/fact-wireless-deploy.md: ```json
+=== Indexer started: Sun May 31 02:22:56 MSK 2026 ===
+RESPONSE for docs/methodology/переносимый-дизайн.md: ```json
 {
-  "path": "docs/knowledge/fact-wireless-deploy.md",
+  "path": "docs/methodology/переносимый-дизайн.md",
   "type": "fact",
   "explicit": [
-    "iOS wireless deploy",
-    "Xcode CoreDevice",
-    "provisioning profile auto-refresh",
-    "iOS Sim
-RESPONSE for docs/methodology/диагностика-apple.md: ```json
+    "UX design principles",
+    "iOS platform constraints",
+    "Live Activity manageme
+RESPONSE for docs/knowledge/fact-voice-record.md: ```json
 {
-  "path": "docs/methodology/диагностика-apple.md",
+  "path": "docs/knowledge/fact-voice-record.md",
   "type": "fact",
   "explicit": [
-    "deterministic_diagnosis",
-    "exclusion_method_antipattern",
-    "xcode_tooling_manageme
-RESPONSE for docs/knowledge/fact-habit-tracker.md: ```json
-{
-  "path": "docs/knowledge/fact-habit-tracker.md",
-  "type": "fact",
-  "explicit": [
-    "Habits tab interaction model",
-    "Gesture-first UI without Edit button",
-    "Tap vs press vs drag 
+    "Voice Record subsystem architecture",
+    "Soniox WebSocket streaming protocol",
+    "AppIntents integ

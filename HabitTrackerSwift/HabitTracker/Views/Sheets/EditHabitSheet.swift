@@ -77,7 +77,7 @@ struct EditHabitSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Отмена") { dismiss() }
+                    Button("Отмена") { dismissFast() }
                         .foregroundColor(.blue)
                 }
             }
@@ -129,12 +129,22 @@ struct EditHabitSheet: View {
             color: selectedColor,
             groupId: groupId
         )
-        dismiss()
+        dismissFast()
     }
 
     private func deleteHabit() {
         store.deleteHabit(habit.id, groupId: groupId)
-        dismiss()
+        dismissFast()
+    }
+
+    // Dismiss WITHOUT the ~0.35s system slide-down. During that animation the
+    // list underneath doesn't take taps ("после Отмены некоторое время не могу
+    // выделять"). Disabling the animation closes the sheet instantly, so the
+    // screen is interactive immediately. See docs/knowledge/fact-habit-tracker.md.
+    private func dismissFast() {
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { dismiss() }
     }
 }
 

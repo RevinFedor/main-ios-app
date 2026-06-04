@@ -1,10 +1,82 @@
 import AVFoundation
 import SwiftUI
 
+// Top filter for the History list, in segmented-control order so the default
+// sits in the middle:
+//   • All    — every recording.
+//   • Voices — raw voice recordings only: everything EXCEPT curated notes
+//              (entries the user hasn't given a custom title). This is the
+//              default tab.
+//   • Notes  — only the entries the user curated with a custom title (the
+//              yellow note-badge ones). An entry leaves Voices and appears
+//              here the moment its title is edited.
+private enum HistoryFilter: String, CaseIterable {
+    case all = "All"
+    case voices = "Voices"
+    case notes = "Notes"
+}
+
 struct TranscriptHistoryView: View {
     @EnvironmentObject var recorder: RecordingCoordinator
     @Environment(\.dismiss) var dismiss
     @StateObject private var player = AudioPlayerController()
+    @State private var filter: HistoryFilter = .voices
+    // Two-phase merge animation. Phase 1: a short render-only effect on the
+    // source row (fade + small slide toward its neighbour) set via @State.
+    // Phase 2: commit the data merge inside withAnimation, letting List's own
+    // native row-removal slide every row below up to close the gap in one
+    // coordinated motion. We do NOT collapse the row's height with scaleEffect —
+    // that's render-only, doesn't reflow the List, and left a gap while the
+    // neighbours stayed put. List owns the reflow; we only own the leave.
+    // mergeEdge = the neighbour's direction: ↑ → .top (slides up toward the
+    // card above), ↓ → .bottom.
+    @State private var mergingId: UUID? = nil
+    @State private var mergeEdge: Edge = .top
+    // Phase 1: short render-only "card leaving" effect before the data commit.
+    // (Phase 2's reflow timing lives in mergeEntry's own withAnimation.)
+    private static let mergePhase1 = 0.16
+    // Prepared in onAppear so the first merge's haptic doesn't pay the ~200ms
+    // Taptic Engine cold-start on the main thread (one of the lag sources).
+    private let mergeHaptic = UINotificationFeedbackGenerator()
+
+    // The history filtered by the active tab. Voices = everything that is NOT
+    // a note; Notes = only notes; All = everything. Note status is the model's
+    // single source of truth (explicit +Notes flag OR a custom title).
+    private var filteredEntries: [TranscriptEntry] {
+        switch filter {
+        case .all:    return recorder.history
+        case .voices: return recorder.history.filter { !$0.isNote }
+        case .notes:  return recorder.history.filter { $0.isNote }
+        }
+    }
+
+    // Per-tab empty placeholder.
+    @ViewBuilder
+    private var emptyState: some View {
+        switch filter {
+        case .all:
+            ContentUnavailableView(
+                "No recordings yet",
+                systemImage: "waveform",
+                description: Text("Recordings will appear here.")
+            )
+            .listRowBackground(Color.clear)
+        case .voices:
+            ContentUnavailableView(
+                "No voice recordings",
+                systemImage: "waveform",
+                description: Text("Recordings you haven't titled appear here.")
+            )
+            .listRowBackground(Color.clear)
+        case .notes:
+            ContentUnavailableView(
+                "No notes yet",
+                systemImage: "note.text",
+                description: Text("Give a recording a title to keep it here.")
+            )
+            .listRowBackground(Color.clear)
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -17,46 +89,28 @@ struct TranscriptHistoryView: View {
                     )
                     .listRowBackground(Color.clear)
                 } else {
-                    let entries = recorder.history
+                    let entries = filteredEntries
+                    if entries.isEmpty {
+                        emptyState
+                    }
                     ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                        EntryRow(
-                            entry: entry,
-                            isCurrentlyPlaying: player.currentId == entry.id,
-                            isReloading: recorder.reloadingId == entry.id,
-                            // newest-first list: a card can merge "up" with the
-                            // one above it (index>0) and "down" with the one
-                            // below it (index<last).
-                            canMergeUp: index > 0,
-                            canMergeDown: index < entries.count - 1,
-                            onPlayTap: { player.toggle(entry: entry) },
-                            onReloadTap: {
-                                Task { await recorder.reloadTranscript(id: entry.id) }
-                            },
-                            onDeleteTap: {
-                                if player.currentId == entry.id { player.stop() }
-                                recorder.deleteHistory(id: entry.id)
-                            },
-                            onMergeUp: {
-                                if player.currentId == entry.id { player.stop() }
-                                recorder.mergeEntry(id: entry.id, direction: .up)
-                            },
-                            onMergeDown: {
-                                if player.currentId == entry.id { player.stop() }
-                                recorder.mergeEntry(id: entry.id, direction: .down)
-                            },
-                            onEditDate: { newDate in
-                                recorder.updateEntryDate(id: entry.id, date: newDate)
-                            },
-                            onEditTitle: { newTitle in
-                                recorder.updateEntryTitle(id: entry.id, title: newTitle)
-                            }
-                        )
+                        row(index: index, entry: entry, entries: entries)
                     }
                 }
             }
-            .navigationTitle("History")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    // Three tabs now (All · Voices · Notes) — let the segmented
+                    // control take the available centre width instead of
+                    // .fixedSize() so it doesn't crowd the Done button.
+                    Picker("Filter", selection: $filter) {
+                        ForEach(HistoryFilter.allCases, id: \.self) { f in
+                            Text(f.rawValue).tag(f)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
@@ -67,7 +121,109 @@ struct TranscriptHistoryView: View {
                 }
             }
         }
+        .onAppear { mergeHaptic.prepare() }
         .onDisappear { player.stop() }
+    }
+
+    // Extracted from the ForEach body: the full EntryRow + swipeActions for one
+    // history entry. Pulled into its own @ViewBuilder because the inline
+    // expression grew large enough to blow the Swift type-checker's budget
+    // ("unable to type-check in reasonable time").
+    @ViewBuilder
+    private func row(index: Int, entry: TranscriptEntry, entries: [TranscriptEntry]) -> some View {
+        // Resolve merge neighbours from the VISIBLE (filtered) list, not the
+        // full history. Under the Voices tab notes are hidden, so the card
+        // shown above/below on screen is not necessarily the adjacent entry in
+        // recorder.history — merging must follow what the user sees. We pass the
+        // neighbour's explicit id so the coordinator merges into the right one.
+        let upTargetId   = index > 0 ? entries[index - 1].id : nil
+        let downTargetId = index < entries.count - 1 ? entries[index + 1].id : nil
+        EntryRow(
+            entry: entry,
+            isCurrentlyPlaying: player.currentId == entry.id,
+            isReloading: recorder.reloadingId == entry.id,
+            isMerging: mergingId == entry.id,
+            mergeEdge: mergeEdge,
+            onPlayTap: { player.toggle(entry: entry) },
+            onReloadTap: { Task { await recorder.reloadTranscript(id: entry.id) } },
+            onDeleteTap: {
+                if player.currentId == entry.id { player.stop() }
+                recorder.deleteHistory(id: entry.id)
+            },
+            onEditDate: { newDate in recorder.updateEntryDate(id: entry.id, date: newDate) },
+            onEditTitle: { newTitle in recorder.updateEntryTitle(id: entry.id, title: newTitle) }
+        )
+        // Swipe-left reveals three stacked actions: merge ↑, merge ↓, Delete.
+        // Native .swipeActions (we're in a List) handles the partial reveal and
+        // the conflict with List scroll + system back-swipe that a custom
+        // DragGesture would fight (see fact-habit-tracker.md::gesture conflicts).
+        // SwiftUI lays trailing actions out from the edge inward, so the first
+        // button sits nearest the edge. We keep Delete first so a full swipe
+        // still deletes; the merge arrows follow. Merge buttons are disabled at
+        // the list edges by simply not adding them.
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                if player.currentId == entry.id { player.stop() }
+                recorder.deleteHistory(id: entry.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .tint(.red)
+
+            if let targetId = downTargetId {
+                Button {
+                    if player.currentId == entry.id { player.stop() }
+                    animateMerge(sourceId: entry.id, targetId: targetId, edge: .bottom)
+                } label: {
+                    Label("Merge down", systemImage: "arrow.down.to.line")
+                }
+                .tint(.gray)
+            }
+            if let targetId = upTargetId {
+                Button {
+                    if player.currentId == entry.id { player.stop() }
+                    animateMerge(sourceId: entry.id, targetId: targetId, edge: .top)
+                } label: {
+                    Label("Merge up", systemImage: "arrow.up.to.line")
+                }
+                .tint(.gray)
+            }
+        }
+    }
+
+    // Two-phase merge. Phase 1: flag the source row so it fades + slides toward
+    // its target neighbour. Phase 2, after the animation: commit the merge into
+    // the explicit target, letting List's native removal slide the rows below
+    // up to close the gap. source/target are resolved from the visible list
+    // (see row(...)) so it works under any tab filter.
+    private func animateMerge(sourceId: UUID, targetId: UUID, edge: Edge) {
+        mergeEdge = edge
+        // Haptic fired here (already prepared in onAppear) so it lands at the
+        // tap, not after the disk work; firing it cold or post-merge added its
+        // own ~200ms Taptic warm-up to the perceived lag.
+        mergeHaptic.notificationOccurred(.success)
+        mergeHaptic.prepare()  // re-arm for the next merge
+        // Phase 1 — brief render-only effect on the source row (fade + slide
+        // toward the neighbour). This is NOT a layout collapse: scaleEffect /
+        // offset don't reflow the List, so trying to "shrink the height" here
+        // just leaves a gap while neighbours stay put (the bug we had). Keep it
+        // short; its only job is to show the card leaving toward its target.
+        withAnimation(.easeIn(duration: Self.mergePhase1)) {
+            mergingId = sourceId
+        }
+        // Phase 2 — commit the data merge. mergeEntry is async: it does the
+        // .wav concat + JSON I/O on a background task and animates the history
+        // swap on the main actor (List's native row-removal slides everything
+        // below up). Awaiting off the main thread is what removed the 0.5–1s
+        // freeze at the start of the animation.
+        Task {
+            // Let the phase-1 leave animation play before committing (async
+            // sleep — does NOT block the main thread the way the old
+            // DispatchQueue.asyncAfter + sync I/O did).
+            try? await Task.sleep(for: .seconds(Self.mergePhase1))
+            await recorder.mergeEntry(sourceId: sourceId, targetId: targetId)
+            mergingId = nil
+        }
     }
 }
 
@@ -77,17 +233,19 @@ private struct EntryRow: View {
     let entry: TranscriptEntry
     let isCurrentlyPlaying: Bool
     let isReloading: Bool
-    let canMergeUp: Bool
-    let canMergeDown: Bool
+    // Drives the "being absorbed into a neighbour" animation: while true the
+    // row slides toward mergeEdge and fades, just before it's removed from the
+    // data. mergeEdge = the neighbour's side (.top for ↑).
+    let isMerging: Bool
+    let mergeEdge: Edge
     let onPlayTap: () -> Void
     let onReloadTap: () -> Void
     let onDeleteTap: () -> Void
-    let onMergeUp: () -> Void
-    let onMergeDown: () -> Void
     let onEditDate: (Date) -> Void
     let onEditTitle: (String?) -> Void
 
-    @State private var copiedFlashAt: Date? = nil
+    // Briefly true right after a copy so the copy button shows a checkmark.
+    @State private var isCopiedFlash = false
     @State private var expanded = false
     @State private var showDateEditor = false
     @State private var showTitleEditor = false
@@ -97,21 +255,23 @@ private struct EntryRow: View {
     // to the full transcript.
     private static let collapsedLineLimit = 3
 
-    private var isCopiedFlash: Bool {
-        guard let stamp = copiedFlashAt else { return false }
-        return Date().timeIntervalSince(stamp) < 1.5
-    }
+    // Drives the note-badge icon on the title chip — shown when the entry is a
+    // note (explicit +Notes flag OR a custom title), per the model.
+    private var hasCustomTitle: Bool { entry.isNote }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // ── Header: editable title chip (left) · date chip (right) ──
+            // ── Header: editable title chip (left) · copy button (right) ──
+            // The date used to sit here; it moved to the bottom-right corner.
+            // The copy button takes its place (same chip height/style) and
+            // flips to a checkmark briefly when tapped.
             HStack(spacing: 6) {
                 titleChip
                 Spacer(minLength: 8)
                 if isReloading {
                     ProgressView().controlSize(.mini).tint(.orange)
                 }
-                dateChip
+                copyButton
             }
 
             // ── Transcript (tap to expand/collapse) ──
@@ -133,68 +293,53 @@ private struct EntryRow: View {
                     .onTapGesture {
                         expanded.toggle()
                     }
-                if entry.text.count > 110 {
-                    HStack(spacing: 3) {
-                        Button {
-                            expanded.toggle()
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                                    .font(.caption2.bold())
-                                Text(expanded ? "Show less" : "Show more")
-                                    .font(.caption.bold())
-                            }
-                            // Brighter than the old .blue but not pure white —
-                            // a light tint that reads as interactive without
-                            // competing with the transcript.
-                            .foregroundStyle(Color(hex: "8AB4F8"))
-                        }
-                        .buttonStyle(.plain)
-                        Spacer(minLength: 8)
-                        // Total character count, pushed to the trailing edge.
-                        // Same colour family as the body text, just slightly
-                        // dimmed so it's secondary but clearly readable.
-                        Text("\(entry.text.count)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-                }
             }
 
-            // ── Action row: Play (left) · merge arrows (right) ──
-            // Copy / Re-transcribe / Delete moved to the long-press context
-            // menu (the user found the duplicated on-card buttons redundant).
-            HStack(spacing: 10) {
-                if entry.audioPath != nil {
-                    iconButton(
-                        systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill",
-                        tint: .blue,
-                        action: onPlayTap
-                    )
+            // ── Footer: Show more + char count (left) · date (right) ──
+            // Date moved here from the header. The char count sits right next
+            // to "Show more" (a couple of px gap) instead of at the far edge.
+            HStack(spacing: 8) {
+                if entry.text.count > 110 {
+                    Button {
+                        expanded.toggle()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                                .font(.caption2.bold())
+                            Text(expanded ? "Show less" : "Show more")
+                                .font(.caption.bold())
+                        }
+                        .foregroundStyle(Color(hex: "8AB4F8"))
+                    }
+                    .buttonStyle(.plain)
+                    // Total character count, right next to Show more.
+                    Text("\(entry.text.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.75))
                 }
-                Spacer()
-                // Merge with the card above (chronologically newer) / below
-                // (older). Disabled at the list edges. Audio + text collapse
-                // into one entry, date averaged. See Coordinator.mergeEntry.
-                iconButton(
-                    systemName: "arrow.up.to.line",
-                    tint: .gray,
-                    disabled: !canMergeUp,
-                    action: onMergeUp
-                )
-                iconButton(
-                    systemName: "arrow.down.to.line",
-                    tint: .gray,
-                    disabled: !canMergeDown,
-                    action: onMergeDown
-                )
+                Spacer(minLength: 8)
+                dateChip
             }
         }
         .padding(.vertical, 4)
+        // Phase-1 "card leaving" effect only: fade out + a small slide toward
+        // the neighbour it's merging into (↑ → up, ↓ → down). Deliberately NOT
+        // a height/scale collapse — scaleEffect is render-only and doesn't
+        // reflow the List, so collapsing the scale just left a gap while the
+        // rows below stayed put (the bug). The actual gap-closing reflow is
+        // done by List's native row removal in phase 2 (see animateMerge).
+        .offset(y: isMerging ? (mergeEdge == .top ? -22 : 22) : 0)
+        .opacity(isMerging ? 0 : 1.0)
         .contextMenu {
+            if entry.audioPath != nil {
+                Button(action: onPlayTap) {
+                    Label(isCurrentlyPlaying ? "Pause" : "Play",
+                          systemImage: isCurrentlyPlaying ? "pause.fill" : "play.fill")
+                }
+            }
             if !entry.text.isEmpty {
                 Button {
-                    UIPasteboard.general.string = entry.text
+                    UIPasteboard.general.string = copyPayload
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                 } label: { Label("Copy Text", systemImage: "doc.on.doc") }
             }
@@ -227,6 +372,16 @@ private struct EntryRow: View {
             showTitleEditor = true
         } label: {
             HStack(spacing: 5) {
+                // Shown only when the user gave this entry a custom title —
+                // signals "this is a curated voice NOTE", not a raw transcript.
+                // note.text reads as a written note; sized like the old mic
+                // glyph (.caption2). The mic icon is intentionally NOT brought
+                // back — this badge means something different.
+                if hasCustomTitle {
+                    Image(systemName: "note.text")
+                        .font(.caption2)
+                        .foregroundStyle(.yellow.opacity(0.9))
+                }
                 Text(entry.displayTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.9))
@@ -268,17 +423,49 @@ private struct EntryRow: View {
         .accessibilityLabel("Edit date and time")
     }
 
-    @ViewBuilder
-    private func iconButton(systemName: String, tint: Color, disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 36, height: 32)
+    // Copy pill on the RIGHT of the header (where the date used to be). Same
+    // chip height/style as the title/date chips; flips to a checkmark for a
+    // moment after a tap to confirm. Copies the same payload as the context
+    // menu's "Copy Text" (date header + blank line + transcript).
+    private var copyButton: some View {
+        Button {
+            UIPasteboard.general.string = copyPayload
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            withAnimation(.easeOut(duration: 0.15)) { isCopiedFlash = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.2))
+                withAnimation(.easeOut(duration: 0.2)) { isCopiedFlash = false }
+            }
+        } label: {
+            Image(systemName: isCopiedFlash ? "checkmark" : "doc.on.doc")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isCopiedFlash ? .green : .secondary)
+                .frame(minWidth: 16)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(Color.white.opacity(0.08))
+                )
         }
-        .buttonStyle(.bordered)
-        .tint(tint)
-        .disabled(disabled)
+        .buttonStyle(.plain)
+        .accessibilityLabel("Copy text")
     }
+
+    // Clipboard payload for both the copy button and the context-menu copy:
+    //   date: 2026-05-31 07:10:38
+    //   <blank line>
+    //   <transcript>
+    private var copyPayload: String {
+        "date: \(Self.copyDateFormatter.string(from: entry.timestamp))\n\n\(entry.text)"
+    }
+
+    // Fixed yyyy-MM-dd HH:mm:ss stamp for the copy header (not locale-formatted
+    // — the user asked for this exact shape).
+    private static let copyDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
 }
 
 // ─── Date editor sheet ──────────────────────────────────────────────────

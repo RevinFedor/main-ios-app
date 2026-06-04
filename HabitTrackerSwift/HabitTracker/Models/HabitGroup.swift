@@ -108,4 +108,12 @@ enum HabitItem: Identifiable, Equatable, Hashable {
             return "Group(\(group.name), \(group.habits.count) habits)"
         }
     }
+
+    /// Plain display name (used by the drag preview).
+    var debugTitle: String {
+        switch self {
+        case .habit(let habit, _): return habit.name
+        case .group(let group): return group.name
+        }
+    }
 }

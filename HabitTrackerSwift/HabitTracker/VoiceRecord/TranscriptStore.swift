@@ -16,9 +16,23 @@ struct TranscriptEntry: Codable, Identifiable, Hashable {
     // Optional with a nil-default so old JSON (no key) decodes, and existing
     // constructors that don't pass it keep compiling — read via `noteCount`.
     var mergeCount: Int? = nil
+    // Explicit "this is a note" status, set by the +Notes button. Kept separate
+    // from `title` so an entry can be promoted to a note WITHOUT renaming (the
+    // title stays auto-derived). Optional + nil-default for clean Codable
+    // migration of old JSON. Read via `isNote`.
+    var noteFlag: Bool? = nil
 
     // mergeCount with the nil (legacy / fresh) case normalized to 1.
     var noteCount: Int { max(1, mergeCount ?? 1) }
+
+    // Whether this entry is a "note". True when explicitly promoted via +Notes
+    // OR when the user gave it a custom title (the original heuristic, kept so
+    // pre-flag entries with titles still count as notes). Drives the Notes tab
+    // and the note badge.
+    var isNote: Bool {
+        if noteFlag == true { return true }
+        return !(title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
 
     // Title shown on the card: the user's override if present, otherwise the
     // first ~28 characters of the transcript trimmed at a word boundary with a
@@ -114,7 +128,8 @@ final class TranscriptStore {
                     text: text,
                     audioPath: old.audioPath,
                     title: old.title,
-                    mergeCount: old.mergeCount
+                    mergeCount: old.mergeCount,
+                    noteFlag: old.noteFlag
                 )
                 self.writeAll(all)
             }
@@ -135,7 +150,32 @@ final class TranscriptStore {
                     text: old.text,
                     audioPath: old.audioPath,
                     title: (trimmed?.isEmpty ?? true) ? nil : trimmed,
-                    mergeCount: old.mergeCount
+                    mergeCount: old.mergeCount,
+                    noteFlag: old.noteFlag
+                )
+                self.writeAll(all)
+            }
+        }
+    }
+
+    // Toggle an entry's note status (the +Notes button). `flag: true` promotes
+    // it to a note (explicit flag; title untouched so it stays auto-derived
+    // unless renamed). `flag: false` clears the explicit flag — note that an
+    // entry with a custom title still reads as a note via `isNote`, so this
+    // only un-notes entries that were promoted purely by +Notes.
+    func setNoteFlag(id: UUID, flag: Bool) {
+        ioQueue.sync {
+            var all = self.loadAllUnsorted()
+            if let idx = all.firstIndex(where: { $0.id == id }) {
+                let old = all[idx]
+                all[idx] = TranscriptEntry(
+                    id: old.id,
+                    timestamp: old.timestamp,
+                    text: old.text,
+                    audioPath: old.audioPath,
+                    title: old.title,
+                    mergeCount: old.mergeCount,
+                    noteFlag: flag ? true : nil
                 )
                 self.writeAll(all)
             }
@@ -156,82 +196,69 @@ final class TranscriptStore {
                     text: old.text,
                     audioPath: old.audioPath,
                     title: old.title,
-                    mergeCount: old.mergeCount
+                    mergeCount: old.mergeCount,
+                    noteFlag: old.noteFlag
                 )
                 self.writeAll(all)
             }
         }
     }
 
-    // Merge two history entries into one. `firstId` and `secondId` are merged
-    // in CHRONOLOGICAL order (older timestamp first) regardless of the order
-    // they're passed, so the resulting text and audio read naturally forward
-    // in time:
-    //   • text   — older.text + "\n" + newer.text (blank parts skipped)
-    //   • audio  — older.wav PCM ++ newer.wav PCM concatenated into a single
-    //              fresh .wav; both source .wav files are deleted afterwards.
-    //              If only one side has audio, that audio is reused as-is.
-    //   • date   — the AVERAGE of the two timestamps (midpoint), per the
-    //              user's spec ("дату просто усреднить").
-    // The new merged entry replaces both originals in place (positioned by its
-    // averaged date on the next sort). Returns the merged entry, or nil if
-    // either id is missing.
+    // Directional merge: fold the SOURCE entry (the card whose arrow the user
+    // tapped) into the TARGET neighbour, and keep the TARGET's identity. This
+    // is the user's mental model: the tapped note is secondary — it appends to
+    // the END of the note it merges into, and the target keeps its title, date
+    // and list position ("приоритет у той заметки, в которую идёт мердж").
+    //   • text   — target.text + "\n" + source.text (target first, blanks skipped)
+    //   • audio  — target.wav PCM ++ source.wav PCM (target first), one fresh
+    //              .wav; sources deleted unless reused single-sided.
+    //   • title  — target's title (source's is dropped).
+    //   • date   — target's timestamp (so position is preserved).
+    //   • count  — summed.
+    // Returns the merged entry, or nil if either id is missing.
     @discardableResult
-    func merge(_ firstId: UUID, _ secondId: UUID) -> TranscriptEntry? {
+    func mergeDirectional(source sourceId: UUID, into targetId: UUID) -> TranscriptEntry? {
         ioQueue.sync {
             var all = self.loadAllUnsorted()
-            guard let i = all.firstIndex(where: { $0.id == firstId }),
-                  let j = all.firstIndex(where: { $0.id == secondId }),
-                  i != j else { return nil }
-            let a = all[i]
-            let b = all[j]
-            // Order the two by time so concatenation is chronological.
-            let older = a.timestamp <= b.timestamp ? a : b
-            let newer = a.timestamp <= b.timestamp ? b : a
+            guard let si = all.firstIndex(where: { $0.id == sourceId }),
+                  let ti = all.firstIndex(where: { $0.id == targetId }),
+                  si != ti else { return nil }
+            let source = all[si]
+            let target = all[ti]
 
-            // Text — join non-empty parts with a newline.
-            let parts = [older.text, newer.text].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            // Text — target first, source appended to the end.
+            let parts = [target.text, source.text]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             let mergedText = parts.joined(separator: "\n")
 
-            // Audio — concat PCM payloads (strip each 44-byte WAV header) in
-            // chronological order, write a single new .wav. Reuse a lone side
-            // if only one has audio.
-            let mergedAudioPath = self.mergeAudio(olderPath: older.audioPath, newerPath: newer.audioPath)
+            // Audio — target audio first, then source audio (mergeAudio's
+            // "older" slot = whichever plays first, here the target).
+            let mergedAudioPath = self.mergeAudio(olderPath: target.audioPath, newerPath: source.audioPath)
 
-            // Date — midpoint of the two timestamps.
-            let midpoint = Date(timeIntervalSince1970:
-                (older.timestamp.timeIntervalSince1970 + newer.timestamp.timeIntervalSince1970) / 2)
+            let mergedCount = target.noteCount + source.noteCount
+            // The result is a note if either side was — a note status shouldn't
+            // be lost by folding a plain recording into it, or vice-versa.
+            let mergedNoteFlag = (target.isNote || source.isNote) ? true : nil
 
-            // Merged title: if both sides used auto-derived titles, leave nil
-            // so the merged entry re-derives from the combined text. If either
-            // side had a user-set custom title, keep the older one's so a
-            // deliberate label survives the merge.
-            let mergedTitle = older.title ?? newer.title
-
-            // Note count — sum the originals folded into each side so the [N]
-            // badge reflects total source recordings (3 + 4 → 7).
-            let mergedCount = older.noteCount + newer.noteCount
-
+            // Keep the target's identity: id, timestamp and title all survive,
+            // so the row stays in place and only its body grows.
             let merged = TranscriptEntry(
-                id: UUID(),
-                timestamp: midpoint,
+                id: target.id,
+                timestamp: target.timestamp,
                 text: mergedText,
                 audioPath: mergedAudioPath,
-                title: mergedTitle,
-                mergeCount: mergedCount
+                title: target.title,
+                mergeCount: mergedCount,
+                noteFlag: mergedNoteFlag
             )
 
-            // Delete the source .wav files that are no longer referenced. A
-            // path is still referenced if mergeAudio reused it verbatim (the
-            // single-sided case) — guard against deleting the kept file.
-            for src in [older.audioPath, newer.audioPath] {
+            for src in [target.audioPath, source.audioPath] {
                 if let p = src, p != mergedAudioPath {
                     try? FileManager.default.removeItem(atPath: p)
                 }
             }
 
-            // Remove both originals, insert the merged entry, resort.
-            all.removeAll { $0.id == older.id || $0.id == newer.id }
+            all.removeAll { $0.id == source.id || $0.id == target.id }
             all.append(merged)
             all.sort { $0.timestamp > $1.timestamp }
             self.writeAll(all)

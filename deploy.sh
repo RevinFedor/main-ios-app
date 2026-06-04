@@ -5,6 +5,7 @@ set -e
 # Habit Tracker — Wireless Deploy
 #   ./deploy.sh          build + install
 #   ./deploy.sh --check  only diagnose, no build
+#   ./deploy.sh --renew  force-reissue the 7-day free profile, then build+install
 #
 # Logs: deploy-logs/deploy-*.log  (diagnostics, no ANSI)
 #       deploy-logs/build-*.log   (xcodebuild output)
@@ -15,10 +16,25 @@ PROJECT_DIR="$SCRIPT_DIR/HabitTrackerSwift"
 PROJECT="$PROJECT_DIR/HabitTracker.xcodeproj"
 SCHEME="HabitTracker"
 CONFIG="Release"
+# Bundle-id stem shared by app + widget. Used to delete ONLY our cached
+# provisioning profiles on --renew (never other projects' profiles).
+BUNDLE_STEM="com.habittracker.swift"
 
 CHECK_ONLY=false
+RENEW=false
 for a in "$@"; do
-    case "$a" in --check|-c) CHECK_ONLY=true ;; --help|-h) echo "Usage: ./deploy.sh [--check]"; echo "  --check  diagnose only, skip build"; exit 0 ;; esac
+    case "$a" in
+        --check|-c) CHECK_ONLY=true ;;
+        --renew|-r) RENEW=true ;;
+        --help|-h)
+            echo "Usage: ./deploy.sh [--check | --renew]"
+            echo "  --check  diagnose only, skip build"
+            echo "  --renew  delete cached 7-day profiles for $BUNDLE_STEM and"
+            echo "           force xcodebuild to issue fresh ones (resets the"
+            echo "           expiry countdown to 7 days). App data on iPhone is"
+            echo "           preserved — this is an upgrade-install, not a wipe."
+            exit 0 ;;
+    esac
 done
 
 # --- Logging ---
@@ -524,6 +540,47 @@ if ! $DEVICE_READY; then
     echo -e "For diagnostic only: ./deploy.sh --check\n"
     rm -f "$DEVICE_JSON_FILE" 2>/dev/null
     exit 1
+fi
+
+# ============================================================
+# STEP 2.5 — Renew provisioning profile (--renew only)
+# ============================================================
+# The free Apple-ID provisioning profile lasts 7 days. `xcodebuild
+# -allowProvisioningUpdates` only reissues a profile when it's INVALID
+# (expired / missing / wrong cert) — a still-valid profile with 1 day left is
+# happily reused from the on-disk cache, so a normal ./deploy.sh does NOT
+# reset the countdown. To force a fresh 7-day profile we delete OUR cached
+# profiles (matched by bundle-id, so other projects are untouched); the next
+# xcodebuild then has no cache to reuse and issues new ones dated today.
+#
+# This does NOT touch the iPhone: the app stays installed, bundle-id is
+# unchanged, so the sandbox (UserDefaults + App Group container = habits &
+# voice history) survives. Reinstall is an upgrade, not a wipe.
+if [ "$RENEW" = "true" ]; then
+    step "2.5  Renew provisioning profile (--renew)"
+    PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+    removed=0
+    if [ -d "$PROFILE_DIR" ]; then
+        while IFS= read -r p; do
+            [ -e "$p" ] || continue
+            appid=$(security cms -D -i "$p" 2>/dev/null | plutil -extract Entitlements.application-identifier raw - 2>/dev/null)
+            # appid looks like TEAMID.com.habittracker.swift[.HabitWidget-]
+            case "$appid" in
+                *".$BUNDLE_STEM"|*".$BUNDLE_STEM."*)
+                    name=$(security cms -D -i "$p" 2>/dev/null | plutil -extract Name raw - 2>/dev/null)
+                    exp=$(security cms -D -i "$p" 2>/dev/null | plutil -extract ExpirationDate raw - 2>/dev/null)
+                    rm -f "$p"
+                    ok "deleted [$name] (was expiring $exp)"
+                    removed=$((removed+1))
+                    ;;
+            esac
+        done < <(find "$PROFILE_DIR" -type f \( -name '*.mobileprovision' -o -name '*.provisionprofile' \) 2>/dev/null)
+    fi
+    if [ "$removed" -eq 0 ]; then
+        warn "No cached profiles for $BUNDLE_STEM found — xcodebuild will issue fresh ones anyway"
+    else
+        ok "Removed $removed cached profile(s) — fresh 7-day profiles will be issued during build"
+    fi
 fi
 
 # ============================================================

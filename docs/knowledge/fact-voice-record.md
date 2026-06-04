@@ -78,6 +78,8 @@ forceStopTask = Task { [weak self] in
 [Dict] stop() — hard-cap watchdog fired (2s) lag=4.9s   # хвост 4.9с потерян
 ```
 
+**Connect-watchdog тоже на `Task.sleep`, не на main queue.** Симптом из той же серии: «всё пишется в буфер, стриминг не начинается» — `connectSoniox` залип где-то между mint и `wsOpen=true`, а 10с connect-watchdog не стрелял. Корень тот же что у stop hard-cap: watchdog был `DispatchQueue.main.asyncAfter`, но `try await task.send(configStr)` внутри самого `connectSoniox` мог заблокировать main runloop — и watchdog, запланированный на ту же очередь, не получал слот. Фикс: watchdog переведён на `Task { try await Task.sleep }` (независим от main), арм'ится **до** сетевых вызовов, плюс 8с `timeoutInterval` на mint-запрос. Диагностические лог-маркеры на каждом шаге локализуют точку залипа без дебаггера: `[Mint] begin → POST → ← HTTP` (mint), `[Dict] ws task.resume() → ws config sending → sent → ws OPEN` (handshake). Отсутствие следующего маркера = точка залипа.
+
 ## Cold-launch policy: два разных пути в зависимости от entry point
 
 Recording intents разные по требованиям. Control Center widget (`ToggleVoiceRecordingIntent: SetValueIntent, AudioRecordingIntent`) и Action Button через AppShortcuts (`ToggleVoiceRecordingShortcutIntent`) сейчас идут разными путями:
@@ -160,6 +162,32 @@ Toggle "Always use iPhone microphone" перенесён из Settings в `MicSo
 
 `VRLog.lineCount()` считает raw `\n` байты (`reduce + count of 0x0A`) — дешевле чем split, и достаточно для индикатора «лог рос с последней очистки».
 
+## История: карточка, объединение, редактируемый заголовок
+
+Экран истории (`TranscriptHistoryView`) — список `TranscriptEntry`, sorted newest-first. Карточка (`EntryRow`) и модель прошли редизайн с нетривиальными решениями.
+
+**Раскладка карточки — один канал на действие.** Copy / Re-transcribe / Delete живут ТОЛЬКО в long-press контекст-меню (лейблы «Copy Text» / «Return Scribble» / «Delete»), на самой карточке их нет. На карточке только то, что не дублируется в меню: Play слева, стрелки объединения ↑/↓ справа. Принцип — `methodology/переносимый-дизайн.md::Один канал на действие`.
+
+**Объединение заметок (`TranscriptStore.merge`).** Стрелки ↑/↓ схлопывают карточку с визуальным соседом (список newest-first: ↑ = карточка выше = хронологически новее, index−1; ↓ = ниже = старее, index+1). При merge:
+- текст склеивается **хронологически** (старшая по timestamp первой), `\n`-разделитель, пустые части пропускаются;
+- аудио — PCM обоих `.wav` (срезая 44-байтный заголовок каждого) конкатенируется в новый `.wav`, оба исходных удаляются; если аудио только у одной стороны — её путь переиспользуется как есть (НЕ удалять — guard в `mergeAudio`);
+- дата — **среднее (midpoint)** двух timestamp'ов. Выбран из вариантов «взять самую раннюю» / «усреднить» — юзер выбрал усреднение явно;
+- `mergeCount` — **сумма** `noteCount` обеих сторон (3+4→7), не инкремент. Показывается в title-chip как `[N]` когда >1. Свежая запись = 1.
+
+**Редактируемый заголовок (`title: String?`).** Опционален: `nil` = деривить из текста (первые слова до ~28 символов, обрезка по границе слова + «…»). Optional + synthesized `Codable` — записи из старых билдов без ключа `title`/`mergeCount` декодируются как nil (миграция без версионирования). При reload/смене даты кастомный title сохраняется; при merge берётся `older.title ?? newer.title`. Иконка `note.text` на chip'е появляется только при заданном кастомном title — сигнализирует «именованная заметка, не сырая расшифровка» (мик-иконку для этого НЕ возвращать, у неё другой смысл).
+
+**Заголовок-chip слева, дата-chip справа.** Оба — кликабельные пилюли (`Capsule` fill 0.08). Тап по заголовку → `TitleEditorSheet`, по дате → `DateEditorSheet` (графический `DatePicker`). Карандаш-affordance у даты убран намеренно — chip-стиль сам сигналит редактируемость, повторять обучающий значок не нужно (см. methodology).
+
+**Свёртка превью без анимации (3 строки).** Collapsed `lineLimit = 3` (было 6), тап разворачивает. `expanded.toggle()` идёт **без** `withAnimation`. Что пробовали: `withAnimation(.easeInOut)` на смену lineLimit — `List` пересчитывал высоту строки на лету и дёргал scroll-offset (карточка прыгала вверх, потом вниз). Мгновенный toggle убирает re-measure jitter. Рядом с «Show more» — общее число символов (`entry.text.count`), прижато вправо.
+
+## Mic source в Live Activity
+
+Live Activity показывает какой вход сейчас пишется — в Lock Screen / Notification Center subtitle и Dynamic Island expanded `.bottom`. НЕ в compact/minimal (out-of-process SpringBoard рендеринг хрупкий, см. `fix-dynamic-island.md::Шрам 3`).
+
+Поток: `AudioSessionManager.publishMicSource()` резолвит `(kind, name)` из `currentRoute` / `wantsBluetoothMic` / `btOutputDevice`, дедупит (route change постит часто), пишет в App Group + постит `micSourceDidChange`. `RecordingActivityManager` подписан → `setMicSource()` обновляет `ContentState` **без** alertConfiguration (тихо, без banner-pop-out — смена мика не повод дёргать pop-out). `MicSourceKind`: iphone / airpods / headphones / usb / unknown, classify по `portType` + эвристика «AirPods» в имени.
+
+Cold-launch через Action Button: `LiveActivityKickoff` (widget process) читает `lastMicSourceKind`/`Name` из App Group **до** `Activity.request()` — иначе первый pop-out frame был бы с `.unknown` пока host app не проснётся и не запушит реальное значение. Скрыто в `.idle`/`.ended` фазах (stealth — не показывать имя устройства когда ничего не пишется).
+
 ## App Group keys (источник правды)
 
 `VoiceRecordConfig.SharedKeys` — все cross-process ключи:
@@ -167,6 +195,7 @@ Toggle "Always use iPhone microphone" перенесён из Settings в `MicSo
 - `pendingAction` + `pendingActionTs` — intents пишут, Coordinator подбирает на foreground.
 - `wantsVoiceTab` — intents пишут при start/toggle, `TabRouter.consumeVoiceTabFlagIfSet()` потребляет.
 - `forceBuiltInMic`, `autoCopyAfterStop`, `devMode`, `liveActivityTrailingPadding` — settings.
+- `lastMicSourceKind` + `lastMicSourceName` — `AudioSessionManager` пишет на каждую смену route/preference, `LiveActivityKickoff` (widget process) читает до `Activity.request()`.
 
 ## Связанное
 

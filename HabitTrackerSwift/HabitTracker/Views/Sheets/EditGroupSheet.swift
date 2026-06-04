@@ -76,7 +76,7 @@ struct EditGroupSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Отмена") { dismiss() }
+                    Button("Отмена") { dismissFast() }
                         .foregroundColor(.blue)
                 }
             }
@@ -128,12 +128,20 @@ struct EditGroupSheet: View {
             name: name.trimmingCharacters(in: .whitespaces),
             color: selectedColor
         )
-        dismiss()
+        dismissFast()
     }
 
     private func deleteGroup(keepHabits: Bool) {
         store.deleteGroup(group.id, keepHabits: keepHabits)
-        dismiss()
+        dismissFast()
+    }
+
+    // Dismiss WITHOUT the ~0.35s system slide-down so the list underneath is
+    // interactive immediately. See docs/knowledge/fact-habit-tracker.md.
+    private func dismissFast() {
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { dismiss() }
     }
 }
 

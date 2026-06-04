@@ -1181,25 +1181,131 @@ class HabitStore: ObservableObject {
         }
     }
 
+    // MARK: - Menu-based reordering (native-iOS migration)
+    //
+    // Clean POSITIONAL move used by the row context menu. Unlike reorderItem
+    // (which has drag-onto-target semantics and is now unused), these swap with
+    // the immediately adjacent sibling / top-level item — predictable for the
+    // Up / Down menu actions. A top-level item moves among top-level items; a
+    // grouped habit moves among its siblings only (cross-container moves are the
+    // separate "Вынести из группы" / "В группу…" actions via moveHabit).
+    // See docs/knowledge/fact-habit-tracker.md::Native-iOS жесты.
+
+    private func topLevelOrdered() -> [(id: UUID, isGroup: Bool)] {
+        var combined: [(order: Int, id: UUID, isGroup: Bool)] = []
+        for h in standaloneHabits { combined.append((h.order, h.id, false)) }
+        for g in groups { combined.append((g.order, g.id, true)) }
+        combined.sort { $0.order < $1.order }
+        return combined.map { ($0.id, $0.isGroup) }
+    }
+
+    private func applyTopLevel(_ order: [(id: UUID, isGroup: Bool)]) {
+        for (newOrder, it) in order.enumerated() {
+            if it.isGroup {
+                if let idx = groups.firstIndex(where: { $0.id == it.id }) { groups[idx].order = newOrder }
+            } else {
+                if let idx = standaloneHabits.firstIndex(where: { $0.id == it.id }) { standaloneHabits[idx].order = newOrder }
+            }
+        }
+    }
+
+    /// (index, count) of an item within its container (top-level, or its group).
+    private func neighborIndex(_ item: HabitItem) -> (index: Int, count: Int) {
+        switch item {
+        case .group(let g):
+            let order = topLevelOrdered()
+            return (order.firstIndex(where: { $0.id == g.id && $0.isGroup }) ?? -1, order.count)
+        case .habit(let h, let gid):
+            if let gid = gid, let gi = groups.firstIndex(where: { $0.id == gid }) {
+                let sorted = groups[gi].habits.sorted { $0.order < $1.order }
+                return (sorted.firstIndex(where: { $0.id == h.id }) ?? -1, sorted.count)
+            } else {
+                let order = topLevelOrdered()
+                return (order.firstIndex(where: { $0.id == h.id && !$0.isGroup }) ?? -1, order.count)
+            }
+        }
+    }
+
+    func canMoveUp(_ item: HabitItem) -> Bool { neighborIndex(item).index > 0 }
+    func canMoveDown(_ item: HabitItem) -> Bool {
+        let n = neighborIndex(item)
+        return n.index >= 0 && n.index < n.count - 1
+    }
+
+    func moveUp(_ item: HabitItem) { swapItem(item, up: true) }
+    func moveDown(_ item: HabitItem) { swapItem(item, up: false) }
+
+    private func swapItem(_ item: HabitItem, up: Bool) {
+        switch item {
+        case .group(let g):
+            swapTopLevel(id: g.id, isGroup: true, up: up)
+        case .habit(let h, let gid):
+            if let gid = gid {
+                swapSibling(habitId: h.id, groupId: gid, up: up)
+            } else {
+                swapTopLevel(id: h.id, isGroup: false, up: up)
+            }
+        }
+    }
+
+    private func swapTopLevel(id: UUID, isGroup: Bool, up: Bool) {
+        var order = topLevelOrdered()
+        guard let i = order.firstIndex(where: { $0.id == id && $0.isGroup == isGroup }) else { return }
+        let j = up ? i - 1 : i + 1
+        guard j >= 0, j < order.count else { return }
+        order.swapAt(i, j)
+        applyTopLevel(order)
+        triggerHaptic(.light)
+        saveData()
+    }
+
+    private func swapSibling(habitId: UUID, groupId: UUID, up: Bool) {
+        guard let gi = groups.firstIndex(where: { $0.id == groupId }) else { return }
+        var sorted = groups[gi].habits.sorted { $0.order < $1.order }
+        guard let i = sorted.firstIndex(where: { $0.id == habitId }) else { return }
+        let j = up ? i - 1 : i + 1
+        guard j >= 0, j < sorted.count else { return }
+        sorted.swapAt(i, j)
+        for k in sorted.indices { sorted[k].order = k }
+        groups[gi].habits = sorted
+        triggerHaptic(.light)
+        saveData()
+    }
+
     // MARK: - Persistence
 
+    // Serial queue for off-main persistence. Every habit toggle / expand calls
+    // saveData; doing the App-Group write + WidgetCenter.reloadAllTimelines()
+    // (documented-expensive) + the deprecated blocking synchronize() on the MAIN
+    // thread froze it for ~0.1–0.3s per tap — the on-device "dead period" where
+    // the next row wouldn't respond until the freeze cleared. See
+    // docs/knowledge/fact-habit-tracker.md::Мёртвый период.
+    private static let persistQueue = DispatchQueue(label: "habittracker.persist", qos: .utility)
+
     func saveData() {
-        let data = StorageData(
+        // EVERYTHING off-main. The @Published arrays are already mutated (that's
+        // what drives the UI); saveData only persists. Capturing the StorageData
+        // on main is a cheap copy-on-write snapshot — the expensive part is
+        // JSONEncoder().encode of the full history (185 entries × hundreds of
+        // days = tens of thousands of dict entries → ~100–300ms). That encode
+        // used to run on MAIN right after a reorder drop, blocking the thread
+        // exactly when the user tried to pick up the next row → the reorder-mode
+        // "dead period" (highlight appears via the system Button, but the native
+        // List can't re-arm its drag until main is free). Now encode + both
+        // UserDefaults writes + the widget reload all run on persistQueue, so the
+        // main thread is free the instant the drop finishes. See
+        // docs/knowledge/fact-habit-tracker.md::Мёртвый период.
+        let snapshot = StorageData(
             standaloneHabits: standaloneHabits,
             groups: groups,
             firstDayOfWeek: firstDayOfWeek
         )
-        if let encoded = try? JSONEncoder().encode(data) {
-            // Save to local app storage
-            UserDefaults.standard.set(encoded, forKey: storageKey)
-            
-            // Save to App Group storage (for Widget)
-            if let sharedDefaults = UserDefaults(suiteName: appGroupIdentifier) {
-                sharedDefaults.set(encoded, forKey: storageKey)
-                sharedDefaults.synchronize()
-            }
-
-            // Tell widget to refresh
+        let key = storageKey
+        let group = appGroupIdentifier
+        Self.persistQueue.async {
+            guard let encoded = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(encoded, forKey: key)
+            UserDefaults(suiteName: group)?.set(encoded, forKey: key)
             WidgetCenter.shared.reloadAllTimelines()
         }
     }
