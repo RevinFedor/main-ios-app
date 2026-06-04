@@ -44,6 +44,13 @@ struct ContentView: View {
     @State private var logLineCount: Int = 0
     private let logCountTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    // Gates the copy-log / clear-log icons in this navbar. Toggled in
+    // Settings → Диагностика; persisted in the App Group so flipping it there
+    // updates this navbar live. Off by default. (Mirrors the Voice tab's devMode.)
+    @AppStorage(VoiceRecordConfig.SharedKeys.showHabitLogButtons,
+                store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var showHabitLogButtons: Bool = false
+
     // Layout constants — shared between row rendering and the location-aware
     // tap router. Keep in sync with HabitRowView/GroupRowView (.padding 12,
     // left block .frame(width: 140)).
@@ -118,33 +125,37 @@ struct ContentView: View {
                     .disabled(isReordering)
                 }
 
-                // Quick log access — copy recent buffer / clear it without
-                // leaving the screen. Full viewer lives in Settings → Диагностика.
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        UIPasteboard.general.string = VRLog.readRecent(maxLines: 400)
-                        UINotificationFeedbackGenerator().notificationOccurred(.success)
-                        logLineCount = VRLog.lineCount()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "doc.on.doc")
-                            Text("\(logLineCount)")
-                                .font(.caption.monospacedDigit())
+                // Quick log access — copy recent buffer / clear it without leaving
+                // the screen. Shown only when the Settings → Диагностика toggle
+                // "Показывать лог-кнопки" is on (off by default → clean navbar).
+                // Full viewer always lives in Settings → Диагностика.
+                if showHabitLogButtons {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button {
+                            UIPasteboard.general.string = VRLog.readRecent(maxLines: 400)
+                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                            logLineCount = VRLog.lineCount()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "doc.on.doc")
+                                Text("\(logLineCount)")
+                                    .font(.caption.monospacedDigit())
+                            }
+                            .foregroundColor(.white)
                         }
-                        .foregroundColor(.white)
+                        .accessibilityLabel("Скопировать лог, \(logLineCount) строк")
                     }
-                    .accessibilityLabel("Скопировать лог, \(logLineCount) строк")
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        VRLog.clear()
-                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-                        logLineCount = 0
-                    } label: {
-                        Image(systemName: "trash")
-                            .foregroundColor(.red)
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button {
+                            VRLog.clear()
+                            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                            logLineCount = 0
+                        } label: {
+                            Image(systemName: "trash")
+                                .foregroundColor(.red)
+                        }
+                        .accessibilityLabel("Очистить лог")
                     }
-                    .accessibilityLabel("Очистить лог")
                 }
             }
             .onReceive(logCountTimer) { _ in
@@ -499,52 +510,33 @@ private struct NormalRow: View {
     let onTap: (CGPoint) -> Void
     let onEdit: () -> Void
 
-    // Highlight is driven by a Button's ButtonStyle.isPressed — the mechanism
-    // research AND the user ("like buttons") both name as reliably INSTANT inside
-    // a ScrollView. A Button gets special scroll-view touch handling that
-    // bypasses the ~150ms content-touch delay AND the iOS-26 ScrollView
-    // gesture-arbitration regression that kept every raw-gesture highlight laggy
-    // (this device is iOS 26.4). The Button's own action is empty; a SpatialTap
-    // supplies the tap LOCATION (x-zone routing) and a long-press opens the
-    // editor. longPressFired stops a deliberate hold from ALSO firing a tap; it
-    // is reset on every touch-down via onPressingChanged so it can never stick.
-    @State private var longPressFired = false
+    // All three interactions (instant highlight, quick tap with x-location,
+    // press-and-hold to edit) come from UIKit recognisers in RowGestureOverlay,
+    // NOT from a Button. A SwiftUI Button's private _ButtonGesture owns the touch
+    // until touch-up and starved the external tap+long-press on iOS 18/26 — both
+    // expand-tap and edit-press silently died. The overlay's recognisers coexist
+    // with the ScrollView pan (delegate → shouldRecognizeSimultaneouslyWith), so
+    // scrolling works AND all three fire. See fact-habit-tracker.md::Обычный режим.
+    @State private var isHighlighted = false
 
     private let longPressDelay: TimeInterval = 0.4
     private let moveTolerance: CGFloat = 12
 
     var body: some View {
-        Button {} label: {
-            content
-                .frame(height: rowHeight)
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(RowPressStyle())                  // INSTANT touch-down highlight
-        // Quick tap → x-zone routing. SpatialTapGesture is DISCRETE, so a finger
-        // that moves to scroll fails the tap and the ScrollView pan takes over.
-        // The previous DragGesture(minimumDistance: 0) was CONTINUOUS and live
-        // from touch-down — it starved the pan and KILLED scrolling (the same
-        // iOS-26 arbitration trap that broke reorder mode; see deep-research note
-        // in fact-habit-tracker.md). A discrete tap doesn't starve the pan.
-        .simultaneousGesture(
-            SpatialTapGesture(coordinateSpace: .local)
-                .onEnded { e in
-                    guard !longPressFired else { return }
-                    onTap(e.location)
-                }
-        )
-        // Press-and-hold → edit. maximumDistance lets a swipe fail the press so
-        // scrolling still works. onPressingChanged(true) fires on touch-down and
-        // resets the gate, so a stale longPressFired from a prior edit (whose
-        // sheet swallowed the tap-release) can't eat the next tap.
-        .onLongPressGesture(minimumDuration: longPressDelay, maximumDistance: moveTolerance) {
-            longPressFired = true
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            onEdit()
-        } onPressingChanged: { pressing in
-            if pressing { longPressFired = false }
-        }
+        content
+            .frame(height: rowHeight)
+            .frame(maxWidth: .infinity)
+            .background(isHighlighted ? Color.white.opacity(0.12) : Color.clear)
+            .contentShape(Rectangle())
+            .overlay(
+                RowGestureOverlay(
+                    onTap: { loc in onTap(loc) },
+                    onEdit: { isHighlighted = false; onEdit() },
+                    onHighlightChanged: { isHighlighted = $0 },
+                    longPressDelay: longPressDelay,
+                    moveTolerance: moveTolerance
+                )
+            )
     }
 
     @ViewBuilder
@@ -565,18 +557,6 @@ private struct NormalRow: View {
     }
 }
 
-// Row press style: INSTANT touch-down tint. A custom ButtonStyle reading
-// configuration.isPressed is the research-confirmed reliable way to highlight a
-// row on touch-down inside a ScrollView (Button bypasses the content-touch delay
-// + iOS-26 gesture-arbitration lag). animation(nil) = no fade, appears at once.
-private struct RowPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .overlay(configuration.isPressed ? Color.white.opacity(0.12) : Color.clear)
-            .animation(nil, value: configuration.isPressed)
-    }
-}
-
 // FAB-specific press style: tight scale + slight dim on touch-down,
 // no slow easing — feels like a hardware key.
 private struct FABPressStyle: ButtonStyle {
@@ -585,6 +565,124 @@ private struct FABPressStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+// MARK: - UIKit-backed row gestures (normal mode: tap + long-press + scroll)
+//
+// Replaces the Button + .onLongPressGesture + SpatialTapGesture stack, which is
+// BROKEN on iOS 18/26: SwiftUI's Button installs a private _ButtonGesture that
+// owns the touch-sequence until touch-up and starves any external long-press/tap
+// attached over it, so neither tap (expand) nor long-press (edit) fired. Deep
+// research (Perplexity, WWDC24 session 10118 + forum 760035) confirmed the only
+// robust path is to own ALL recognisers in UIKit. All three are created in ONE
+// UIView so require(toFail:) is guaranteed installed before the view appears:
+//   • highlight — UILongPressGestureRecognizer(minimumPressDuration: 0): instant
+//     touch-down tint, auto-cleared on .cancelled when the scroll pan wins.
+//   • longPress (0.4s) — opens the editor.
+//   • tap.require(toFail: longPress) — quick tap routes by x-location; a held
+//     press routes to edit, never both.
+// Every recogniser's delegate returns shouldRecognizeSimultaneouslyWith == true
+// for the scroll pan (anything not one of our three) → scrolling always works.
+// See docs/knowledge/fact-habit-tracker.md::Обычный режим.
+private struct RowGestureOverlay: UIViewRepresentable {
+    let onTap: (CGPoint) -> Void
+    let onEdit: () -> Void
+    let onHighlightChanged: (Bool) -> Void
+    let longPressDelay: TimeInterval
+    let moveTolerance: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onTap: onTap, onEdit: onEdit, onHighlightChanged: onHighlightChanged)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let c = context.coordinator
+
+        // Instant touch-down highlight.
+        let highlight = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.handleHighlight(_:)))
+        highlight.minimumPressDuration = 0
+        highlight.allowableMovement = 10_000   // never fails on movement; scroll cancels it
+        highlight.delegate = c
+        c.highlight = highlight
+        view.addGestureRecognizer(highlight)
+
+        // Press-and-hold → edit.
+        let longPress = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.minimumPressDuration = longPressDelay
+        longPress.allowableMovement = moveTolerance
+        longPress.delegate = c
+        c.longPress = longPress
+        view.addGestureRecognizer(longPress)
+
+        // Quick tap → x-zone routing. Waits for the long-press to FAIL (finger
+        // lifted before 0.4s) so a hold never also fires a tap.
+        let tap = UITapGestureRecognizer(target: c, action: #selector(Coordinator.handleTap(_:)))
+        tap.delegate = c
+        tap.require(toFail: longPress)
+        c.tap = tap
+        view.addGestureRecognizer(tap)
+
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        // Closures capture per-render state (item identity, days) — refresh them.
+        context.coordinator.onTap = onTap
+        context.coordinator.onEdit = onEdit
+        context.coordinator.onHighlightChanged = onHighlightChanged
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onTap: (CGPoint) -> Void
+        var onEdit: () -> Void
+        var onHighlightChanged: (Bool) -> Void
+        weak var tap: UITapGestureRecognizer?
+        weak var longPress: UILongPressGestureRecognizer?
+        weak var highlight: UILongPressGestureRecognizer?
+
+        init(onTap: @escaping (CGPoint) -> Void,
+             onEdit: @escaping () -> Void,
+             onHighlightChanged: @escaping (Bool) -> Void) {
+            self.onTap = onTap
+            self.onEdit = onEdit
+            self.onHighlightChanged = onHighlightChanged
+        }
+
+        @objc func handleTap(_ r: UITapGestureRecognizer) {
+            guard r.state == .ended else { return }
+            onTap(r.location(in: r.view))
+        }
+
+        @objc func handleLongPress(_ r: UILongPressGestureRecognizer) {
+            if r.state == .began {
+                onHighlightChanged(false)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                onEdit()
+            }
+        }
+
+        @objc func handleHighlight(_ r: UILongPressGestureRecognizer) {
+            switch r.state {
+            case .began: onHighlightChanged(true)
+            case .ended, .cancelled, .failed: onHighlightChanged(false)
+            default: break
+            }
+        }
+
+        // Coexist with the ScrollView pan (and anything external); among OUR three
+        // recognisers, only the highlight runs simultaneously — tap vs long-press
+        // is governed by require(toFail:), not simultaneity.
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            let ours: [UIGestureRecognizer?] = [tap, longPress, highlight]
+            if ours.contains(where: { $0 === other }) {
+                return g === highlight || other === highlight
+            }
+            return true   // external (scroll pan) — always allow
+        }
     }
 }
 

@@ -8,6 +8,12 @@ struct SettingsSheet: View {
     @State private var showToast = false
     @State private var showLogs = false
 
+    // Gates the copy-log / clear-log icons in the Habits tab navbar. Persisted in
+    // the App Group so the Habits tab (which reads the same key) reflects it live.
+    @AppStorage(VoiceRecordConfig.SharedKeys.showHabitLogButtons,
+                store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var showHabitLogButtons: Bool = false
+
     @State private var showImportConfirm = false
     @State private var importPreview: ImportPreview?
 
@@ -82,6 +88,10 @@ struct SettingsSheet: View {
                     }
 
                     Section {
+                        Toggle(isOn: $showHabitLogButtons) {
+                            Label("Показывать лог-кнопки", systemImage: "ladybug")
+                        }
+
                         HStack(spacing: 12) {
                             Button {
                                 showLogs = true
@@ -117,7 +127,7 @@ struct SettingsSheet: View {
                     } header: {
                         Text("Диагностика")
                     } footer: {
-                        Text("Тапни иконку лупы — откроется полный просмотрщик. Иконки справа: скопировать недавний лог или очистить без открытия.")
+                        Text("«Показывать лог-кнопки» выводит иконки копирования и очистки лога в navbar вкладки Привычки. Тапни иконку лупы — откроется полный просмотрщик.")
                     }
                 }
 

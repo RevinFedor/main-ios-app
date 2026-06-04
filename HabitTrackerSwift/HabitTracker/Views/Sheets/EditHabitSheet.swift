@@ -22,6 +22,13 @@ struct EditHabitSheet: View {
                 }
 
                 Section {
+                    ColorPickerGrid(selectedColor: $selectedColor)
+                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                } header: {
+                    Text("Цвет")
+                }
+
+                Section {
                     HStack {
                         Label("Серия", systemImage: "flame.fill")
                             .foregroundStyle(.orange)
@@ -40,13 +47,6 @@ struct EditHabitSheet: View {
                     }
                 } header: {
                     Text("Статистика")
-                }
-
-                Section {
-                    ColorPickerGrid(selectedColor: $selectedColor)
-                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                } header: {
-                    Text("Цвет")
                 }
 
                 Section {

@@ -1,18 +1,16 @@
-=== Indexer started: Thu Jun  4 07:41:20 MSK 2026 ===
-RESPONSE for docs/knowledge/fact-remote-tab.md: ```json
-{
-  "path": "docs/knowledge/fact-remote-tab.md",
-  "type": "fact",
-  "explicit": [
-    "WKWebView",
-    "iOS Remote tab",
-    "Bearer token authentication",
-    "UserDefaults @AppStorage",
-   
+=== Indexer started: Thu Jun  4 09:40:12 MSK 2026 ===
 RESPONSE for docs/methodology/переносимый-дизайн.md: ```json
 {
   "path": "docs/methodology/переносимый-дизайн.md",
   "type": "fact",
   "explicit": [
-    "Platform documentation verification before workaround construction",
-    "Hardware
+    "iOS Live Activity and Activity.request() background constraint",
+    "Hardware con
+RESPONSE for docs/knowledge/fact-habit-tracker.md: ```json
+{
+  "path": "docs/knowledge/fact-habit-tracker.md",
+  "type": "fact",
+  "explicit": [
+    "gesture routing temporal dispatch",
+    "tap vs press priority arbitration",
+    "drag reorder animat

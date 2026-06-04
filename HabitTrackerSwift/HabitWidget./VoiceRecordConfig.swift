@@ -25,6 +25,11 @@ enum VoiceRecordConfig {
         // When true, surface developer affordances in the main UI (e.g.
         // copy-log / clear-log icons in the Voice tab navbar).
         static let devMode = "voiceRecord.devMode"
+        // When true, show the copy-log / clear-log icons in the HABITS tab
+        // navbar. Separate from devMode (which gates the Voice tab) so each tab's
+        // log shortcuts toggle independently. Off by default — keeps the Habits
+        // navbar clean. See Settings → Диагностика toggle "Показывать лог-кнопки".
+        static let showHabitLogButtons = "habit.showLogButtons"
         // When true, keep a Live Activity alive in an .idle phase even when
         // no recording is in progress. This is the workaround that lets
         // background-launched ToggleVoiceRecordingShortcutIntent UPDATE an
