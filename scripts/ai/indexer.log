@@ -1,17 +1,18 @@
-=== Indexer started: Sun May 31 02:22:56 MSK 2026 ===
+=== Indexer started: Thu Jun  4 07:41:20 MSK 2026 ===
+RESPONSE for docs/knowledge/fact-remote-tab.md: ```json
+{
+  "path": "docs/knowledge/fact-remote-tab.md",
+  "type": "fact",
+  "explicit": [
+    "WKWebView",
+    "iOS Remote tab",
+    "Bearer token authentication",
+    "UserDefaults @AppStorage",
+   
 RESPONSE for docs/methodology/переносимый-дизайн.md: ```json
 {
   "path": "docs/methodology/переносимый-дизайн.md",
   "type": "fact",
   "explicit": [
-    "UX design principles",
-    "iOS platform constraints",
-    "Live Activity manageme
-RESPONSE for docs/knowledge/fact-voice-record.md: ```json
-{
-  "path": "docs/knowledge/fact-voice-record.md",
-  "type": "fact",
-  "explicit": [
-    "Voice Record subsystem architecture",
-    "Soniox WebSocket streaming protocol",
-    "AppIntents integ
+    "Platform documentation verification before workaround construction",
+    "Hardware

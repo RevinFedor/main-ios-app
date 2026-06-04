@@ -188,6 +188,19 @@ struct VoiceRecordTabView: View {
                                 .multilineTextAlignment(.center)
                                 .font(.system(size: 14))
                                 .foregroundStyle(Color(hex: "8E8E93"))
+
+                            // Primary affordance for the empty state. Styled
+                            // like the "Done" buttons in History / Settings:
+                            // plain accent-coloured text, no filled pill — the
+                            // user found the bordered blue capsule too loud.
+                            // Same icon as the toolbar History button so it's
+                            // recognisably the same destination (past notes).
+                            Button { showHistory = true } label: {
+                                Label("Open History", systemImage: "clock.arrow.circlepath")
+                                    .font(.system(size: 16, weight: .medium))
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.top, 12)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)

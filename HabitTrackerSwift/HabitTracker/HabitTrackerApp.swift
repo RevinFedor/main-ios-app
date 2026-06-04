@@ -40,6 +40,10 @@ struct RootTabView: View {
                 .badge(recorder.isRecording ? "REC" : nil)
                 .tag(TabRouter.Tab.voice)
 
+            RemoteTabView()
+                .tabItem { Label("Remote", systemImage: "terminal") }
+                .tag(TabRouter.Tab.remote)
+
             ContentView()
                 .tabItem { Label("Habits", systemImage: "checklist") }
                 .tag(TabRouter.Tab.habits)

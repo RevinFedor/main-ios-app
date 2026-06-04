@@ -74,7 +74,11 @@ struct GroupRowView: View {
                 .frame(height: 44)
             }
         }
-        .animation(nil, value: group.id) // Отключаем анимацию при reorder
+        // Strip inherited reorder animation so the progress circles teleport with
+        // their row instead of sliding in vertically (days share ids across rows,
+        // so SwiftUI animated them between positions). See HabitRowView for the
+        // full note + docs/knowledge/fact-habit-tracker.md.
+        .transaction { $0.animation = nil }
     }
 }
 

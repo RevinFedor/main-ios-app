@@ -39,6 +39,11 @@ struct TranscriptHistoryView: View {
     // Taptic Engine cold-start on the main thread (one of the lag sources).
     private let mergeHaptic = UINotificationFeedbackGenerator()
 
+    // How many entries are notes — shown as "(N)" on the Notes tab.
+    private var notesCount: Int {
+        recorder.history.lazy.filter { $0.isNote }.count
+    }
+
     // The history filtered by the active tab. Voices = everything that is NOT
     // a note; Notes = only notes; All = everything. Note status is the model's
     // single source of truth (explicit +Notes flag OR a custom title).
@@ -60,41 +65,44 @@ struct TranscriptHistoryView: View {
                 systemImage: "waveform",
                 description: Text("Recordings will appear here.")
             )
-            .listRowBackground(Color.clear)
         case .voices:
             ContentUnavailableView(
                 "No voice recordings",
                 systemImage: "waveform",
                 description: Text("Recordings you haven't titled appear here.")
             )
-            .listRowBackground(Color.clear)
         case .notes:
             ContentUnavailableView(
                 "No notes yet",
                 systemImage: "note.text",
                 description: Text("Give a recording a title to keep it here.")
             )
-            .listRowBackground(Color.clear)
         }
     }
 
     var body: some View {
         NavigationStack {
-            List {
+            Group {
                 if recorder.history.isEmpty {
                     ContentUnavailableView(
                         "No recordings yet",
                         systemImage: "waveform",
                         description: Text("Recordings will appear here.")
                     )
-                    .listRowBackground(Color.clear)
                 } else {
                     let entries = filteredEntries
                     if entries.isEmpty {
                         emptyState
-                    }
-                    ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                        row(index: index, entry: entry, entries: entries)
+                    } else {
+                        List {
+                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                                row(index: index, entry: entry, entries: entries)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                                    .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                            }
+                        }
+                        .listStyle(.plain)
                     }
                 }
             }
@@ -106,7 +114,11 @@ struct TranscriptHistoryView: View {
                     // .fixedSize() so it doesn't crowd the Done button.
                     Picker("Filter", selection: $filter) {
                         ForEach(HistoryFilter.allCases, id: \.self) { f in
-                            Text(f.rawValue).tag(f)
+                            // Notes tab carries a count of how many notes exist.
+                            Text(f == .notes && notesCount > 0
+                                 ? "\(f.rawValue) (\(notesCount))"
+                                 : f.rawValue)
+                                .tag(f)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -125,25 +137,23 @@ struct TranscriptHistoryView: View {
         .onDisappear { player.stop() }
     }
 
-    // Extracted from the ForEach body: the full EntryRow + swipeActions for one
-    // history entry. Pulled into its own @ViewBuilder because the inline
-    // expression grew large enough to blow the Swift type-checker's budget
-    // ("unable to type-check in reasonable time").
+    // One history card with native .swipeActions: swipe-left reveals three
+    // icon-only buttons in a horizontal row — Delete (edge, full-swipe), merge
+    // ↓, merge ↑. icon-only (no titles) keeps each button as narrow as the
+    // glyph; native swipe buttons stay reliable in a List (a custom gesture
+    // would fight List's scroll on iOS 18/26 — see research).
     @ViewBuilder
     private func row(index: Int, entry: TranscriptEntry, entries: [TranscriptEntry]) -> some View {
         // Resolve merge neighbours from the VISIBLE (filtered) list, not the
-        // full history. Under the Voices tab notes are hidden, so the card
-        // shown above/below on screen is not necessarily the adjacent entry in
-        // recorder.history — merging must follow what the user sees. We pass the
-        // neighbour's explicit id so the coordinator merges into the right one.
+        // full history. Under the Voices tab notes are hidden, so the card shown
+        // above/below isn't necessarily the adjacent entry in recorder.history —
+        // merging must follow what the user sees.
         let upTargetId   = index > 0 ? entries[index - 1].id : nil
         let downTargetId = index < entries.count - 1 ? entries[index + 1].id : nil
         EntryRow(
             entry: entry,
             isCurrentlyPlaying: player.currentId == entry.id,
             isReloading: recorder.reloadingId == entry.id,
-            isMerging: mergingId == entry.id,
-            mergeEdge: mergeEdge,
             onPlayTap: { player.toggle(entry: entry) },
             onReloadTap: { Task { await recorder.reloadTranscript(id: entry.id) } },
             onDeleteTap: {
@@ -153,20 +163,19 @@ struct TranscriptHistoryView: View {
             onEditDate: { newDate in recorder.updateEntryDate(id: entry.id, date: newDate) },
             onEditTitle: { newTitle in recorder.updateEntryTitle(id: entry.id, title: newTitle) }
         )
-        // Swipe-left reveals three stacked actions: merge ↑, merge ↓, Delete.
-        // Native .swipeActions (we're in a List) handles the partial reveal and
-        // the conflict with List scroll + system back-swipe that a custom
-        // DragGesture would fight (see fact-habit-tracker.md::gesture conflicts).
-        // SwiftUI lays trailing actions out from the edge inward, so the first
-        // button sits nearest the edge. We keep Delete first so a full swipe
-        // still deletes; the merge arrows follow. Merge buttons are disabled at
-        // the list edges by simply not adding them.
+        // Phase-1 "card leaving" effect for merge: fade + small slide toward the
+        // neighbour. The reflow (rows below sliding up) is List's native removal
+        // reacting to the data change in animateMerge's phase 2.
+        .offset(y: mergingId == entry.id ? (mergeEdge == .top ? -22 : 22) : 0)
+        .opacity(mergingId == entry.id ? 0 : 1.0)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            // Order: first button sits nearest the edge. Delete first so a full
+            // swipe deletes; then merge ↓, merge ↑. All icon-only.
             Button(role: .destructive) {
                 if player.currentId == entry.id { player.stop() }
                 recorder.deleteHistory(id: entry.id)
             } label: {
-                Label("Delete", systemImage: "trash")
+                SwipeDeleteLabel()
             }
             .tint(.red)
 
@@ -177,6 +186,7 @@ struct TranscriptHistoryView: View {
                 } label: {
                     Label("Merge down", systemImage: "arrow.down.to.line")
                 }
+                .labelStyle(.iconOnly)
                 .tint(.gray)
             }
             if let targetId = upTargetId {
@@ -186,6 +196,7 @@ struct TranscriptHistoryView: View {
                 } label: {
                     Label("Merge up", systemImage: "arrow.up.to.line")
                 }
+                .labelStyle(.iconOnly)
                 .tint(.gray)
             }
         }
@@ -227,17 +238,43 @@ struct TranscriptHistoryView: View {
     }
 }
 
+// Delete button label for .swipeActions. At the normal reveal width it's just
+// the trash glyph; when a full-swipe stretches the button across the row, the
+// extra space would otherwise be empty red — so once the button is wide enough
+// we show "Удалить запись" centred, with the trash pinned left. GeometryReader
+// reads the button's own width (SwiftUI stretches the label to fill it).
+private struct SwipeDeleteLabel: View {
+    // Past this width the button is clearly in full-swipe (well beyond the
+    // ~64pt a single icon button occupies), so reveal the text.
+    private let textThreshold: CGFloat = 120
+
+    var body: some View {
+        GeometryReader { geo in
+            let wide = geo.size.width >= textThreshold
+            ZStack {
+                if wide {
+                    Text("Удалить запись")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                Image(systemName: "trash")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: wide ? .leading : .center)
+                    .padding(.leading, wide ? 24 : 0)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+}
+
 // ─── One history row ────────────────────────────────────────────────────
 
 private struct EntryRow: View {
     let entry: TranscriptEntry
     let isCurrentlyPlaying: Bool
     let isReloading: Bool
-    // Drives the "being absorbed into a neighbour" animation: while true the
-    // row slides toward mergeEdge and fades, just before it's removed from the
-    // data. mergeEdge = the neighbour's side (.top for ↑).
-    let isMerging: Bool
-    let mergeEdge: Edge
     let onPlayTap: () -> Void
     let onReloadTap: () -> Void
     let onDeleteTap: () -> Void
@@ -254,6 +291,9 @@ private struct EntryRow: View {
     // entries fit on screen at once. Tap the text (or the chevron) to expand
     // to the full transcript.
     private static let collapsedLineLimit = 3
+    // Card corner radius — used by both the always-on background and the
+    // context-menu preview so the corners never change shape on interaction.
+    static let cardCornerRadius: CGFloat = 14
 
     // Drives the note-badge icon on the title chip — shown when the entry is a
     // note (explicit +Notes flag OR a custom title), per the model.
@@ -321,15 +361,19 @@ private struct EntryRow: View {
                 dateChip
             }
         }
-        .padding(.vertical, 4)
-        // Phase-1 "card leaving" effect only: fade out + a small slide toward
-        // the neighbour it's merging into (↑ → up, ↓ → down). Deliberately NOT
-        // a height/scale collapse — scaleEffect is render-only and doesn't
-        // reflow the List, so collapsing the scale just left a gap while the
-        // rows below stayed put (the bug). The actual gap-closing reflow is
-        // done by List's native row removal in phase 2 (see animateMerge).
-        .offset(y: isMerging ? (mergeEdge == .top ? -22 : 22) : 0)
-        .opacity(isMerging ? 0 : 1.0)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        // Permanent rounded card background. Previously the rounded corners only
+        // appeared during the long-press context-menu preview (iOS lifts the row
+        // with rounded corners), so the card visibly jumped from square to
+        // rounded on interaction. Giving it a constant rounded fill + clipShape
+        // — and matching the contextMenu preview shape below — removes that
+        // jump; the card is always rounded.
+        .background(
+            RoundedRectangle(cornerRadius: Self.cardCornerRadius, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Self.cardCornerRadius, style: .continuous))
         .contextMenu {
             if entry.audioPath != nil {
                 Button(action: onPlayTap) {
@@ -347,6 +391,10 @@ private struct EntryRow: View {
                 Button(action: onReloadTap) { Label("Return Scribble", systemImage: "arrow.clockwise") }
             }
             Button(role: .destructive, action: onDeleteTap) { Label("Delete", systemImage: "trash") }
+        } preview: {
+            // Match the card's own shape so the long-press preview doesn't morph
+            // the corners.
+            previewCard
         }
         .sheet(isPresented: $showDateEditor) {
             DateEditorSheet(initialDate: entry.timestamp) { newDate in
@@ -456,11 +504,12 @@ private struct EntryRow: View {
     }
 
     // Clipboard payload for both the copy button and the context-menu copy:
-    //   date: 2026-05-31 07:10:38
-    //   <blank line>
-    //   <transcript>
+    //   line 1: date: 2026-05-31 07:10:38
+    //   line 2: <blank>
+    //   line 3: <title>
+    //   line 4: <transcript>
     private var copyPayload: String {
-        "date: \(Self.copyDateFormatter.string(from: entry.timestamp))\n\n\(entry.text)"
+        "date: \(Self.copyDateFormatter.string(from: entry.timestamp))\n\n\(entry.displayTitle)\n\(entry.text)"
     }
 
     // Fixed yyyy-MM-dd HH:mm:ss stamp for the copy header (not locale-formatted
@@ -470,7 +519,34 @@ private struct EntryRow: View {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return f
     }()
+
+    // Context-menu long-press preview. A simple titled card with the same
+    // rounded shape as the row so the corners don't morph when the menu opens.
+    private var previewCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.displayTitle)
+                .font(.headline)
+                .foregroundStyle(.white)
+            Text(entry.text.isEmpty ? "(audio only)" : entry.text)
+                .font(.body)
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(8)
+        }
+        .padding(16)
+        .frame(maxWidth: 320, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Self.cardCornerRadius, style: .continuous)
+                .fill(Color(white: 0.15))
+        )
+    }
 }
+
+// NOTE: a custom swipe-reveal with circular vertically-stacked buttons (and an
+// optional full-swipe-to-delete) was prototyped here and worked, but it
+// required moving off List to ScrollView+LazyVStack and hand-tuning widths /
+// thresholds. The user reverted to native .swipeActions (icon-only) for
+// reliability; the custom approach is documented as a viable-but-fiddly option.
+
 
 // ─── Date editor sheet ──────────────────────────────────────────────────
 

@@ -24,6 +24,21 @@ struct ContentView: View {
     // no edit grips. See docs/knowledge/fact-habit-tracker.md.
     @State private var isReordering = false
 
+    // Custom drag-reorder state. Used ONLY in reorder mode.
+    // draggingIndex = which row is held; draggingOffset = its finger-tracked
+    // y shift; dragSnapshot freezes the list order for the drag's lifetime so
+    // the body stops re-sorting store.allItems every frame.
+    @State private var draggingIndex: Int? = nil
+    @State private var draggingOffset: CGFloat = 0
+    @State private var dragSnapshot: [HabitItem]? = nil
+    // Global-space Y where the long-press began — offset is globalY − dragStartY.
+    // Global coords (not the row's local space) so the row's own .offset never
+    // moves the origin (same feedback-loop invariant as the old .global).
+    @State private var dragStartY: CGFloat = 0
+    // Live global-space top of the scroll content (negative as the list scrolls).
+    // Row index = (globalTouchY − contentTopY) / rowHeight — scroll-correct.
+    @State private var contentTopY: CGFloat = 0
+
     // Live count of lines in the shared debug log — shown next to the navbar
     // copy icon (mirrors the Voice tab). Refreshed on appear + once a second.
     @State private var logLineCount: Int = 0
@@ -182,74 +197,175 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Reorder List (native List + .onMove, no edit grips)
+    // MARK: - Reorder List (UIKit UILongPressGestureRecognizer, NOT a SwiftUI gesture)
     //
-    // A plain List with .onMove gives the system long-press-drag reorder WITHOUT
-    // edit mode: the whole row lifts and neighbours reposition live (the
-    // "six-dots" behaviour, minus the dots — the grips were just the edit-mode
-    // affordance). Days/checkmarks stay visible but inert; tapping a GROUP still
-    // expands it so you can drop inside. .onMove feeds the tested
-    // store.reorderItem. See docs/knowledge/fact-habit-tracker.md.
+    // THREE pure-SwiftUI attempts failed to let the list scroll AND reorder:
+    //   1. native List.onMove — has a ~0.5s post-drop re-arm lock (no fast serial
+    //      reordering, the user's original complaint);
+    //   2. per-row `.gesture(DragGesture(minDist:8))` + `.scrollDisabled` — a child
+    //      drag via `.gesture` makes the ScrollView pan REQUIRE it to fail; a
+    //      low-minDistance drag never fails → scroll dead;
+    //   3. `.simultaneousGesture(DragGesture(minDist:0))` with an in-code timed
+    //      long-press — STILL dead. The root cause (confirmed by deep research,
+    //      WWDC24 "unified gesture model" session 10118 + forum 760035): SwiftUI's
+    //      ScrollView pan recogniser is PRIVATE, so a SwiftUI child gesture can
+    //      never deterministically coexist with it; on a physical iOS-26 device a
+    //      child drag starves the pan regardless of attachment modifier.
+    //
+    // The robust path the research recommends: own the recogniser in UIKit. We use
+    // the iOS-18 `UIGestureRecognizerRepresentable` to attach ONE real
+    // `UILongPressGestureRecognizer` (minimumPressDuration 0.25, allowableMovement
+    // 12) to the SwiftUI ScrollView. Its delegate returns
+    // `shouldRecognizeSimultaneouslyWith == true` for the scroll pan, so a quick
+    // swipe (which never satisfies the 0.25s press) scrolls, while a held press
+    // begins the reorder. The SwiftUI rows + `.offset` make-room engine are kept
+    // verbatim — only the gesture SOURCE moved to UIKit. There is no post-drop
+    // lock: we call our own end logic in `.ended` and the recogniser re-arms
+    // instantly. See docs/knowledge/fact-habit-tracker.md::Перестановка.
+
+    private var displayItems: [HabitItem] { dragSnapshot ?? store.allItems }
 
     private var reorderList: some View {
         let days = DateHelper.weekDates(weekOffset: weekOffset, firstDayOfWeek: store.firstDayOfWeek)
 
-        return List {
-            ForEach(store.allItems, id: \.id) { item in
-                reorderRow(for: item, days: days)
-                    .frame(height: rowHeight)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color(hex: "1C1C1E"))
-                    .listRowSeparator(.hidden)
-            }
-            .onMove(perform: moveItems)
+        return ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(displayItems.enumerated()), id: \.element.id) { index, item in
+                    let isDragging = draggingIndex == index
+                    let itemOffset = offsetForRow(at: index)
 
-            Color.clear
-                .frame(height: 100)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .moveDisabled(true)
+                    reorderRow(for: item, index: index, days: days)
+                        .frame(height: rowHeight)
+                        .offset(y: itemOffset)
+                        .zIndex(isDragging ? 100 : 0)
+                        .scaleEffect(isDragging ? 1.02 : 1.0)
+                        .shadow(color: isDragging ? Color.black.opacity(0.35) : .clear,
+                                radius: isDragging ? 14 : 0, y: isDragging ? 6 : 0)
+                        // Make-room spring runs ONLY while a drag is in flight
+                        // (draggingIndex != nil) and only for NON-dragged rows.
+                        // At DROP (draggingIndex == nil) the animation must be nil:
+                        // the array reorders structurally (instant) AND every
+                        // itemOffset returns ±rowHeight→0 in the same render. If
+                        // the offset animated there, the row would spring from its
+                        // already-correct new slot back toward the old offset and
+                        // settle — the "right blocks change then change back" glitch
+                        // (the title, one stable Text, hid it; the 7 checkmark
+                        // columns made it obvious). Instant commit = seamless
+                        // because the rows are already in their final spots.
+                        // See docs/knowledge/fact-habit-tracker.md::Перестановка.
+                        .animation((draggingIndex == nil || isDragging)
+                                   ? nil
+                                   : .interactiveSpring(response: 0.25, dampingFraction: 0.8),
+                                   value: itemOffset)
+                }
+                Color.clear.frame(height: 100)
+            }
+            // Track the content's TRUE global top. As the list scrolls, this minY
+            // goes negative; the row index = (globalTouchY − contentTopY)/rowHeight
+            // is then scroll-correct by construction. (The earlier
+            // convert(globalPoint:to:.named) approach silently ignored scroll —
+            // it maps to an ANCESTOR space, but the named space was on this
+            // descendant — so a scrolled list grabbed the row ~N above the finger.)
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
+                contentTopY = $0
+            }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(Color(hex: "1C1C1E"))
+        .scrollIndicators(.hidden)
+        // The UIKit long-press owns scroll-vs-reorder arbitration (it coexists
+        // with the pan via the delegate). .scrollDisabled adds a belt-and-braces
+        // freeze once a row is actually grabbed so the held finger can't also
+        // drag the content; flips exactly once at engage. Freezing also pins
+        // contentTopY for the drag's lifetime, keeping the index math stable.
+        .scrollDisabled(draggingIndex != nil)
+        // The real recogniser, attached to the ScrollView. Callbacks report the
+        // touch point in GLOBAL space; we subtract contentTopY for the row index.
+        // Attached via .gesture (the UIGestureRecognizerRepresentable overload) —
+        // simultaneity with the scroll pan is handled in UIKit by the coordinator
+        // delegate's shouldRecognizeSimultaneouslyWith, NOT by a SwiftUI modifier.
+        .gesture(
+            ReorderLongPressGesture(
+                minimumPressDuration: 0.25,
+                onBegan: { globalY in
+                    let idx = Int((globalY - contentTopY) / rowHeight)
+                    guard idx >= 0, idx < displayItems.count else { return }
+                    dragSnapshot = store.allItems
+                    dragStartY = globalY
+                    draggingIndex = idx
+                    draggingOffset = 0
+                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                    VRLog.d("HABIT", "reorder GRAB idx=\(idx) globalY=\(Int(globalY)) top=\(Int(contentTopY))")
+                },
+                onChanged: { globalY in
+                    guard draggingIndex != nil else { return }
+                    draggingOffset = globalY - dragStartY
+                },
+                onEnded: { _ in endReorder() },
+                onCancelled: { endReorder() }
+            )
+        )
+    }
+
+    /// Commit the in-flight reorder (if any) and clear all drag state. Called from
+    /// both .ended and .cancelled so state can never stick (UIKit recognisers,
+    /// unlike SwiftUI gestures, DO deliver a cancel state).
+    private func endReorder() {
+        defer {
+            draggingIndex = nil
+            draggingOffset = 0
+            dragSnapshot = nil
+            dragStartY = 0
+        }
+        guard let from = draggingIndex else { return }
+        let target = targetIndex(from: from, offset: draggingOffset)
+        guard target != from, target >= 0, target < displayItems.count else {
+            VRLog.d("HABIT", "reorder END no-move from=\(from)")
+            return
+        }
+        VRLog.d("HABIT", "reorder END from=\(from) → target=\(target)")
+        store.reorderItem(from: from, to: target)
     }
 
     @ViewBuilder
-    private func reorderRow(for item: HabitItem, days: [WeekDay]) -> some View {
-        // PLAIN rows — NO Button, NO highlight gesture. Both were found to fight
-        // the native List reorder recognizer on iOS 26: a Button caused the
-        // post-drop dead period; a simultaneousGesture(DragGesture) for highlight
-        // STOLE the touch so the long-press-to-drag never started (no haptic, no
-        // lift). The native drag needs the row's touch unclaimed. Visual feedback
-        // during reorder is the row LIFTING under the finger. Group keeps a tap to
-        // expand (TapGesture fails on a long hold, so it doesn't block the drag).
-        // See docs/knowledge/fact-habit-tracker.md::Перестановка.
-        switch item {
-        case .habit(let habit, let groupId):
-            HabitRowView(
-                habit: habit,
-                groupId: groupId,
-                days: days,
-                isChild: groupId != nil,
-                isLastChild: isLastChild(of: item)
-            )
-        case .group(let group):
-            GroupRowView(group: group, days: days)
-                .contentShape(Rectangle())
-                .onTapGesture { store.toggleGroupExpanded(group.id) }
+    private func reorderRow(for item: HabitItem, index: Int, days: [WeekDay]) -> some View {
+        // The WHOLE row is draggable — no handle glyph, so the layout matches
+        // normal mode exactly (checkmarks don't shift). The grab is the UIKit
+        // long-press on the ScrollView (see reorderList); a quick tap that never
+        // reaches 0.25s still falls through to the group's expand-tap (so you can
+        // open a group to drop into it). Habit rows are inert on tap.
+        Group {
+            switch item {
+            case .habit(let habit, let groupId):
+                HabitRowView(habit: habit, groupId: groupId, days: days,
+                             isChild: groupId != nil, isLastChild: isLastChild(of: item))
+            case .group(let group):
+                GroupRowView(group: group, days: days)
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.toggleGroupExpanded(group.id) }
+            }
         }
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
     }
 
-    /// Translate List's insert-style (source, toOffset) into the "land on this
-    /// item" index store.reorderItem expects, then delegate.
-    private func moveItems(from source: IndexSet, to destination: Int) {
-        guard let s = source.first else { return }
-        let count = store.allItems.count
-        let target = destination >= count ? count - 1 : (destination > s ? destination - 1 : destination)
-        guard target != s, target >= 0 else { return }
-        VRLog.d("HABIT", "reorder move from=\(s) toOffset=\(destination) → target=\(target)")
-        store.reorderItem(from: s, to: target)
+    /// Final landing index for the dragged row given its pixel offset.
+    private func targetIndex(from: Int, offset: CGFloat) -> Int {
+        let visualPos = CGFloat(from) * rowHeight + offset
+        let raw = Int(round(visualPos / rowHeight))
+        return max(0, min(displayItems.count - 1, raw))
+    }
+
+    /// Live make-room offset for each row while a drag is in flight.
+    private func offsetForRow(at index: Int) -> CGFloat {
+        guard let dragIdx = draggingIndex else { return 0 }
+        if index == dragIdx { return draggingOffset }
+
+        let target = targetIndex(from: dragIdx, offset: draggingOffset)
+        if dragIdx < target {
+            if index > dragIdx && index <= target { return -rowHeight }
+        } else if dragIdx > target {
+            if index >= target && index < dragIdx { return rowHeight }
+        }
+        return 0
     }
 
     private func openEditor(for item: HabitItem) {
@@ -388,12 +504,10 @@ private struct NormalRow: View {
     // a ScrollView. A Button gets special scroll-view touch handling that
     // bypasses the ~150ms content-touch delay AND the iOS-26 ScrollView
     // gesture-arbitration regression that kept every raw-gesture highlight laggy
-    // (this device is iOS 26.4). The Button's own action is empty; a simultaneous
-    // min-distance-0 drag supplies the tap LOCATION + timing (a Button gives
-    // neither), and a simultaneous long-press opens the editor. The flag stops a
-    // hold from also firing a tap. See docs/knowledge/fact-habit-tracker.md.
-    @State private var startLoc: CGPoint = .zero
-    @State private var pressStart: Date? = nil
+    // (this device is iOS 26.4). The Button's own action is empty; a SpatialTap
+    // supplies the tap LOCATION (x-zone routing) and a long-press opens the
+    // editor. longPressFired stops a deliberate hold from ALSO firing a tap; it
+    // is reset on every touch-down via onPressingChanged so it can never stick.
     @State private var longPressFired = false
 
     private let longPressDelay: TimeInterval = 0.4
@@ -407,34 +521,30 @@ private struct NormalRow: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(RowPressStyle())                  // INSTANT touch-down highlight
+        // Quick tap → x-zone routing. SpatialTapGesture is DISCRETE, so a finger
+        // that moves to scroll fails the tap and the ScrollView pan takes over.
+        // The previous DragGesture(minimumDistance: 0) was CONTINUOUS and live
+        // from touch-down — it starved the pan and KILLED scrolling (the same
+        // iOS-26 arbitration trap that broke reorder mode; see deep-research note
+        // in fact-habit-tracker.md). A discrete tap doesn't starve the pan.
         .simultaneousGesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                .onChanged { value in
-                    if pressStart == nil {
-                        pressStart = Date()
-                        startLoc = value.location
-                        longPressFired = false
-                    }
-                }
-                .onEnded { value in
-                    let start = pressStart
-                    pressStart = nil
-                    guard !longPressFired, let s = start else { return }
-                    let elapsed = Date().timeIntervalSince(s)
-                    let drift = hypot(value.location.x - startLoc.x,
-                                      value.location.y - startLoc.y)
-                    guard elapsed < longPressDelay, drift < moveTolerance else { return }
-                    onTap(value.location)              // QUICK TAP → x-zone routing
+            SpatialTapGesture(coordinateSpace: .local)
+                .onEnded { e in
+                    guard !longPressFired else { return }
+                    onTap(e.location)
                 }
         )
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: longPressDelay)
-                .onEnded { _ in
-                    longPressFired = true
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    onEdit()
-                }
-        )
+        // Press-and-hold → edit. maximumDistance lets a swipe fail the press so
+        // scrolling still works. onPressingChanged(true) fires on touch-down and
+        // resets the gate, so a stale longPressFired from a prior edit (whose
+        // sheet swallowed the tap-release) can't eat the next tap.
+        .onLongPressGesture(minimumDuration: longPressDelay, maximumDistance: moveTolerance) {
+            longPressFired = true
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            onEdit()
+        } onPressingChanged: { pressing in
+            if pressing { longPressFired = false }
+        }
     }
 
     @ViewBuilder
@@ -475,6 +585,61 @@ private struct FABPressStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+// MARK: - UIKit-backed reorder long-press
+//
+// A real UILongPressGestureRecognizer wrapped in the iOS-18
+// UIGestureRecognizerRepresentable. This is the fix for "the reorder list won't
+// scroll": three pure-SwiftUI attempts all starved the ScrollView pan because
+// SwiftUI's pan recogniser is private and can't be coordinated against. Here the
+// recogniser is ours, and its delegate returns shouldRecognizeSimultaneouslyWith
+// == true for the scroll pan — so a quick swipe (which never satisfies the 0.25s
+// press) scrolls, and a held press starts the reorder. Callbacks report the touch
+// point in WINDOW space (the parent maps it to a row index). See
+// docs/knowledge/fact-habit-tracker.md::Перестановка.
+private struct ReorderLongPressGesture: UIGestureRecognizerRepresentable {
+    let minimumPressDuration: TimeInterval
+    let onBegan: (_ globalY: CGFloat) -> Void
+    let onChanged: (_ globalY: CGFloat) -> Void
+    let onEnded: (_ globalY: CGFloat) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let g = UILongPressGestureRecognizer()
+        g.minimumPressDuration = minimumPressDuration
+        g.allowableMovement = 12          // a small jitter still counts as a hold
+        g.delegate = context.coordinator  // → coexist with the scroll pan
+        return g
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer,
+                                         context: Context) {
+        // location(in: nil) → window/global space. The parent subtracts the
+        // content's global top (tracked via onGeometryChange) for the row index,
+        // which is scroll-correct because that top moves with the scroll.
+        let y = recognizer.location(in: nil).y
+        switch recognizer.state {
+        case .began:     onBegan(y)
+        case .changed:   onChanged(y)
+        case .ended:     onEnded(y)
+        case .cancelled, .failed: onCancelled()
+        default: break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        // THE crucial line: let our long-press and the ScrollView pan recognise
+        // together. Without this the long-press would, once again, block the pan.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool { true }
     }
 }
 

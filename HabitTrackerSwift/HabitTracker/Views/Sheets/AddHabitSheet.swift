@@ -11,106 +11,82 @@ struct AddHabitSheet: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                Form {
-                    Section {
-                        Picker("Тип", selection: $isCreatingGroup) {
-                            Text("Привычка").tag(false)
-                            Text("Группа").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            Form {
+                Section {
+                    Picker("Тип", selection: $isCreatingGroup) {
+                        Text("Привычка").tag(false)
+                        Text("Группа").tag(true)
                     }
+                    .pickerStyle(.segmented)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                }
 
+                Section {
+                    TextField(
+                        isCreatingGroup ? "Название группы" : "Название привычки",
+                        text: $name
+                    )
+                    .font(.system(size: 17))
+                    .foregroundColor(.white)
+                    .submitLabel(.done)
+                }
+
+                if isCreatingGroup {
                     Section {
-                        TextField(
-                            isCreatingGroup ? "Название группы" : "Название привычки",
-                            text: $name
-                        )
-                        .font(.system(size: 17))
-                        .foregroundColor(.white)
-                        .submitLabel(.done)
-                    }
-
-                    if isCreatingGroup {
-                        Section {
-                            ForEach(groupHabitNames.indices, id: \.self) { index in
-                                HStack {
-                                    TextField("Привычка \(index + 1)", text: $groupHabitNames[index])
-                                        .foregroundColor(.white)
-                                    if index >= 2 {
-                                        Button {
-                                            groupHabitNames.remove(at: index)
-                                        } label: {
-                                            Image(systemName: "minus.circle.fill")
-                                                .foregroundColor(.red)
-                                                .font(.system(size: 22))
-                                        }
-                                        .buttonStyle(.plain)
+                        ForEach(groupHabitNames.indices, id: \.self) { index in
+                            HStack {
+                                TextField("Привычка \(index + 1)", text: $groupHabitNames[index])
+                                    .foregroundColor(.white)
+                                if index >= 2 {
+                                    Button {
+                                        groupHabitNames.remove(at: index)
+                                    } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                            .foregroundColor(.red)
+                                            .font(.system(size: 22))
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             }
-                            Button {
-                                groupHabitNames.append("")
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            } label: {
-                                Label("Добавить привычку", systemImage: "plus.circle.fill")
-                                    .foregroundColor(.blue)
-                            }
-                        } header: {
-                            Text("Привычки в группе")
                         }
-                    }
-
-                    Section {
-                        ColorPickerGrid(selectedColor: $selectedColor)
-                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                        Button {
+                            groupHabitNames.append("")
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        } label: {
+                            Label("Добавить привычку", systemImage: "plus.circle.fill")
+                                .foregroundColor(.blue)
+                        }
                     } header: {
-                        Text("Цвет")
+                        Text("Привычки в группе")
                     }
-
-                    Section { Color.clear.frame(height: 60) }
-                        .listRowBackground(Color.clear)
                 }
-                .scrollContentBackground(.hidden)
-                .background(Color(hex: "1C1C1E"))
 
-                saveBar
+                Section {
+                    ColorPickerGrid(selectedColor: $selectedColor)
+                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                } header: {
+                    Text("Цвет")
+                }
             }
+            .scrollContentBackground(.hidden)
             .background(Color(hex: "1C1C1E"))
             .navigationTitle(isCreatingGroup ? "Новая группа" : "Новая привычка")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Отмена") { dismiss() }
+                    Button("Закрыть") { dismiss() }
                         .foregroundColor(.blue)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isCreatingGroup ? "Создать" : "Добавить") { addItem() }
+                        .fontWeight(isValid ? .bold : .regular)
+                        .disabled(!isValid)
                 }
             }
         }
-        .presentationDetents([.large])
+        .presentationDetents([.fraction(0.6), .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
-    }
-
-    private var saveBar: some View {
-        Button {
-            addItem()
-        } label: {
-            Text("Добавить")
-        }
-        .buttonStyle(ProminentCTAStyle(enabled: isValid, tint: .blue))
-        .disabled(!isValid)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-        .background(
-            LinearGradient(
-                colors: [Color(hex: "1C1C1E").opacity(0), Color(hex: "1C1C1E")],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: 80)
-            .allowsHitTesting(false),
-            alignment: .bottom
-        )
     }
 
     private var isValid: Bool {

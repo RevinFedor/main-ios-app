@@ -78,7 +78,16 @@ struct HabitRowView: View {
                     .frame(height: 44)
             }
         }
-        .animation(nil, value: habit.id) // Отключаем анимацию при reorder
+        // Strip ALL inherited animation from this subtree. During reorder the
+        // parent row animates its .offset (make-room spring), and that
+        // transaction would otherwise leak into the checkmarks — and because
+        // every row's days share identical ids (Monday==Monday across rows),
+        // SwiftUI tried to "move" a checkmark vertically between rows, so the
+        // icons slid in from the top/bottom on drop. .transaction nil makes the
+        // checkmarks teleport with their row instead of animating independently.
+        // (A plain .animation(nil, value:) only catches that one value, not the
+        // inherited transaction — see docs/knowledge/fact-habit-tracker.md.)
+        .transaction { $0.animation = nil }
     }
 
     // MARK: - Status Icon

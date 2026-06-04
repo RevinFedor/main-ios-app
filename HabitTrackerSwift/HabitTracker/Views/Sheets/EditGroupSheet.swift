@@ -12,72 +12,68 @@ struct EditGroupSheet: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                Form {
-                    Section {
-                        TextField("Название", text: $name)
-                            .font(.system(size: 17))
-                            .foregroundColor(.white)
-                            .submitLabel(.done)
-                    }
-
-                    Section {
-                        HStack {
-                            Label("Серия 100%", systemImage: "flame.fill")
-                                .foregroundStyle(.orange)
-                            Spacer()
-                            Text("\(group.streak) дней")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        HStack {
-                            Label("Привычек", systemImage: "list.bullet")
-                                .foregroundStyle(.blue)
-                            Spacer()
-                            Text("\(group.habits.count)")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                    } header: {
-                        Text("Статистика")
-                    }
-
-                    Section {
-                        ColorPickerGrid(selectedColor: $selectedColor)
-                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                    } header: {
-                        Text("Цвет")
-                    }
-
-                    Section {
-                        Button(role: .destructive) {
-                            showDeleteAlert = true
-                        } label: {
-                            HStack {
-                                Spacer()
-                                Text("Удалить группу")
-                                    .font(.system(size: 17))
-                                Spacer()
-                            }
-                        }
-                    }
-
-                    // Spacer for floating Save button
-                    Section { Color.clear.frame(height: 60) }
-                        .listRowBackground(Color.clear)
+            Form {
+                Section {
+                    TextField("Название", text: $name)
+                        .font(.system(size: 17))
+                        .foregroundColor(.white)
+                        .submitLabel(.done)
                 }
-                .scrollContentBackground(.hidden)
-                .background(Color(hex: "1C1C1E"))
 
-                saveBar
+                Section {
+                    HStack {
+                        Label("Серия 100%", systemImage: "flame.fill")
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Text("\(group.streak) дней")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Label("Привычек", systemImage: "list.bullet")
+                            .foregroundStyle(.blue)
+                        Spacer()
+                        Text("\(group.habits.count)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                } header: {
+                    Text("Статистика")
+                }
+
+                Section {
+                    ColorPickerGrid(selectedColor: $selectedColor)
+                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                } header: {
+                    Text("Цвет")
+                }
+
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteAlert = true
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Text("Удалить группу")
+                                .font(.system(size: 17))
+                            Spacer()
+                        }
+                    }
+                }
             }
+            .scrollContentBackground(.hidden)
             .background(Color(hex: "1C1C1E"))
             .navigationTitle("Группа")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Отмена") { dismissFast() }
+                    Button("Закрыть") { dismiss() }
                         .foregroundColor(.blue)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Сохранить") { saveChanges() }
+                        .fontWeight(isDirty ? .bold : .regular)
+                        .disabled(!isDirty || !isValid)
                 }
             }
             .alert("Удалить группу?", isPresented: $showDeleteAlert) {
@@ -88,7 +84,7 @@ struct EditGroupSheet: View {
                 Text("«\(group.name)» содержит \(group.habits.count) привычек")
             }
         }
-        .presentationDetents([.large])
+        .presentationDetents([.fraction(0.6), .large])
         .presentationDragIndicator(.visible)
         .preferredColorScheme(.dark)
         .onAppear {
@@ -97,29 +93,13 @@ struct EditGroupSheet: View {
         }
     }
 
-    private var saveBar: some View {
-        Button {
-            saveChanges()
-        } label: {
-            Text("Сохранить")
-        }
-        .buttonStyle(ProminentCTAStyle(enabled: isValid, tint: .blue))
-        .disabled(!isValid)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-        .background(
-            LinearGradient(
-                colors: [Color(hex: "1C1C1E").opacity(0), Color(hex: "1C1C1E")],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: 80)
-            .allowsHitTesting(false),
-            alignment: .bottom
-        )
-    }
-
     private var isValid: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private var isDirty: Bool {
+        name.trimmingCharacters(in: .whitespaces) != group.name
+            || selectedColor != group.colorName
     }
 
     private func saveChanges() {
@@ -128,20 +108,12 @@ struct EditGroupSheet: View {
             name: name.trimmingCharacters(in: .whitespaces),
             color: selectedColor
         )
-        dismissFast()
+        dismiss()
     }
 
     private func deleteGroup(keepHabits: Bool) {
         store.deleteGroup(group.id, keepHabits: keepHabits)
-        dismissFast()
-    }
-
-    // Dismiss WITHOUT the ~0.35s system slide-down so the list underneath is
-    // interactive immediately. See docs/knowledge/fact-habit-tracker.md.
-    private func dismissFast() {
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) { dismiss() }
+        dismiss()
     }
 }
 

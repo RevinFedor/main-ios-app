@@ -12,7 +12,7 @@ import Foundation
 
 @MainActor
 final class TabRouter: ObservableObject {
-    enum Tab: String { case voice, habits }
+    enum Tab: String { case voice, remote, habits }
 
     @Published var selected: Tab = .voice
 
@@ -23,6 +23,7 @@ final class TabRouter: ObservableObject {
         // builds still installed) route to the habits tab.
         case "habits", "home": selected = .habits
         case "voice":          selected = .voice
+        case "remote":         selected = .remote
         default:               break
         }
     }

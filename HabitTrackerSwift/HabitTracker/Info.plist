@@ -13,6 +13,13 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Habit Tracker uses the microphone for voice dictation in the Voice tab.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>The Remote tab connects to your Mac on the local network when Dev mode is enabled.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>

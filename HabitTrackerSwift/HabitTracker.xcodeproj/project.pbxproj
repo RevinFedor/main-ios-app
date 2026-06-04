@@ -44,6 +44,9 @@
 		A1B2C3D50E /* VoiceRecordIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0E /* VoiceRecordIntents.swift */; };
 		A1B2C3D50F /* ReloadSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0F /* ReloadSession.swift */; };
 		A1B2C3D510 /* TabRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F10 /* TabRouter.swift */; };
+		A1B2C3DB11 /* RemoteConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3DB01 /* RemoteConfig.swift */; };
+		A1B2C3DB12 /* RemoteWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3DB02 /* RemoteWebView.swift */; };
+		A1B2C3DB13 /* RemoteTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3DB03 /* RemoteTabView.swift */; };
 		A1B2C3D511 /* VRLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F11 /* VRLog.swift */; };
 		A1B2C3D512 /* VoiceRecordShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F12 /* VoiceRecordShortcuts.swift */; };
 		A1B2C3D513 /* LiveActivityKickoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F13 /* LiveActivityKickoff.swift */; };
@@ -126,6 +129,9 @@
 		A1B2C3D5F16 /* MicSourcePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicSourcePicker.swift; sourceTree = "<group>"; };
 		A1B2C3D5F17 /* PersistentActivityToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistentActivityToggle.swift; sourceTree = "<group>"; };
 		A1B2C3D5F18 /* AudioSessionIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionIndicator.swift; sourceTree = "<group>"; };
+		A1B2C3DB01 /* RemoteConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConfig.swift; sourceTree = "<group>"; };
+		A1B2C3DB02 /* RemoteWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWebView.swift; sourceTree = "<group>"; };
+		A1B2C3DB03 /* RemoteTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTabView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -190,6 +196,7 @@
 				A1B2C3D4B3 /* Models */,
 				A1B2C3D4B4 /* Views */,
 				A1B2C3D5B0 /* VoiceRecord */,
+				A1B2C3DB20 /* Remote */,
 				A1B2C3D4F0 /* Assets.xcassets */,
 				A1B2C3D4B5 /* Preview Content */,
 			);
@@ -231,6 +238,16 @@
 				A1B2C3D5F18 /* AudioSessionIndicator.swift */,
 			);
 			path = VoiceRecord;
+			sourceTree = "<group>";
+		};
+		A1B2C3DB20 /* Remote */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3DB01 /* RemoteConfig.swift */,
+				A1B2C3DB02 /* RemoteWebView.swift */,
+				A1B2C3DB03 /* RemoteTabView.swift */,
+			);
+			path = Remote;
 			sourceTree = "<group>";
 		};
 		A1B2C3D4B2 /* Products */ = {
@@ -446,6 +463,9 @@
 				A1B2C3D508 /* TranscriptStore.swift in Sources */,
 				A1B2C3D50F /* ReloadSession.swift in Sources */,
 				A1B2C3D510 /* TabRouter.swift in Sources */,
+				A1B2C3DB11 /* RemoteConfig.swift in Sources */,
+				A1B2C3DB12 /* RemoteWebView.swift in Sources */,
+				A1B2C3DB13 /* RemoteTabView.swift in Sources */,
 				A1B2C3D511 /* VRLog.swift in Sources */,
 				A1B2C3D509 /* VoiceRecordTabView.swift in Sources */,
 				A1B2C3D50A /* VoiceSettingsSheet.swift in Sources */,
@@ -582,7 +602,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -639,7 +659,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -662,7 +682,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = HabitTracker/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Habit Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = "main-ios-app";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -693,7 +713,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = HabitTracker/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Habit Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = "main-ios-app";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

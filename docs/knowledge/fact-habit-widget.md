@@ -38,7 +38,7 @@ Datasource живёт в `UserDefaults(suiteName: group.com.fedor277.habittracke
 
 ## Deep-link в Habits tab
 
-Тап по виджету открывает app **сразу на Habits tab** (вторая вкладка), не на Voice (default). URL-схема: `habittracker://habits`. `TabRouter` обрабатывает host=`habits` (и legacy `home` для старых виджетов). Детали — `fact-voice-record.md::Tabs` (там же про Voice как default).
+Тап по виджету открывает app **сразу на Habits tab** (третья вкладка из Voice · Remote · Habits), не на Voice (default). URL-схема: `habittracker://habits`. `TabRouter` обрабатывает host=`habits` (и legacy `home` для старых виджетов). Детали — `fact-voice-record.md::Tabs` (там же про Voice как default).
 
 ## Связанное
 
