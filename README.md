@@ -1,201 +1,265 @@
 <div align="center">
 
-<img src="HabitTrackerSwift/HabitTracker/Assets.xcassets/AppIcon.appiconset/icon.png" width="120" alt="Habit Tracker"/>
+<img src="HabitTrackerSwift/HabitTracker/Assets.xcassets/AppIcon.appiconset/icon.png" width="120" alt="Main iOS App"/>
 
-# Habit Tracker
+# Main iOS App
 
-**Нативное iOS-приложение: трекинг привычек через жесты + голосовая диктовка с Live Activity.**
+**Native iOS control surface for a Mac-side AI workflow: chat, terminal orchestration, voice capture, and the original habit tracker.**
 
-SwiftUI · WidgetKit · ActivityKit · AppIntents · Soniox ASR
+SwiftUI · REST/SSE · AppIntents · ActivityKit · WidgetKit · Soniox ASR
 
-`iOS 17+` · `Xcode 26` · `Swift / SwiftUI`
+`iOS 18+` · `Xcode 26` · `Swift / SwiftUI`
+
+<p>
+  <img src="assets/readme/terminal-projects.png" width="30%" alt="Terminal project list"/>
+  <img src="assets/readme/ai-chat-tools.png" width="30%" alt="AI Chat with tool calls"/>
+  <img src="assets/readme/terminal-tabs.png" width="30%" alt="custom-terminal tab list"/>
+</p>
 
 </div>
 
 ---
 
-## Что это
+## What This Is
 
-Приложение из **двух параллельных подсистем**, переключаемых вкладками:
+Main iOS App is a native iPhone client for controlling AI work that actually runs on the user's Mac. The phone does not execute tools, shell commands, MCP calls, or file mutations locally; it talks to Mac-side Electron/Node services over authenticated REST and SSE, renders their live state natively, and gives the user mobile controls for starting, stopping, approving, resuming, and routing work.
 
-- **🎙 Voice** (первая вкладка, открывается по умолчанию) — запись микрофона → потоковое распознавание речи через [Soniox](https://soniox.com) WebSocket → транскрипт в буфер обмена и историю. Управляется не только из приложения, но и из **Пункта управления**, **Shortcuts** и боковой кнопки iPhone (Action Button) — даже когда приложение закрыто. Во время записи на Lock Screen и в Dynamic Island живёт **Live Activity** с таймером и кнопками Stop/Cancel.
-- **✅ Habits** (вторая вкладка) — список привычек, сгруппированных в группы. Никакого режима «Edit»: всё через жесты — тап по чекмарку переключает день, долгое нажатие открывает редактирование, drag меняет порядок и переносит между группами. Прогресс отображается матрицей дней и дублируется в виджеты на домашнем экране.
+The current product center is **AI Chat**. It has two modes in one SwiftUI tab:
 
-Данные приложения и виджетов живут в общем контейнере **App Group** (`UserDefaults` + JSON-дамп), поэтому виджет и Voice-расширение читают то же состояние, что и основное приложение.
+- **Voice Record chat**: a native client for the Mac-side Voice Record / Gemini-oriented agent runtime. It sends prompts to `/api/chat/send`, follows turns through SSE, renders thinking/tool/background-task cards, handles confirm gates, and supports a live By-pass switch.
+- **Terminal mode**: a native client for `custom-terminal` / Noted Terminal. It lists projects and terminal tabs, opens Claude/Codex/Claude SDK sessions, sends prompts into PTY-backed agent tabs, interrupts/resumes turns, answers pending questions, reads deterministic history, and can trigger the Mac-side build/install job.
 
----
-
-## Возможности
-
-### Привычки
-- **Gestures-first**, без кнопки Edit: tap / long-press / drag различаются временем и движением.
-- Группировка привычек, reorder внутри и между группами.
-- Два режима истории: привязка к календарной неделе или «относительно сегодня».
-- **Виджеты** 2×2 и 4×2 с мгновенной перезагрузкой при отметке привычки.
-
-### Голос
-- Потоковое распознавание речи (Soniox WebSocket ASR), результат — в буфер обмена + история транскриптов.
-- **Холодный запуск** записи из Пункта управления / Shortcuts / Action Button через `AppIntents` — без ручного открытия приложения.
-- **Live Activity** на Lock Screen и в Dynamic Island: фаза (starting / recording / stopping), таймер, интерактивные кнопки.
-- Picker источника микрофона прямо на экране записи с отображением текущего входа в реальном времени.
+Voice recording is still present: a normal dictation flow with Soniox streaming ASR, history, clipboard handoff, Shortcuts / Action Button / Control Center entry points, and Live Activity feedback. Habits is the original app this project started from: a gesture-first habit tracker with widgets and grouped rows. It is still maintained, but it is not the part with the most advanced Apple-platform work anymore.
 
 ---
 
-## Стек
+## Architecture
 
-| Слой | Технология |
-|---|---|
-| UI | SwiftUI (iOS 17+ приложение, iOS 18+ виджет-расширение) |
-| Хранение | `UserDefaults` + JSON в App Group `group.com.fedor277.habittracker` |
-| Виджеты | WidgetKit (Liquid Glass, `contentMarginsDisabled` + `widgetAccentable`) |
-| Live Activity | ActivityKit (Dynamic Island + Lock Screen + Notification Center) |
-| Точки входа | AppIntents (Shortcuts / Action Button / Control Center) |
-| Распознавание речи | Soniox WebSocket ASR |
-| Сборка/деплой | Xcode 26, `xcodebuild` + `devicectl` (беспроводно через `./deploy.sh`) |
+### iOS App
+
+The app is a SwiftUI client with three root tabs: `AI Chat`, `Voice`, `Habits`.
+
+- `VoiceChatStore` owns Voice Record chat state: conversations, running turns, pending confirms, By-pass state, background tasks, SSE reconnects, offline mode, and chat rehydration.
+- `TerminalControlStore` owns custom-terminal state: project cache, tab cache, selected tab, params, queue, timeline, history reducer, SSE stream, runtime status, draft recovery, and build/install polling.
+- `RecordingCoordinator` owns normal dictation: audio capture, Soniox session, transcript history, AppIntent actions, Live Activity updates, and clipboard handoff.
+- `HabitStore` owns the legacy habit datasource shared with widgets through App Group storage.
+
+The stores are intentionally long-lived singletons where live state matters. SwiftUI views are render surfaces, not the source of truth for running AI turns, pending tool confirmations, active terminal sessions, or in-flight voice recording.
+
+### Mac-Side Backends
+
+The iOS app assumes two local/remote Mac services:
+
+| Backend | Role | iOS client |
+|---|---|---|
+| Voice Record Electron app | Agent chat runtime, prompt library, GT file access, background task output, logs, `/api/chat/*` and `/api/agent/*` | `VoiceChatStore`, `VoiceChatAPI`, `VoiceChatUI` |
+| custom-terminal / Noted Terminal | Project/tab inventory, Claude/Codex/SDK PTY sessions, rollout/JSONL history, queue, timeline, `/api/sdk-tabs/*` | `TerminalControlStore`, `TerminalAPI`, `TerminalControlUI` |
+
+The shared auth model is a bearer token in `Secrets.remoteWebToken`. The app uses the token in `Authorization` headers for REST and as a query token for SSE endpoints whose server contract expects EventSource-style auth.
+
+### Transport Model
+
+The app uses REST for snapshots and commands, SSE for live turn/runtime events:
+
+- Voice chat: `/api/chats`, `/api/chats/:id`, `/api/chat/send`, `/api/chat/stop`, `/api/chat/confirm`, `/api/chat/bypass`, `/api/events`.
+- Terminal mode: `/api/projects`, `/api/projects/:id/tabs`, `/api/projects/:id/agent-tabs`, `/api/sdk-tabs/:id/send`, `/interrupt`, `/stop`, `/resume`, `/draft`, `/history`, `/events`.
+- Install flow: iOS asks custom-terminal for `/api/active-loaders`; if no tab is currently running, it starts `/api/terminal/build-install` through the Voice Record host, because custom-terminal can restart during its own install.
+
+The important constraint: the phone is a controller, not an agent host. Bash, MCP, file edits, Reddit search, GT file reads, and terminal PTY interaction happen on the Mac.
 
 ---
 
-## Требования
+## AI Chat
 
-- **Mac** с установленным **Xcode 26** (проверено на 26.4.1).
-- **iPhone** на iOS 17+ (разрабатывалось и деплоилось на iOS 26.x). Один раз должен быть спарен с Mac по USB — дальше работает по WiFi.
-- **Apple ID** для подписи — достаточно бесплатного (профиль живёт 7 дней, см. ниже). Платный аккаунт разработчика не обязателен.
-- Хотя бы **один iOS Simulator runtime** установлен в Xcode — `xcodebuild` без него отказывается компилировать даже под физический iPhone (версия симулятора совпадать с iPhone не обязана).
-- **Soniox API key** для распознавания речи — получить на [console.soniox.com](https://console.soniox.com). Без него собирается и работает всё, кроме самой транскрипции.
+AI Chat is native SwiftUI, not a `WKWebView`. It renders message history, tool calls, thinking blocks, stopped partial answers, background tasks, prompt chips, GT file attachments, and confirm cards directly in iOS.
+
+Key mechanics:
+
+- **SSE watchdog and rehydrate**: stale streams are detected by heartbeat silence; reconnect reloads active chats and pending confirm cards from server state.
+- **Confirm cards**: when By-pass is off, mutating tools park on the Mac and appear as pinned mobile cards. Allow/Deny is sent back through `/api/chat/confirm`.
+- **Live By-pass**: the toolbar toggle is per-chat server state, not just a send-time parameter. Flipping it mid-turn updates `/api/chat/bypass` and can unblock pending tool calls.
+- **Stop semantics**: if the model has already produced thinking/tool artifacts, the partial assistant message remains visible as stopped instead of being silently rolled back.
+- **Prompt and GT integration**: prompt picker, model/thinking presets, GT source browsing, file chips, and custom emoji rendering are native iOS controls backed by Mac-side APIs.
+- **Diagnostics**: iOS chat logs are sent to the Mac through `/api/log` and also kept in a local phone buffer for settings diagnostics.
 
 ---
 
-## Установка и запуск
+## Terminal Mode
 
-### 1. Клонировать и добавить ключ Soniox
+Terminal mode lives inside the AI Chat tab, not as a separate root tab. The drawer switches between `Chats` and `Terminal`; the central surface then becomes a native custom-terminal client.
 
-`Secrets.swift` намеренно **не** в репозитории (он в `.gitignore`). Создай его вручную:
+It has three navigation levels:
 
-```bash
-cat > HabitTrackerSwift/HabitTracker/VoiceRecord/Secrets.swift <<'EOF'
-import Foundation
+1. project list from `/api/projects`;
+2. tab list from `/api/projects/:id/tabs`;
+3. native transcript/composer for one Claude/Codex/SDK tab.
 
-// Получить ключ: https://console.soniox.com
-enum Secrets {
-    static let sonioxAPIKey = "ВСТАВЬ_СВОЙ_КЛЮЧ"
-}
-EOF
+This is not a web mirror. The mobile client understands the terminal data model:
+
+- project order, icons, active counts, status markers, and runtime loaders;
+- Claude JSONL history and Codex rollout-style history normalized into a common row model;
+- tab params for model / effort / thinking;
+- queue and run-after state;
+- timeline entries;
+- pending questions from CLI agents;
+- draft recovery after interrupt.
+
+The draft recovery is deliberately conservative. After `Stop`, iOS waits for deterministic runtime reasons such as `interrupt`, `turn_aborted`, or `catch-up-turn_aborted`, then probes `/api/sdk-tabs/:id/draft`. It only restores text that is actually back in the terminal TUI composer; it does not blindly reinsert the last prompt from local memory.
+
+Creating a terminal tab goes through custom-terminal:
+
+- Codex: `/api/projects/:id/agent-tabs` with `toolType=codex`;
+- Claude PTY: `/api/projects/:id/agent-tabs` with `toolType=claude`;
+- Claude SDK: `/api/projects/:id/sdk-tabs`.
+
+The result is a real Mac-side terminal/session. The iPhone controls it, but the process tree, filesystem access, and agent runtime remain on the Mac.
+
+---
+
+## Voice
+
+Voice is a normal speech-to-text recorder built around Soniox WebSocket ASR. It supports in-app recording, Shortcuts, Control Center, Action Button, clipboard handoff, transcript history, audio sharing, and Live Activity status on Lock Screen / Dynamic Island.
+
+The audio path is designed for iOS realities:
+
+- `AVAudioSession` calls are isolated away from the main thread because category/input changes are synchronous and can block on Bluetooth route negotiation.
+- Recording does not stop just because Soniox or the network is unavailable; audio capture is the source of truth, recognition is an attached service.
+- Stop uses Soniox's empty text-frame finalize handshake and waits for final tokens instead of cutting off the tail.
+- The microphone picker distinguishes intent from actual `currentRoute` so UI cannot claim AirPods are the input when iOS is actually recording from the iPhone mic.
+
+---
+
+## Habits
+
+Habits is the original version of the application: a local gesture-first tracker with grouped habits, week/relative history, reorder gestures, and home-screen widgets. It explains where the project started, but today it is mostly a stable local feature rather than the main technical focus.
+
+---
+
+## Project Layout
+
+```text
+habit-tracker/
+├── HabitTrackerSwift/
+│   ├── HabitTracker/                 # Main iOS app
+│   │   ├── Models/                   # Habit models and store
+│   │   ├── Remote/                   # Legacy WKWebView/custom-terminal wrapper + RemoteConfig
+│   │   ├── Views/                    # SwiftUI app surfaces
+│   │   └── VoiceRecord/
+│   │       ├── VoiceChat*.swift      # Native AI Chat client
+│   │       ├── TerminalControl*.swift# Native custom-terminal client
+│   │       ├── Recording*.swift      # Voice recording coordinator + Live Activity manager
+│   │       ├── DictationSession.swift
+│   │       ├── MicCaptureHub.swift
+│   │       └── TranscriptStore.swift
+│   ├── HabitWidget./                 # Widgets, controls, Live Activity, AppIntents
+│   └── HabitTracker.xcodeproj
+├── assets/
+│   └── readme/                       # README screenshots
+├── docs/
+│   ├── knowledge/                    # fact-* and fix-* project knowledge
+│   └── methodology/                  # cross-project design/debugging principles
+├── scripts/ai/                       # semantic docs index tooling
+├── deploy.sh                         # wireless build + install to iPhone
+├── CLAUDE.md                         # source-of-truth agent instructions
+├── AGENTS.md / GEMINI.md             # generated mirrors
+└── .semantic-index.json              # generated docs search index
 ```
 
-### 2. Открыть в Xcode (обычный путь)
+---
+
+## Requirements
+
+- macOS with **Xcode 26**.
+- iPhone on iOS 18+; the project is developed against iOS 26 devices.
+- Apple ID signing. A free Apple ID works, but the provisioning profile expires after 7 days.
+- A paired iPhone for wireless install through `devicectl`.
+- Soniox API key if you want voice transcription.
+- Running Mac-side services if you want AI Chat / Terminal mode:
+  - Voice Record Electron app exposing the chat REST/SSE API;
+  - custom-terminal / Noted Terminal exposing project/tab and SDK-tab APIs;
+  - the shared remote web token configured on both sides.
+
+---
+
+## Secrets
+
+`Secrets.swift` is intentionally gitignored. Create it locally:
+
+```swift
+import Foundation
+
+enum Secrets {
+    static let sonioxAPIKey = "soniox_api_key"
+
+    // Voice Record chat host.
+    static let voiceChatProdURL = "https://your-voice-record-host.example"
+    static let voiceChatDefaultDevHost = "http://192.168.1.10:7878"
+
+    // Legacy RemoteConfig / custom-terminal host.
+    static let remoteProdURL = "https://your-custom-terminal-host.example"
+    static let remoteDefaultDevHost = "http://192.168.1.10:7878"
+
+    // Shared bearer token used by Voice Chat and Terminal mode.
+    static let remoteWebToken = "token_from_mac_side_service"
+}
+```
+
+Expected path:
+
+```bash
+HabitTrackerSwift/HabitTracker/VoiceRecord/Secrets.swift
+```
+
+If you only want to build the habit/voice UI without remote AI features, the URL/token values can be placeholders, but any screen that calls the Mac APIs will fail offline until the services are configured.
+
+---
+
+## Build And Install
+
+Open the project in Xcode:
 
 ```bash
 open HabitTrackerSwift/HabitTracker.xcodeproj
 ```
 
-Дальше в Xcode: выбрать свою команду подписи (Signing & Capabilities → Team), выбрать iPhone как destination, нажать **Run** (⌘R).
-
-> Bundle ID нужно сделать уникальным под свой Apple ID, если `com.habittracker.swift` занят. Меняется в настройках таргетов `HabitTracker` и `HabitWidget`. App Group (`group.com.fedor277.habittracker`) тоже надо заменить на свой и обновить константу в коде.
-
-### 3. Или — беспроводный деплой одной командой
-
-Если iPhone уже спарен и в той же WiFi-сети — открывать Xcode не нужно:
+Or install to a paired iPhone over Wi-Fi:
 
 ```bash
 ./deploy.sh
 ```
 
-Скрипт сам: проверит окружение → продиагностирует устройство и сеть → соберёт Release → установит на iPhone по WiFi. При необходимости поднимает фоновые сервисы CoreDevice и закрывает Xcode за собой, если запускал его сам.
+Useful deploy commands:
 
----
-
-## Скрипты
-
-| Команда | Что делает |
+| Command | Purpose |
 |---|---|
-| `./deploy.sh` | Полный цикл: диагностика → сборка → установка на iPhone по WiFi. |
-| `./deploy.sh --check` | Только диагностика устройства и сети, без сборки. |
-| `./deploy.sh --renew` | Принудительно выпускает свежий 7-дневный профиль (сбрасывает счётчик до 7 дней). Данные на iPhone сохраняются — это upgrade-install, не wipe. |
-| `bash scripts/ai/build-index.sh` | Пересобирает семантический индекс документации (`.semantic-index.json`) для AI-поиска. |
+| `./deploy.sh` | Diagnose device/network, build Release, install to iPhone. |
+| `./deploy.sh --check` | Device/network diagnostics only. |
+| `./deploy.sh --renew` | Reissue the free 7-day provisioning profile, then build/install. |
 
-Логи каждого деплоя складываются в `deploy-logs/` (в `.gitignore`).
-
-### Про 7-дневный цикл бесплатного Apple ID
-
-Provisioning-профиль бесплатного Apple ID живёт **7 дней**. После — иконка приложения становится с крестиком, запуск выдаёт «Untrusted Developer». Лечится повторным `./deploy.sh`. Важно: обычный деплой **не** сбрасывает счётчик, пока профиль ещё валиден (`xcodebuild` переиспользует кэш) — чтобы обнулить до 7 дней досрочно, используй `./deploy.sh --renew`. Удалять приложение с iPhone руками **не нужно** — это сотрёт историю.
+Deploy logs go to `deploy-logs/`.
 
 ---
 
-## Запуск записи боковой кнопкой (Action Button)
+## Documentation Model
 
-Запись голоса можно повесить на боковую кнопку iPhone 15 Pro и новее — нажатие будет переключать запись, даже когда приложение закрыто. Настраивается через приложение **Команды** (Shortcuts):
+The repository uses `docs_search` and `.semantic-index.json` as the main documentation router. `docs/knowledge/` files are constraints: they capture subsystem behavior, known platform traps, and fixes that should not be rediscovered.
 
-<div align="center">
-<img src="assets/shortcut-toggle-voice-record.png" width="300" alt="Команда Toggle Voice Record + Скопировать в буфер обмена"/>
-</div>
+Important docs:
 
-1. Открой **Команды** → создай новую команду (`+`).
-2. Добавь действие **Toggle Voice Record** (ищется в поиске действий — его поставляет само приложение).
-3. Добавь второе действие **Скопировать в буфер обмена** и передай в него вывод первого (`Toggle Voice Record`). Это нужно, потому что фоновый intent **не может** сам писать в буфер обмена — iOS это запрещает; поэтому действие возвращает текст, а Copy-to-Clipboard его забирает.
-4. Назначь команду на боковую кнопку: **Настройки → Боковая кнопка → выбери эту команду.**
+- [`docs/knowledge/fact-voice-chat-tab.md`](docs/knowledge/fact-voice-chat-tab.md) — native AI Chat and Terminal mode.
+- [`docs/knowledge/fact-remote-tab.md`](docs/knowledge/fact-remote-tab.md) — RemoteConfig and legacy WKWebView/custom-terminal wrapper.
+- [`docs/knowledge/fact-voice-record.md`](docs/knowledge/fact-voice-record.md) — normal voice recording, AppIntents, Live Activity, Soniox.
+- [`docs/knowledge/fact-habit-tracker.md`](docs/knowledge/fact-habit-tracker.md) — habits gestures and widgets.
+- [`docs/methodology/сценарии-использования.md`](docs/methodology/сценарии-использования.md) — end-to-end user flows.
 
-Теперь нажатие боковой кнопки стартует/останавливает запись, а распознанный текст оказывается в буфере обмена. Аналогично команду можно вызвать из Пункта управления или по голосу через Siri.
-
-> Если в Shortcuts действие отображается как «Неизвестное действие» — переустанови приложение через `./deploy.sh` и перезапусти Shortcuts. `AppShortcutsProvider` должен жить в основном таргете приложения, иначе Shortcuts.app его не просканирует.
-
----
-
-## Структура проекта
-
-```
-habit-tracker/
-├── HabitTrackerSwift/
-│   ├── HabitTracker/            # Основное приложение
-│   │   ├── Models/              #   Habit, HabitGroup, HabitStore, DateHelper
-│   │   ├── Views/               #   Экраны, шторки, компоненты
-│   │   │   ├── Sheets/          #     Add/Edit привычек и групп, настройки
-│   │   │   └── VoiceRecord/     #     UI вкладки голоса, mic-picker, история
-│   │   └── VoiceRecord/         #   Логика записи: Coordinator, аудио-сессия,
-│   │                            #   Soniox-сессия, Live Activity manager
-│   ├── HabitWidget./            # Расширение виджетов + Live Activity + AppIntents
-│   └── HabitTracker.xcodeproj
-├── docs/                        # Документация (см. ниже)
-│   ├── knowledge/               #   fact-*.md (механика) + fix-*.md (шрамы)
-│   └── methodology/             #   Переносимые принципы (дизайн, диагностика)
-├── scripts/ai/                  # build-index.sh — семантический индексатор docs
-├── deploy.sh                    # Беспроводная сборка + установка
-├── CLAUDE.md                    # Точка входа для AI: инструкции + anti-patterns
-└── .semantic-index.json         # Индекс для поиска по docs (генерируется)
-```
-
-> Имя папки виджета `HabitWidget.` — с точкой на конце — историческое, так заведено в Xcode-проекте.
-
----
-
-## Документация
-
-Документация в этом репозитории устроена под **разработку с AI-ассистентом** и следует единому стандарту. Это не просто заметки — это база знаний, из которой AI автоматически подтягивает нужный контекст перед изменением кода.
-
-### `docs/knowledge/` — основная база
-
-Плоская папка с файлами двух типов:
-
-- **`fact-*.md`** — *как работает* подсистема: поведение фич, edge-cases, ограничения платформы, карта кода. Например [`fact-voice-record.md`](docs/knowledge/fact-voice-record.md), [`fact-live-activity.md`](docs/knowledge/fact-live-activity.md), [`fact-wireless-deploy.md`](docs/knowledge/fact-wireless-deploy.md).
-- **`fix-*.md`** — *шрамы*: баги, которые потребовали 3+ итераций отладки, отброшенные подходы и контринтуитивные решения. Например [`fix-dynamic-island.md`](docs/knowledge/fix-dynamic-island.md), [`fix-background-intent-crashes.md`](docs/knowledge/fix-background-intent-crashes.md).
-
-### `docs/methodology/` — переносимые принципы
-
-Философия, применимая в любом проекте: [`переносимый-дизайн.md`](docs/methodology/переносимый-дизайн.md) (UX-принципы), [`диагностика-apple.md`](docs/methodology/диагностика-apple.md) (как детерминированно диагностировать Apple-tooling), [`сценарии-использования.md`](docs/methodology/сценарии-использования.md) (пошаговые user-flow через состояния системы).
-
-### Как это активируется
-
-`.semantic-index.json` + MCP-инструмент `docs_search` дают **семантический поиск по симптому**: AI описывает проблему («запись виснет на стопе», «Activity не видна в Dynamic Island») — Haiku-роутер возвращает 2–4 релевантных файла. Ручных ссылок-каталогов не требуется, обнаружение идёт по тегам и симптомам.
-
-Индекс пересобирается после изменения документации:
+Rebuild the semantic index after documentation changes:
 
 ```bash
 bash scripts/ai/build-index.sh
 ```
 
-[`CLAUDE.md`](CLAUDE.md) — точка входа: процессные инструкции (читай knowledge перед изменением подсистемы), обзор стека и **anti-patterns** с привязкой к коду. `AGENTS.md` и `GEMINI.md` — автогенерируемые зеркала `CLAUDE.md` для других AI-инструментов, источник правды один.
-
 ---
 
-## Лицензия
+## License
 
-Личный проект. Лицензия не определена — перед использованием уточни у автора.
+Personal project. No public license is defined.
