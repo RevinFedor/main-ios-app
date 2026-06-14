@@ -15,3 +15,8 @@ deploy-logs/
 # Secrets
 Secrets.swift
 **/Secrets.swift
+
+# Local-only unfinished feature experiments. Keep this outside tracked sources
+# unless a feature is ready to be folded into the app.
+LocalFeatures/
+HabitTrackerSwift/LocalFeatures/

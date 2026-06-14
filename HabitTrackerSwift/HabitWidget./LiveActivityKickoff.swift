@@ -75,15 +75,14 @@ enum LiveActivityKickoff {
                 // "27:00" the moment the user toggles. Reset every field
                 // that conveys session identity.
                 let (micKind, micName) = cachedMicSource()
-                let state = RecordingAttributes.ContentState(
-                    startedAt: Date(),
-                    isStreaming: false,
-                    endedAt: nil,
-                    previewText: "",
-                    phase: .starting,
-                    micSourceKind: micKind,
-                    micSourceName: micName
-                )
+                var state = existing.content.state
+                state.startedAt = Date()
+                state.isStreaming = false
+                state.endedAt = nil
+                state.previewText = ""
+                state.phase = .starting
+                state.micSourceKind = micKind
+                state.micSourceName = micName
                 await existing.update(
                     ActivityContent(
                         state: state,

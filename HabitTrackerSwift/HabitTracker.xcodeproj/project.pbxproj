@@ -35,6 +35,11 @@
 		A1B2C3D505 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F05 /* RecordingCoordinator.swift */; };
 		A1B2C3D506 /* Secrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F06 /* Secrets.swift */; };
 		A1B2C3D507 /* SonioxTokenMint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F07 /* SonioxTokenMint.swift */; };
+		A1B2C3D5E0 /* VoiceChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5FE0 /* VoiceChat.swift */; };
+		A1B2C3D5E1 /* VoiceChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5FE1 /* VoiceChatStore.swift */; };
+		A1B2C3D5E2 /* VoiceChatUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5FE2 /* VoiceChatUI.swift */; };
+		A1B2C3D5E3 /* TerminalControlStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5FE3 /* TerminalControlStore.swift */; };
+		A1B2C3D5E4 /* TerminalControlUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5FE4 /* TerminalControlUI.swift */; };
 		A1B2C3D508 /* TranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F08 /* TranscriptStore.swift */; };
 		A1B2C3D509 /* VoiceRecordTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F09 /* VoiceRecordTabView.swift */; };
 		A1B2C3D50A /* VoiceSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F0A /* VoiceSettingsSheet.swift */; };
@@ -55,6 +60,7 @@
 		A1B2C3D516 /* MicSourcePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F16 /* MicSourcePicker.swift */; };
 		A1B2C3D517 /* PersistentActivityToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F17 /* PersistentActivityToggle.swift */; };
 		A1B2C3D518 /* AudioSessionIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F18 /* AudioSessionIndicator.swift */; };
+		A1B2C3D519 /* MicCaptureHub.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D5F19 /* MicCaptureHub.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -112,6 +118,11 @@
 		A1B2C3D5F05 /* RecordingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
 		A1B2C3D5F06 /* Secrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secrets.swift; sourceTree = "<group>"; };
 		A1B2C3D5F07 /* SonioxTokenMint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonioxTokenMint.swift; sourceTree = "<group>"; };
+		A1B2C3D5FE0 /* VoiceChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChat.swift; sourceTree = "<group>"; };
+		A1B2C3D5FE1 /* VoiceChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChatStore.swift; sourceTree = "<group>"; };
+		A1B2C3D5FE2 /* VoiceChatUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChatUI.swift; sourceTree = "<group>"; };
+		A1B2C3D5FE3 /* TerminalControlStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControlStore.swift; sourceTree = "<group>"; };
+		A1B2C3D5FE4 /* TerminalControlUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControlUI.swift; sourceTree = "<group>"; };
 		A1B2C3D5F08 /* TranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptStore.swift; sourceTree = "<group>"; };
 		A1B2C3D5F09 /* VoiceRecordTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordTabView.swift; sourceTree = "<group>"; };
 		A1B2C3D5F0A /* VoiceSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceSettingsSheet.swift; sourceTree = "<group>"; };
@@ -128,6 +139,7 @@
 		A1B2C3D5F15 /* ProvisioningExpiryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningExpiryView.swift; sourceTree = "<group>"; };
 		A1B2C3D5F16 /* MicSourcePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicSourcePicker.swift; sourceTree = "<group>"; };
 		A1B2C3D5F17 /* PersistentActivityToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistentActivityToggle.swift; sourceTree = "<group>"; };
+		A1B2C3D5F19 /* MicCaptureHub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicCaptureHub.swift; sourceTree = "<group>"; };
 		A1B2C3D5F18 /* AudioSessionIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionIndicator.swift; sourceTree = "<group>"; };
 		A1B2C3DB01 /* RemoteConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConfig.swift; sourceTree = "<group>"; };
 		A1B2C3DB02 /* RemoteWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWebView.swift; sourceTree = "<group>"; };
@@ -210,7 +222,13 @@
 				A1B2C3D5F0C /* VoiceRecordConfig.swift */,
 				A1B2C3D5F01 /* AppGroupContainer.swift */,
 				A1B2C3D5F02 /* AudioSessionManager.swift */,
+				A1B2C3D5F19 /* MicCaptureHub.swift */,
 				A1B2C3D5F07 /* SonioxTokenMint.swift */,
+				A1B2C3D5FE0 /* VoiceChat.swift */,
+				A1B2C3D5FE1 /* VoiceChatStore.swift */,
+				A1B2C3D5FE2 /* VoiceChatUI.swift */,
+				A1B2C3D5FE3 /* TerminalControlStore.swift */,
+				A1B2C3D5FE4 /* TerminalControlUI.swift */,
 				A1B2C3D5F03 /* DictationSession.swift */,
 				A1B2C3D5F0D /* RecordingAttributes.swift */,
 				A1B2C3D5F04 /* RecordingActivityManager.swift */,
@@ -447,7 +465,13 @@
 				A1B2C3D50C /* VoiceRecordConfig.swift in Sources */,
 				A1B2C3D501 /* AppGroupContainer.swift in Sources */,
 				A1B2C3D502 /* AudioSessionManager.swift in Sources */,
+				A1B2C3D519 /* MicCaptureHub.swift in Sources */,
 				A1B2C3D507 /* SonioxTokenMint.swift in Sources */,
+				A1B2C3D5E0 /* VoiceChat.swift in Sources */,
+				A1B2C3D5E1 /* VoiceChatStore.swift in Sources */,
+				A1B2C3D5E2 /* VoiceChatUI.swift in Sources */,
+				A1B2C3D5E3 /* TerminalControlStore.swift in Sources */,
+				A1B2C3D5E4 /* TerminalControlUI.swift in Sources */,
 				A1B2C3D503 /* DictationSession.swift in Sources */,
 				A1B2C3D50D /* RecordingAttributes.swift in Sources */,
 				A1B2C3D504 /* RecordingActivityManager.swift in Sources */,

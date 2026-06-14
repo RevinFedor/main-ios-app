@@ -10,7 +10,8 @@
     Knowledge-файлы — это **constraints**. Каждый паттерн, helper, инвариант, описанный в knowledge/, ОБЯЗАТЕЛЕН к применению. Нарушение knowledge-правила = баг.
   </step>
   <step index="3">
-    После применения изменений — `./deploy.sh` устанавливает на iPhone беспроводно. Если деплой меняет публичное поведение или вводит новый паттерн — обнови соответствующий `knowledge/fact-*.md` или `methodology/*.md`.
+    После применения изменений — `./deploy.sh` устанавливает на iPhone беспроводно.
+    НЕ обновляй документацию без ЯВНОГО приказа пользователя. Файлы `docs/` (`knowledge/`, `methodology/`, `fact-*`, `fix-*`) — НЕ создавать и НЕ редактировать, пока пользователь прямо не попросил. Закончил фичу/фикс → ОСТАНОВИСЬ, не пиши доки «заодно» / «по итогам» / на каждой итерации. Причина: пользователь сначала сам проверяет код; документация по непроверенной итерации = мусор, который придётся откатывать. Это всегда отдельный явный шаг.
   </step>
 </instructions>
 
@@ -37,6 +38,7 @@
 - **`AppShortcutsProvider` — только в main app target**, не в widget extension. Shortcuts.app сканирует только main app. Если файл шортката доступен только через FS-sync widget'а — добавить explicit reference в main target. См. `knowledge/fact-voice-record.md`.
 - **`NSSupportsLiveActivities` обязателен в ОБОИХ Info.plist** (main app + widget extension). Иначе `Activity.request()` возвращает валидный ID, но не рендерит. См. `knowledge/fact-live-activity.md`.
 - **Не делать on-device Wake-on-LAN для пробуждения Mac — пробовали, отклонили.** Unicast-magic-packet будит только ~5 мин после засыпания (потом ARP-запись истекает, кадр дропается), broadcast закрыт `multicast`-entitlement'ом (недоступен free Apple ID), sleep-proxy нет. Фичу удалили, юзер выбрал «не усыплять Mac». Надёжный wake потребовал бы always-on relay в LAN. Не переизобретать. См. `knowledge/fix-пробуждение-mac.md`.
+- **Не строить AI Chat history drawer на SwiftUI `DragGesture` / hidden `UIViewRepresentable` superview bridge.** Это root-level custom container transition, конкурирующий с `UIScrollView`, search/text input, iOS 26 back-swipe и tab bar. Compact iPhone drawer делается через `UIGestureRecognizerRepresentable` + кастомный `UIPanGestureRecognizer` с intent-lock и scroll arbitration; regular width — `NavigationSplitView`. См. `knowledge/fact-voice-chat-tab.md::History drawer gesture`.
 
 ## Tabs
 
@@ -51,6 +53,10 @@ Voice — **первая** вкладка (default at cold-start); Habits — в
 ```
 
 Wireless через WiFi, USB не нужен. Сертификат бесплатного Apple ID живёт ~7 дней — для обновления просто запустить `./deploy.sh` снова. Детали — `knowledge/fact-wireless-deploy.md`. Самый частый баг после обновления Xcode — `knowledge/fix-coredevice-no-provider.md`.
+
+## Логирование (AI Chat)
+
+Нативный чат (`VoiceChatStore.swift::VCLog`) шлёт свои debug-строки на Mac: батч каждые ~3 сек → `POST /api/log` voice-record'а → **`~/Library/Logs/voice-record/ios-chat.log`** (НА МАКЕ, не на телефоне). Параллельно последние строки лежат в локальном буфере телефона: AI Chat Settings → Diagnostics → Show debug log / Copy. Теги: `[SSE]`, `[Store]`, `[Confirm]`, `[Keyboard]`. Дебаг чата = grep `ios-chat.log` рядом с `voice-record.log` + при UI/keyboard багах копия локального лога из settings. Новые подозрительные точки в чате логируй через `VCLog.log(tag, msg)` — попадут в оба места.
 
 ## Документация
 

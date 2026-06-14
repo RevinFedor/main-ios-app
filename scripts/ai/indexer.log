@@ -1,16 +1,18 @@
-=== Indexer started: Thu Jun  4 09:40:12 MSK 2026 ===
-RESPONSE for docs/methodology/переносимый-дизайн.md: ```json
-{
+=== Indexer started: Sun Jun 14 00:15:40 MSK 2026 ===
+RESPONSE for docs/knowledge/fact-voice-chat-tab.md: {
+  "path": "docs/knowledge/fact-voice-chat-tab.md",
+  "type": "fact",
+  "explicit": [
+    "ai_chat_tab",
+    "swiftui_native_client",
+    "terminal_mode",
+    "voice_record_integration",
+    "prompt_
+RESPONSE for docs/methodology/переносимый-дизайн.md: {
   "path": "docs/methodology/переносимый-дизайн.md",
   "type": "fact",
   "explicit": [
-    "iOS Live Activity and Activity.request() background constraint",
-    "Hardware con
-RESPONSE for docs/knowledge/fact-habit-tracker.md: ```json
-{
-  "path": "docs/knowledge/fact-habit-tracker.md",
-  "type": "fact",
-  "explicit": [
-    "gesture routing temporal dispatch",
-    "tap vs press priority arbitration",
-    "drag reorder animat
+    "ux_design_principles",
+    "mobile_ux_guidance",
+    "native_vs_custom_controls",
+    "ges

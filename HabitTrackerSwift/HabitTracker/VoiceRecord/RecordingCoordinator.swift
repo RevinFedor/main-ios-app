@@ -22,13 +22,14 @@ final class RecordingCoordinator: ObservableObject {
         case finalizing
     }
 
-    @Published private(set) var phase: Phase = .idle {
+    @Published private(set) var dictationPhase: Phase = .idle {
         didSet {
-            if oldValue != phase {
-                VRLog.d("Coord", "phase \(oldValue) → \(phase)")
+            if oldValue != dictationPhase {
+                VRLog.d("Coord", "dictationPhase \(oldValue) → \(dictationPhase)")
             }
         }
     }
+    @Published private(set) var dictationStartedAt: Date? = nil
     @Published private(set) var finalText: String = ""
     @Published private(set) var partialText: String = ""
     @Published private(set) var bufferedSeconds: Double = 0
@@ -38,6 +39,23 @@ final class RecordingCoordinator: ObservableObject {
     // outside the .stopping window. See DictationSession::stop().
     @Published private(set) var stoppingLagSeconds: Double = 0
     @Published private(set) var lastError: String?
+    // Transient end-of-action verdict surfaced as a top banner in the Voice tab:
+    // GREEN after a recording/retranscribe that produced a result, RED when it
+    // failed (no internet, token/WS error, empty result) so the user is NEVER
+    // left guessing whether it worked. Distinct from `lastError` (the inline,
+    // copyable, live-while-recording error) — `notice` is the glanceable verdict
+    // fired only at terminal points (stop / reload done). A fresh
+    // `id` each post re-triggers the banner even if the message repeats.
+    struct UserNotice: Equatable {
+        enum Kind { case success, error }
+        let kind: Kind
+        let message: String
+        let id: UUID
+    }
+    @Published private(set) var notice: UserNotice?
+    // User deliberately cancelled. A cancel routes through the same didStopWith
+    // as a real stop, but must NOT post a success/error notice.
+    private var dictationCancelled = false
     @Published private(set) var isWSConnected: Bool = false
     @Published private(set) var history: [TranscriptEntry] = []
     // Id of the most recently appended recording — the one whose transcript is
@@ -56,15 +74,15 @@ final class RecordingCoordinator: ObservableObject {
     // reliable way to tell them apart.
     private(set) var stopOriginatedFromIntent: Bool = false
 
-    private var session: DictationSession?
+    private var dictationSession: DictationSession?
     private var reloadSession: ReloadSession?
     private var foregroundObserver: NSObjectProtocol?
     private var startingFallbackTask: Task<Void, Never>?
-    // Resolved by didStopWith — lets stop() truly await until the engine
-    // has finished and App-Group state is consistent. Required so the
-    // ControlWidgetToggle's perform() doesn't return early (which would
-    // cause the system to re-read currentValue() before our shared state
-    // settled and snap the toggle back — WWDC24 10157).
+    // Resolved when the DICTATION slot's didStopWith lands — lets stop() truly
+    // await until the engine has finished and App-Group state is consistent.
+    // Required so the ControlWidgetToggle's perform() doesn't return early
+    // (which would cause the system to re-read currentValue() before our shared
+    // state settled and snap the toggle back — WWDC24 10157).
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
     private init() {
@@ -94,11 +112,17 @@ final class RecordingCoordinator: ObservableObject {
     // Recording-in-progress for UI gating. Includes transitional states so
     // the big button shows a loader while we wait for connect/finalize.
     var isRecording: Bool {
-        phase == .recording || phase == .finalizing || phase == .stopping
+        dictationPhase == .recording || dictationPhase == .finalizing || dictationPhase == .stopping
     }
-    var isStarting: Bool { phase == .starting }
-    var isStopping: Bool { phase == .stopping || phase == .finalizing }
+    var isStarting: Bool { dictationPhase == .starting }
+    var isStopping: Bool { dictationPhase == .stopping || dictationPhase == .finalizing }
     var isBusy: Bool { isStarting || isStopping }
+
+    // Anything capturing the mic right now. Mirrored into the App Group
+    // `isCapturing` flag so the mic-data-source picker can react consistently.
+    var isAnythingRecording: Bool {
+        isRecording || isStarting
+    }
 
     var combinedTranscript: String {
         if partialText.isEmpty { return finalText }
@@ -107,18 +131,18 @@ final class RecordingCoordinator: ObservableObject {
     }
 
     func toggle() async {
-        VRLog.d("Coord", "toggle() phase=\(phase)")
-        switch phase {
+        VRLog.d("Coord", "toggle() dictationPhase=\(dictationPhase)")
+        switch dictationPhase {
         case .idle:                    await start()
         case .recording:               await stop()
         case .starting, .stopping, .finalizing:
-            VRLog.d("Coord", "toggle() ignored during phase=\(phase)")
+            VRLog.d("Coord", "toggle() ignored during dictationPhase=\(dictationPhase)")
         }
     }
 
     func start() async {
-        guard phase == .idle else {
-            VRLog.d("Coord", "start() ignored, phase=\(phase)")
+        guard dictationPhase == .idle else {
+            VRLog.d("Coord", "start() ignored, dictationPhase=\(dictationPhase)")
             return
         }
         VRLog.d("Coord", "start() — go")
@@ -128,19 +152,18 @@ final class RecordingCoordinator: ObservableObject {
         bufferedSeconds = 0
         lastError = nil
         isWSConnected = false
-        phase = .starting
+        dictationStartedAt = Date()
+        dictationPhase = .starting
         syncSharedState(isRecording: true, startedAt: Date())
 
-        // Live Activity opens in .starting so the notification center / Dynamic
-        // Island immediately shows a spinner — instant tactile feedback before
-        // mic + Soniox finish handshaking. The user always sees activity on the
-        // OS surfaces, never an empty pause.
+        // Live Activity opens in .starting so the NC / Dynamic Island immediately
+        // shows feedback before mic + Soniox finish handshaking.
         do {
-            try RecordingActivityManager.shared.start(
+            try RecordingActivityManager.shared.dictationStart(
                 title: VoiceRecordConfig.liveActivityName,
                 phase: .starting
             )
-            VRLog.d("Coord", "Live Activity started in .starting")
+            VRLog.d("Coord", "Live Activity dictation slot opened in .starting")
         } catch {
             lastError = "Live Activity: \(error.localizedDescription)"
             VRLog.e("Coord", "Live Activity failed: \(error.localizedDescription)")
@@ -148,7 +171,7 @@ final class RecordingCoordinator: ObservableObject {
 
         let s = DictationSession()
         s.delegate = self
-        session = s
+        dictationSession = s
         // Hold .starting until WS is connected — so the big button stays
         // in spinner state instead of flipping to stop-icon before audio is
         // actually flowing.
@@ -160,10 +183,10 @@ final class RecordingCoordinator: ObservableObject {
         startingFallbackTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard !Task.isCancelled, let self else { return }
-            if self.phase == .starting {
+            if self.dictationPhase == .starting {
                 VRLog.d("Coord", "starting fallback fired — flip to .recording")
-                self.phase = .recording
-                await RecordingActivityManager.shared.setPhase(.recording)
+                self.dictationPhase = .recording
+                await RecordingActivityManager.shared.setDictationPhase(.recording)
             }
         }
     }
@@ -171,20 +194,20 @@ final class RecordingCoordinator: ObservableObject {
     func stop() async {
         // Accept stop from both .recording and .starting — user may panic-tap
         // before the WS connected, and they expect the same outcome.
-        guard phase == .recording || phase == .starting else {
-            VRLog.d("Coord", "stop() ignored, phase=\(phase)")
+        guard dictationPhase == .recording || dictationPhase == .starting else {
+            VRLog.d("Coord", "stop() ignored, dictationPhase=\(dictationPhase)")
             return
         }
         VRLog.d("Coord", "stop() — go (awaiting finalize)")
-        phase = .stopping
+        dictationPhase = .stopping
         // Flip the shared flag IMMEDIATELY so ControlValueProvider returns
         // false on the auto-reload that runs the moment perform() returns,
         // even if Soniox is slow to flush.
         syncSharedState(isRecording: false)
-        // And flip the LA into .stopping right away — that's what the user
-        // sees in the notification center / Dynamic Island and we promised
-        // instant feedback.
-        await RecordingActivityManager.shared.setPhase(.stopping)
+        // And flip the LA dictation slot into .stopping right away — that's what
+        // the user sees in the notification center / Dynamic Island and we
+        // promised instant feedback.
+        await RecordingActivityManager.shared.setDictationPhase(.stopping)
 
         // Suspend until didStopWith resumes us. DictationSession.stop() now
         // waits up to 60 s for Soniox to drain its is_final tail (was 2 s,
@@ -213,7 +236,7 @@ final class RecordingCoordinator: ObservableObject {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             self.stopContinuation = c
             Task { @MainActor in
-                await self.session?.stop()
+                await self.dictationSession?.stop()
             }
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 65_000_000_000)
@@ -226,33 +249,47 @@ final class RecordingCoordinator: ObservableObject {
             }
         }
         self.stoppingLagSeconds = 0
-        VRLog.d("Coord", "stop() — returned, phase=\(phase)")
+        VRLog.d("Coord", "stop() — returned, dictationPhase=\(dictationPhase)")
     }
 
-    // Hard cancel — drop pending audio, no transcript saved. Wired to the
-    // ✕ button in the Live Activity so the user can always escape a stuck
-    // Stopping… spinner.
+    // Hard cancel of the DICTATION slot — drop pending audio, no transcript
+    // saved. Wired to the ✕ button in the Live Activity / bottom row so the user
+    // can always escape a stuck Stopping… spinner.
     func cancel() async {
-        guard phase != .idle else {
-            VRLog.d("Coord", "cancel() ignored, phase=idle")
+        guard dictationPhase != .idle else {
+            VRLog.d("Coord", "cancel() ignored, dictationPhase=idle")
             return
         }
-        VRLog.d("Coord", "cancel() — go from phase=\(phase)")
-        phase = .stopping
+        VRLog.d("Coord", "cancel() — go from dictationPhase=\(dictationPhase)")
+        dictationCancelled = true   // suppress the success/error notice in didStopWith
+        dictationPhase = .stopping
         syncSharedState(isRecording: false)
-        await RecordingActivityManager.shared.setPhase(.stopping)
-        await session?.cancel()
+        await RecordingActivityManager.shared.setDictationPhase(.stopping)
+        await dictationSession?.cancel()
         // didStopWith will fire from cancel() with empty pcm and tear down.
         // No transcript saved (handled in didStopWith below by pcm.isEmpty
         // && text.isEmpty branch).
     }
 
     func retryWS() async {
-        await session?.retry()
+        await dictationSession?.retry()
     }
 
     func clearError() {
         lastError = nil
+    }
+
+    // Post a transient verdict banner (green success / red failure). Each call
+    // gets a fresh id so the view re-shows + restarts its auto-dismiss even when
+    // the same message repeats. The view owns the dismiss timing + animation;
+    // the coordinator only publishes the latest verdict.
+    private func postNotice(_ kind: UserNotice.Kind, _ message: String) {
+        notice = UserNotice(kind: kind, message: message, id: UUID())
+        VRLog.d("Coord", "notice[\(kind == .success ? "ok" : "err")]: \(message)")
+    }
+
+    func clearNotice() {
+        notice = nil
     }
 
     func deleteHistory(id: UUID) {
@@ -294,6 +331,21 @@ final class RecordingCoordinator: ObservableObject {
         }
     }
 
+    // Persist a manual reorder from History's reorder mode. `orderedVisibleIds`
+    // is the full visible (tab-filtered) list in its NEW order after the user
+    // dragged a row. The store renumbers every entry's sortIndex so the manual
+    // order wins over the date sort (hidden rows stay pinned to their visible
+    // neighbours). Re-publishes history on the main actor; the disk work is off
+    // it (same shape as mergeEntry).
+    func reorderHistory(orderedVisibleIds: [UUID]) async {
+        let reloaded = await Task.detached(priority: .userInitiated) {
+            TranscriptStore.shared.reorder(orderedVisibleIds: orderedVisibleIds)
+            return TranscriptStore.shared.loadAll()
+        }.value
+        history = reloaded
+        VRLog.d("Coord", "reorderHistory: \(orderedVisibleIds.count) visible ids")
+    }
+
     // Whether the most-recent recording (the one shown on the main screen) is
     // currently a note. Drives the +Notes button's toggled state.
     var lastEntryIsNote: Bool {
@@ -311,6 +363,18 @@ final class RecordingCoordinator: ObservableObject {
         history = TranscriptStore.shared.loadAll()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         VRLog.d("Coord", "toggleLastEntryNote: \(id) → note=\(makeNote)")
+    }
+
+    // Same +Notes action, but targeted at a specific history row. Used by the
+    // history card's long-press menu so an older voice note can be promoted
+    // without jumping back to the latest recording on the main screen.
+    func toggleEntryNote(id: UUID) {
+        guard let entry = history.first(where: { $0.id == id }) else { return }
+        let makeNote = !entry.isNote
+        TranscriptStore.shared.setNoteFlag(id: id, flag: makeNote)
+        history = TranscriptStore.shared.loadAll()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        VRLog.d("Coord", "toggleEntryNote: \(id) → note=\(makeNote)")
     }
 
     // Change a history entry's timestamp (from the date editor sheet). Resorts.
@@ -352,9 +416,9 @@ final class RecordingCoordinator: ObservableObject {
         }
         switch action {
         case "start":
-            if phase == .idle { await start() }
+            if dictationPhase == .idle { await start() }
         case "stop":
-            if phase == .recording || phase == .starting {
+            if dictationPhase == .recording || dictationPhase == .starting {
                 // ANY stop reaching handlePending originated from an AppIntent
                 // (Action Button / Control Center / Shortcuts). The in-app
                 // record button calls toggle() directly without writing to
@@ -374,7 +438,7 @@ final class RecordingCoordinator: ObservableObject {
                 // Cleared in didStopWith after end() has consumed the flag.
             }
         case "cancel":
-            if phase != .idle { await cancel() }
+            if dictationPhase != .idle { await cancel() }
         default:
             VRLog.d("Coord", "handlePending: unknown action=\(action)")
         }
@@ -402,13 +466,24 @@ final class RecordingCoordinator: ObservableObject {
         reloadingId = nil
         switch result {
         case .success(let newText):
-            TranscriptStore.shared.updateText(id: id, text: newText)
-            history = TranscriptStore.shared.loadAll()
-            UIPasteboard.general.string = newText
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            VRLog.d("Coord", "reload: ok — \(newText.count) chars")
+            let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                // Soniox returned nothing — do NOT overwrite the existing text
+                // with an empty string (that would destroy a good transcript).
+                // Treat as a failure verdict instead.
+                postNotice(.error, "Перезапись не дала результата")
+                VRLog.d("Coord", "reload: empty result — keeping old text")
+            } else {
+                TranscriptStore.shared.updateText(id: id, text: trimmed)
+                history = TranscriptStore.shared.loadAll()
+                UIPasteboard.general.string = trimmed
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                postNotice(.success, "Текст перезаписан (\(trimmed.count) симв.)")
+                VRLog.d("Coord", "reload: ok — \(trimmed.count) chars")
+            }
         case .failure(let err):
             lastError = "reload: \(err.localizedDescription)"
+            postNotice(.error, "Ошибка перезаписи: \(err.localizedDescription)")
             VRLog.e("Coord", "reload failed: \(err.localizedDescription)")
         }
     }
@@ -419,16 +494,22 @@ final class RecordingCoordinator: ObservableObject {
         return blob.subdata(in: 44..<blob.count)
     }
 
+    // Control Center's ControlValueProvider and the Shortcut toggle read
+    // `isRecording`. `isCapturing` mirrors the mic-capture state for shared UI.
     private func syncSharedState(isRecording: Bool, startedAt: Date? = nil) {
         let d = AppGroupContainer.defaults
         d.set(isRecording, forKey: VoiceRecordConfig.SharedKeys.isRecording)
+        // isCapturing: computed from live phase, or forced true by the
+        // isRecording arg for the brief window before the published prop lands.
+        let capturing = isRecording || isStarting
+        d.set(capturing, forKey: VoiceRecordConfig.SharedKeys.isCapturing)
         if let startedAt {
             d.set(startedAt.timeIntervalSince1970, forKey: VoiceRecordConfig.SharedKeys.recordingStartDate)
-        } else if !isRecording {
+        } else if !capturing {
             d.removeObject(forKey: VoiceRecordConfig.SharedKeys.recordingStartDate)
         }
         d.synchronize()
-        VRLog.d("Coord", "syncSharedState isRecording=\(isRecording)")
+        VRLog.d("Coord", "syncSharedState isRecording=\(isRecording) isCapturing=\(capturing)")
         WidgetCenter.shared.reloadAllTimelines()
         if #available(iOS 18.0, *) {
             // reloadControls(ofKind:) is cheaper than reloadAllControls() —
@@ -458,17 +539,16 @@ final class RecordingCoordinator: ObservableObject {
         // "persisted=false but engine recording — restoring" landing between
         // stop() at 19:06:33 and didStopWith at 19:06:35, after which the
         // process died and a new one cold-launched).
-        let actuallyRunning = phase == .recording || phase == .starting
-        if persisted && !actuallyRunning && phase != .stopping {
-            VRLog.d("Coord", "reconcile: persisted=true but engine idle — clearing + killing LA")
+        // Reconcile tracks the same state Control Center shows.
+        let actuallyRunning = dictationPhase == .recording || dictationPhase == .starting
+        if persisted && !actuallyRunning && dictationPhase != .stopping {
+            VRLog.d("Coord", "reconcile: persisted=true but dictation idle — clearing")
             syncSharedState(isRecording: false)
-            // Any LA visible right now is by definition orphaned (we are
-            // .idle but it's still on screen). End it so the user isn't
-            // staring at a phantom "Recording" notification forever.
+            VRLog.d("Coord", "reconcile: nothing running — killing orphan LA")
             Task { await RecordingActivityManager.shared.endAllOrphans() }
         } else if !persisted && actuallyRunning {
             // Far less likely path, but possible if someone wiped UserDefaults.
-            VRLog.d("Coord", "reconcile: persisted=false but engine recording — restoring")
+            VRLog.d("Coord", "reconcile: persisted=false but dictation running — restoring")
             syncSharedState(isRecording: true, startedAt: Date())
         }
     }
@@ -513,6 +593,7 @@ final class RecordingCoordinator: ObservableObject {
 extension RecordingCoordinator: DictationSessionDelegate {
     nonisolated func dictation(_ session: DictationSession, didUpdate update: DictationUpdate) {
         Task { @MainActor in
+            guard session === self.dictationSession else { return }
             self.finalText = update.final
             self.partialText = update.partial
             await RecordingActivityManager.shared.setPreviewText(self.combinedTranscript)
@@ -528,7 +609,12 @@ extension RecordingCoordinator: DictationSessionDelegate {
 
     nonisolated func dictation(_ session: DictationSession, didStopWith pcm: Data) {
         Task { @MainActor in
+            guard session === self.dictationSession else {
+                VRLog.d("Coord", "didStopWith ignored for stale session")
+                return
+            }
             VRLog.d("Coord", "didStopWith pcm=\(pcm.count) bytes")
+
             let text = (self.finalText + self.partialText).trimmingCharacters(in: .whitespacesAndNewlines)
             var savedAudioPath: String? = nil
             if !pcm.isEmpty {
@@ -559,22 +645,42 @@ extension RecordingCoordinator: DictationSessionDelegate {
                     VRLog.d("Coord", "autoCopy: stashed for foreground flush (state=\(appState.rawValue)), \(text.count) chars")
                 }
             }
+            let wasCancelled = self.dictationCancelled
+            self.dictationCancelled = false
+            if !wasCancelled && !text.isEmpty {
+                _ = VoiceChatStore.shared.enqueueDictationInsert(text)
+            }
             if !text.isEmpty || savedAudioPath != nil {
                 let appended = TranscriptStore.shared.append(text: text, audioPath: savedAudioPath)
                 self.lastEntryId = appended.id
                 self.history = TranscriptStore.shared.loadAll()
+                // Green verdict. If audio saved but Soniox returned no text
+                // (e.g. WS dropped mid-stream) it's a partial success — flag it
+                // so the user knows the recording is there but the transcript
+                // isn't, rather than a silent "done".
+                if !wasCancelled {
+                    if text.isEmpty {
+                        self.postNotice(.error, "Аудио сохранено, но текст не распознан")
+                    } else {
+                        self.postNotice(.success, "Запись сохранена")
+                    }
+                }
+            } else if !wasCancelled {
+                // Neither transcript nor audio — the recording genuinely failed
+                // (mic never produced frames, or WS never connected AND no PCM).
+                // Surface it instead of looking like nothing happened.
+                self.postNotice(.error, "Запись не получилась")
             }
-            // Always-active session pattern: never deactivate. Only re-apply
-            // category if the user recorded with AirPods-mic (HFP) — that flip
-            // releases the AirPods radio link back to A2DP for music. For the
-            // iPhone-mic case it's a no-op (already on A2DP-only).
             AudioSessionManager.shared.reconfigureForCurrentTarget()
-            await RecordingActivityManager.shared.end(immediate: true)
-            // Flag consumed by end() — clear before any later stops can
+            // dictationEnd() handles the .ended pop-out and intent-stop
+            // setActive(false) for jetsam protection.
+            await RecordingActivityManager.shared.dictationEnd(immediate: true)
+            // Flag consumed by dictationEnd() — clear before any later stops can
             // accidentally inherit it.
             self.stopOriginatedFromIntent = false
-            self.session = nil
-            self.phase = .idle
+            self.dictationSession = nil
+            self.dictationStartedAt = nil
+            self.dictationPhase = .idle
             self.isWSConnected = false
             self.syncSharedState(isRecording: false)
             // Resume stop() — it was awaiting on us so the toggle's
@@ -589,20 +695,22 @@ extension RecordingCoordinator: DictationSessionDelegate {
 
     nonisolated func dictationDidConnect(_ session: DictationSession) {
         Task { @MainActor in
+            guard session === self.dictationSession else { return }
             self.isWSConnected = true
             self.startingFallbackTask?.cancel()
             self.startingFallbackTask = nil
-            if self.phase == .starting {
-                self.phase = .recording
+            if self.dictationPhase == .starting {
+                self.dictationPhase = .recording
             }
-            VRLog.d("Coord", "WS connected — phase=\(self.phase)")
-            await RecordingActivityManager.shared.setPhase(.recording)
+            VRLog.d("Coord", "WS connected — dictationPhase=\(self.dictationPhase)")
+            await RecordingActivityManager.shared.setDictationPhase(.recording)
             await RecordingActivityManager.shared.setStreaming(true)
         }
     }
 
     nonisolated func dictation(_ session: DictationSession, didDisconnectReason reason: String) {
         Task { @MainActor in
+            guard session === self.dictationSession else { return }
             self.isWSConnected = false
             self.lastError = "disconnected: \(reason)"
             VRLog.d("Coord", "WS disconnected: \(reason)")
@@ -611,10 +719,16 @@ extension RecordingCoordinator: DictationSessionDelegate {
     }
 
     nonisolated func dictation(_ session: DictationSession, didUpdateBufferedSeconds seconds: Double) {
-        Task { @MainActor in self.bufferedSeconds = seconds }
+        Task { @MainActor in
+            guard session === self.dictationSession else { return }
+            self.bufferedSeconds = seconds
+        }
     }
 
     nonisolated func dictation(_ session: DictationSession, didUpdateStoppingLagSeconds seconds: Double) {
-        Task { @MainActor in self.stoppingLagSeconds = seconds }
+        Task { @MainActor in
+            guard session === self.dictationSession else { return }
+            self.stoppingLagSeconds = seconds
+        }
     }
 }

@@ -89,7 +89,9 @@ public struct ToggleVoiceRecordingShortcutIntent: AudioRecordingIntent, LiveActi
             // AppIntents framework's own assertion covers us here.
             let deadline = Date().addingTimeInterval(8)
             while Date() < deadline {
-                let phase = await RecordingCoordinator.shared.phase
+                // The Shortcut/Action-Button toggle drives the DICTATION slot
+                // (long has no intent entry point), so we wait on dictationPhase.
+                let phase = await RecordingCoordinator.shared.dictationPhase
                 if phase == .recording { break }
                 if phase == .idle { break } // user-cancel mid-await
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -100,7 +102,7 @@ public struct ToggleVoiceRecordingShortcutIntent: AudioRecordingIntent, LiveActi
             // Wait for engine + Live Activity to fully finalise.
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline {
-                let phase = await RecordingCoordinator.shared.phase
+                let phase = await RecordingCoordinator.shared.dictationPhase
                 if phase == .idle { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }

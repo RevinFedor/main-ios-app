@@ -391,7 +391,8 @@ struct ContentView: View {
     // MARK: - Tap Router (location-aware, normal mode only)
 
     /// A quick tap is dispatched by where on the row the finger landed:
-    /// - group, left (name) zone → expand/collapse; right zone → nothing
+    /// - group → expand/collapse anywhere on the row (full width); the right
+    ///   zone has no per-day checkmarks to toggle, so the whole row is one target
     /// - habit, checkmark zone → toggle that day; left zone → nothing
     /// (Edit is long-press; reorder is the dedicated mode.)
     private func handleTap(at loc: CGPoint, item: HabitItem, rowWidth: CGFloat) {
@@ -399,7 +400,6 @@ struct ContentView: View {
 
         switch item {
         case .group(let group):
-            guard loc.x < checksStartX else { return }
             VRLog.d("HABIT", "tap expand group='\(group.name)' → \(group.isExpanded ? "collapse" : "expand")")
             store.toggleGroupExpanded(group.id)
 
@@ -697,7 +697,10 @@ private struct RowGestureOverlay: UIViewRepresentable {
 // press) scrolls, and a held press starts the reorder. Callbacks report the touch
 // point in WINDOW space (the parent maps it to a row index). See
 // docs/knowledge/fact-habit-tracker.md::Перестановка.
-private struct ReorderLongPressGesture: UIGestureRecognizerRepresentable {
+// Internal (not private) so the Voice History reorder mode can reuse the SAME
+// scroll-coexisting long-press drag instead of duplicating it. It's a generic
+// whole-row drag source — nothing Habits-specific — so sharing is clean.
+struct ReorderLongPressGesture: UIGestureRecognizerRepresentable {
     let minimumPressDuration: TimeInterval
     let onBegan: (_ globalY: CGFloat) -> Void
     let onChanged: (_ globalY: CGFloat) -> Void

@@ -40,6 +40,9 @@ struct Habit: Identifiable, Codable {
     let id: UUID
     var name: String
     var colorName: HabitColor
+    // Synced with the main-app Habit (docs/knowledge/fix-ios-stability.md §3).
+    // Optional so this read-only decoder accepts both pre- and post-notes JSON.
+    var notes: String?
     var history: [String: HabitStatus]
     var createdAt: Date
     var order: Int
@@ -94,7 +97,7 @@ struct DateHelper {
         case .sunday:
             startOfWeek = calendar.date(byAdding: .day, value: -(currentWeekday - 1) + weekOffset * 7, to: today) ?? today
         case .relative:
-            startOfWeek = calendar.date(byAdding: .day, value: -5 + weekOffset * 7, to: today) ?? today
+            startOfWeek = calendar.date(byAdding: .day, value: -6 + weekOffset * 7, to: today) ?? today
         }
 
         let labels = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"]
@@ -255,11 +258,11 @@ struct RecentDay: Identifiable {
 }
 
 /// Returns days for small widget based on firstDayOfWeek setting.
-/// For .relative: today is penultimate (position count-2).
+/// For .relative: today is last (position count-1).
 /// For .monday/.sunday: uses weekDates and takes first `count` days.
 func smallWidgetDays(count: Int, firstDayOfWeek: FirstDayOfWeek) -> [RecentDay] {
     if firstDayOfWeek == .relative {
-        return recentDays(count: count, todayPosition: count - 2)
+        return recentDays(count: count, todayPosition: count - 1)
     }
     // Week-based: take first `count` days from current week
     let week = DateHelper.weekDates(weekOffset: 0, firstDayOfWeek: firstDayOfWeek)

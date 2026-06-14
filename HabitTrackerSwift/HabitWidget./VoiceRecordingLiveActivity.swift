@@ -28,7 +28,7 @@ struct VoiceRecordingLiveActivity: Widget {
                     PhaseIcon(phase: context.state.phase,
                               isStreaming: context.state.isStreaming)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(displayTitle(phase: context.state.phase,
+                        Text(displayTitle(state: context.state,
                                           original: context.attributes.title))
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(1)
@@ -60,7 +60,7 @@ struct VoiceRecordingLiveActivity: Widget {
             .activitySystemActionForegroundColor(.red)
 
         } dynamicIsland: { context in
-            DynamicIsland {
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     PhaseIcon(phase: context.state.phase,
                               isStreaming: context.state.isStreaming)
@@ -114,16 +114,11 @@ struct VoiceRecordingLiveActivity: Widget {
         }
     }
 
-    // Title shown in Notification Center / Lock Screen. In idle mode we
-    // pretend the Activity belongs to "Habit Tracker" with neutral text —
-    // the actual app is a recorder, but when we're pinned and not yet
-    // recording we don't want bystanders to think audio capture is active.
-    // The mic-themed copy only appears once the user explicitly starts.
-    private func displayTitle(phase: RecordingAttributes.Phase, original: String) -> String {
-        switch phase {
-        case .idle: return "Habit Tracker"
-        default:    return original
-        }
+    // Title shown in Notification Center / Lock Screen. When nothing is being
+    // captured we use a neutral app title so bystanders don't assume an active mic.
+    private func displayTitle(state: RecordingAttributes.ContentState, original: String) -> String {
+        if state.phase == .idle { return "Habit Tracker" }
+        return original
     }
 
     @ViewBuilder
@@ -251,7 +246,8 @@ struct VoiceRecordingLiveActivity: Widget {
     // no ProgressView (which itself can fault in compact slot on some iOS
     // builds). Just a single SF Symbol tinted to communicate phase.
     @ViewBuilder
-    private func compactLeadingIcon(phase: RecordingAttributes.Phase, isStreaming: Bool) -> some View {
+    private func compactLeadingIcon(phase: RecordingAttributes.Phase,
+                                    isStreaming: Bool) -> some View {
         switch phase {
         case .idle:
             // Same rationale as the lock-screen PhaseIcon: don't display
@@ -295,7 +291,8 @@ struct VoiceRecordingLiveActivity: Widget {
         }
     }
 
-    private func bottomCaption(phase: RecordingAttributes.Phase, isStreaming: Bool) -> String {
+    private func bottomCaption(phase: RecordingAttributes.Phase,
+                               isStreaming: Bool) -> String {
         switch phase {
         case .idle:      return "Активно"
         case .starting:  return "Starting…"
@@ -339,14 +336,17 @@ struct VoiceRecordingLiveActivity: Widget {
         }
     }
 
-    // Prefer the iOS-provided port name when present — "AirPods Pro de Fedor",
-    // "iPhone Microphone" — so the user instantly recognises the device. Fall
-    // back to a generic label when the route hasn't surfaced a name yet (early
-    // in cold-launch before activate() lands).
+    // Device label next to the mic icon. The icon already says "this is the
+    // input device", so the built-in iPhone mic shows a bare "iPhone" — the
+    // iOS port name for it is the verbose "Микрофон iPhone" / "iPhone
+    // Microphone", which the user found redundant. AirPods / headphones / USB
+    // keep their descriptive iOS port name (e.g. "AirPods Pro de Fedor") so the
+    // specific device is recognisable.
     private func micLabel(kind: RecordingAttributes.MicSourceKind, name: String) -> String {
+        if kind == .iphone { return "iPhone" }
         if !name.isEmpty { return name }
         switch kind {
-        case .iphone:     return "Микрофон iPhone"
+        case .iphone:     return "iPhone"
         case .airpods:    return "AirPods"
         case .headphones: return "Наушники"
         case .usb:        return "USB-микрофон"

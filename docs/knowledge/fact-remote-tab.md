@@ -1,8 +1,10 @@
-# Fact: Remote tab (встроенный браузер к custom-terminal mobile-web)
+# Fact: Remote config + legacy WKWebView к custom-terminal
 
-Третья подсистема приложения: вкладка **Remote** (между Voice и Habits) рендерит mobile-web SPA из проекта `custom-terminal` внутри `WKWebView`. Это полноэкранный сайт без хрома Safari — выглядит как нативный экран, внутри живой web. Бэкенд и протокол — на стороне custom-terminal (`custom-terminal/docs/knowledge/fact-remote-access.md`, `fact-mobile-web.md`); здесь — только iOS-обёртка.
+Отдельная root-вкладка **Remote** удалена из таб-бара: текущий root order — AI Chat · Voice · Habits. Нативное управление custom-terminal теперь живёт как **Terminal mode внутри AI Chat** (`fact-voice-chat-tab.md::Terminal mode внутри AI Chat`) и ходит в тот же Mac-side REST/SSE contract без рендера `mobile-web` через JS.
 
-Код: `HabitTracker/Remote/` — `RemoteConfig.swift`, `RemoteWebView.swift`, `RemoteTabView.swift`.
+Этот файл остаётся про две вещи: legacy WKWebView-обёртку `HabitTracker/Remote/` (полезно, если её временно вернуть для debug/full-web fallback) и общий `RemoteConfig`, который всё ещё нужен Terminal mode для host/token/dev-prod переключателя. Бэкенд и протокол — на стороне custom-terminal (`custom-terminal/docs/knowledge/fact-remote-access.md`, `fact-mobile-web.md`); здесь — только iOS-обёртка и конфиг.
+
+Код: `HabitTracker/Remote/` — `RemoteConfig.swift`, `RemoteWebView.swift`, `RemoteTabView.swift`; `TerminalControlStore.swift` переиспользует `RemoteConfig.baseURLString(...)` и `Secrets.remoteWebToken`.
 
 ## Почему WKWebView, а не SFSafariViewController
 
@@ -58,6 +60,23 @@ mobile-web не имеет форм логина — авторизация эт
 - Канвас веб-вью тёмный (`white:0.04`, `isOpaque=false`) — reload/переход не мигают белым.
 - Reachability выводится **из исхода навигации**, не из отдельного reachability API — единственное что важно «загрузилась ли страница».
 
+## Bottom safe-area: не пускать веб-вью под таб-бар
+
+Если legacy WKWebView-обёртка снова монтируется, веб-вью НЕ должен `ignoresSafeArea(.bottom)`. Он живёт над таб-баром приложения; если его растянуть под бар, WKWebView начинает сообщать сайту высоту **всего бара + home-indicator** (~80pt) как `env(safe-area-inset-bottom)`. mobile-web читает этот inset для нижнего padding'а (композер чата, корневой контейнер) → padding раздувается → между полем ввода и таб-баром появляется жирная тёмная полоса.
+
+Симптом юзера: *«лишний отступ внизу до композера на странице чата; в Chrome его нет»*. В Chrome нет, потому что браузерный хром снизу поглощает home-indicator → `env(safe-area-inset-bottom)`=0. Баг **наш** (нативная обёртка скармливает завышенный inset), не mobile-web. Виден только на чате — единственной странице с нижним элементом, который этот inset читает.
+
+Что пробовали: `ignoresSafeArea(.container, edges: .bottom)` ради edge-to-edge картинки — именно он и раздул inset. Решение: убрать игнор, веб-вью заканчивается у границы safe-area, его нижний inset = 0, padding сайта схлопывается до нормального.
+
+## Адрес в навбаре: tap-to-edit
+
+Host в principal-навбаре — тап-таргет: тап превращает его в редактируемый инпут полного URL. Невидимый контекст реализации:
+
+- **Токен вырезан из префилла.** Поле инициализируется живым URL веб-вью с убранным `?token=…` (`RemoteWebController.currentDisplayURLString`) — токен не должен светиться в редактируемом поле, даже если свежая загрузка ещё несёт его в адресе.
+- **Загрузка verbatim, без токена.** Набранный адрес грузится как есть (`web.load`), **без** `tokenizedURL` — это намеренно («любой URL»), в отличие от `loadCurrent()` который всегда подставляет токен для Prod/Dev. Bare-адрес без схемы дополняется `https://`.
+- **Отмена = тап по затемнённому оверлею приложения**, не отдельная кнопка Cancel. Юзер: *«при клике на оверлай, в целом на приложение, вид возвращается обратно»*. Оверлей рисуется поверх веб-вью только в режиме редактирования.
+- **Точка статуса при произвольном URL не меняется** — она привязана к `activeIsDev` (Prod/Dev из настроек), а не к набранному адресу. Грузить чужой URL и не врать про источник важнее, чем перекрасить точку.
+
 ## Кнопки в навбаре, не в настройках
 
 Per требование юзера, reload (`arrow.clockwise`) и шестерёнка (`gearshape`) живут **в навбаре** (toolbar trailing), плюс в principal — точка статуса (зелёная prod / оранжевая dev / красная offline) + host. Шестерёнка открывает лист с toggle Prod/Dev, редактируемым dev-адресом и тремя действиями данных (обновить / очистить куки / сбросить всё).
@@ -74,4 +93,5 @@ Main `HabitTracker` target **не** использует `PBXFileSystemSynchroni
 
 - `custom-terminal/docs/knowledge/fact-remote-access.md` — VPS, autossh tunnel, nginx, offline-page на стороне сервера.
 - `custom-terminal/docs/knowledge/fact-mobile-web.md` — endpoint map, токен, SSE-транспорт, история.
-- `fact-voice-record.md::Tabs` — порядок вкладок Voice · Remote · Habits.
+- `fact-voice-record.md::Tabs` — текущий порядок root-вкладок AI Chat · Voice · Habits.
+- `fact-voice-chat-tab.md::Terminal mode внутри AI Chat` — основной нативный custom-terminal client.

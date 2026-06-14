@@ -33,6 +33,14 @@ struct Habit: Identifiable, Codable, Equatable, Hashable {
     let id: UUID
     var name: String
     var colorName: HabitColor
+    // Free-text description shown under the title in the edit sheet. MUST be
+    // Optional: the synthesized Codable decoder uses decodeIfPresent for optionals,
+    // so habits stored BEFORE this field existed decode cleanly (notes == nil).
+    // A non-optional String would throw keyNotFound on old JSON → the whole
+    // `try? decode(StorageData)` returns nil → every habit silently wiped.
+    // Keep this field synced with the duplicated Habit in HabitWidget_.swift
+    // (see docs/knowledge/fix-ios-stability.md §3).
+    var notes: String?
     var history: [String: HabitStatus]
     var createdAt: Date
     var order: Int
@@ -41,6 +49,7 @@ struct Habit: Identifiable, Codable, Equatable, Hashable {
         id: UUID = UUID(),
         name: String,
         colorName: HabitColor = .blue,
+        notes: String? = nil,
         history: [String: HabitStatus] = [:],
         createdAt: Date = Date(),
         order: Int = 0
@@ -48,6 +57,7 @@ struct Habit: Identifiable, Codable, Equatable, Hashable {
         self.id = id
         self.name = name
         self.colorName = colorName
+        self.notes = notes
         self.history = history
         self.createdAt = createdAt
         self.order = order

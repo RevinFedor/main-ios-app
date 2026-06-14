@@ -6,7 +6,11 @@ enum VoiceRecordConfig {
     // Shared keys in App-Group UserDefaults — used by the toggle ControlValueProvider
     // and the main app to know recording state.
     enum SharedKeys {
+        // Control Center toggle + Shortcut intent read this state.
         static let isRecording = "voiceRecord.isRecording"
+        // Whether the mic capture path is active. The mic-data-source picker card
+        // reads this to avoid switching hardware while recording.
+        static let isCapturing = "voiceRecord.isCapturing"
         static let recordingStartDate = "voiceRecord.recordingStartDate"
         static let forceBuiltInMic = "voiceRecord.forceBuiltInMic"
         // Pending action posted by the widget process when iOS hasn't (yet)
@@ -60,6 +64,29 @@ enum VoiceRecordConfig {
         // Name = human-readable port name ("AirPods Pro de Fedor").
         static let lastMicSourceKind = "voiceRecord.lastMicSourceKind"
         static let lastMicSourceName = "voiceRecord.lastMicSourceName"
+        // User's standing pick of WHICH built-in mic records: "bottom" / "front"
+        // / "back" (MicDataSource.rawValue), or absent = iOS default. Sticky
+        // across launches like the mic lock. Applied via setPreferredDataSource.
+        static let preferredMicDataSource = "voiceRecord.preferredMicDataSource"
+        // Default playback rate for the History audio player, set in Settings.
+        // Every new playback starts at this rate; the in-bar speed button then
+        // cycles 1 → 1.5 → 2 → 2.5 → (wrap) for the current item only. Stored as
+        // a Double; absent = fall back to playbackDefaultRateFallback (1.0).
+        static let playbackDefaultRate = "voiceRecord.playbackDefaultRate"
+    }
+
+    // Allowed playback speeds for the History player's speed button, cycled by
+    // single taps (no 3×, per the user). The Settings default picks from these.
+    static let playbackRates: [Double] = [1.0, 1.5, 2.0, 2.5]
+    // Used when playbackDefaultRate has never been set.
+    static let playbackDefaultRateFallback: Double = 1.0
+
+    // "1×" / "1.5×" / "2×" / "2.5×" — drop the trailing .0 on whole speeds so a
+    // speed pill / segmented option reads cleanly. Shared by the player bar
+    // button and the Settings default-speed picker.
+    static func playbackRateLabel(_ r: Double) -> String {
+        let s = r.rounded() == r ? String(format: "%.0f", r) : String(format: "%.1f", r)
+        return s + "×"
     }
 
     // App-Group container subdirectory for saved .wav files.

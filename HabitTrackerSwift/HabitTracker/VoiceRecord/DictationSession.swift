@@ -3,15 +3,18 @@ import Foundation
 
 // Port of voice-record/src/renderer/dictation.ts to Swift.
 //
-// Two independent state machines:
-//   1. Mic capture — AVAudioEngine tap fills `allFrames` (full session
-//      audio for the .wav) and `pending` (drained into Soniox WS on open).
-//   2. Soniox WS — opens in parallel. ws.onopen drains `pending`. ws.onerror
-//      or close does NOT stop mic — user can retry.
+// A DictationSession is now a SINK on the shared MicCaptureHub, not an audio
+// engine owner. The hub captures the mic once and fans resampled 16 kHz frames
+// to attached sinks.
 //
-// Audio format on the wire: s16le @ 16kHz mono. Engine input runs at native
-// rate (typically 48kHz, 44.1kHz, or lower) and we downsample with linear
-// interpolation in `floatToS16LE16k`.
+// Two state machines remain here:
+//   1. PCM collection — micDidCapture(_:) appends each 16 kHz frame to
+//      `allFrames` (full session audio for the .wav) and `pending` (drained
+//      into Soniox WS on open).
+//   2. Soniox WS — opens in parallel. ws.onopen drains `pending`. ws.onerror
+//      or close does NOT detach the sink — user can retry.
+//
+// Audio format on the wire: s16le @ 16kHz mono — already resampled by the hub.
 
 struct DictationUpdate {
     let final: String
@@ -44,17 +47,31 @@ extension DictationSessionDelegate {
 }
 
 @MainActor
-final class DictationSession: NSObject {
+final class DictationSession: NSObject, MicPCMSink {
     weak var delegate: DictationSessionDelegate?
 
-    private let engine = AVAudioEngine()
-    private var inputFormat: AVAudioFormat?
+    // Audio capture is owned by the shared MicCaptureHub now; this session is
+    // just one of its sinks. There's no AVAudioEngine / tap / resampler here
+    // anymore — we receive ready-made 16 kHz s16le frames via micDidCapture and
+    // only own the Soniox side + the .wav byte collection. This is what lets
+    // dictation and the long capture run in parallel off ONE shared mic.
 
     // Disconnect-safe buffers. pending = drained on WS open. allFrames = saved forever.
     private var pending: [Data] = []
     private var allFrames: [Data] = []
     private var bufferedSamples16k: Int = 0
     private var allSamples16k: Int = 0
+    // Cap on the offline replay buffer (`pending`), in 16kHz samples. The .wav
+    // (allFrames) is never capped — it's the source of truth and the user's rule
+    // is "only Stop stops the recording". This only bounds how much un-sent audio
+    // we hold for the Soniox live-transcript replay, so a long no-internet
+    // stretch can't OOM-jetsam the app. 10 minutes is far longer than any real
+    // Soniox reconnect gap. = 16000 * 60 * 10.
+    private static let maxPendingSamples16k = 16000 * 60 * 10
+    // Set true if we ever dropped oldest frames from `pending` (offline buffer
+    // overflow). Surfaced once on connect so the user knows the live transcript
+    // has a gap but the audio is intact (Reload re-transcribes the full .wav).
+    private var pendingOverflowed = false
 
     private var wsTask: URLSessionWebSocketTask?
     private var wsSession: URLSession?
@@ -98,7 +115,6 @@ final class DictationSession: NSObject {
     private let targetRate: Double = VoiceRecordConfig.targetSampleRate
     private let languageHints: [String]
     private let modelName: String
-
     init(languageHints: [String] = ["en", "ru"],
          modelName: String = VoiceRecordConfig.sonioxModel) {
         self.languageHints = languageHints
@@ -106,36 +122,25 @@ final class DictationSession: NSObject {
     }
 
     func start() async {
-        // Activate runs blocking AVAudioSession calls on a dedicated serial
-        // queue and resumes on main when the session is live. Without this,
-        // every recording start blocked the main thread for ~600ms-2s.
+        // Attach to the shared capture hub. The hub activates the AVAudioSession
+        // (blocking calls on its own serial queue), installs the single shared
+        // tap, and starts the engine on the first sink — resuming us on main
+        // when capture is live. Mid-recording device swaps (AirPods plug/unplug)
+        // are handled inside the hub: it rebuilds the shared tap at the new
+        // native rate, so we only ever see clean 16 kHz frames and never deal
+        // with the chipmunk/slow-audio resampler hazard ourselves.
         do {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                AudioSessionManager.shared.activate { result in
+                MicCaptureHub.shared.attach(self) { result in
                     cont.resume(with: result)
                 }
             }
         } catch {
-            delegate?.dictation(self, didError: "audio session: \(error.localizedDescription)")
-            fireStopped()
-            return
-        }
-
-        // Rebuild the tap whenever the active input device changes mid-recording
-        // (AirPods plugged/unplugged). The new device's native sample rate is
-        // almost always different (built-in 48k ↔ AirPods HFP 16k/24k); reusing
-        // the old rate in the resampler yields pitch-shifted, garbled audio.
-        AudioSessionManager.shared.onActiveRouteChange = { [weak self] in
-            self?.rebuildInputTap(reason: "route-change")
-        }
-
-        installInputTap()
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            delegate?.dictation(self, didError: "engine start: \(error.localizedDescription)")
+            delegate?.dictation(self, didError: "audio capture: \(error.localizedDescription)")
+            // Detach from the hub before firing stopped — otherwise this dead
+            // session lingers in the hub's sink list (weak, so harmless, but a
+            // clean detach also lets the hub stop the engine if we were the last
+            // sink). cleanup() is idempotent.
             cleanup()
             fireStopped()
             return
@@ -149,48 +154,6 @@ final class DictationSession: NSObject {
         Task { await connectSoniox() }
     }
 
-    // Installs (or re-installs) the input tap, reading the CURRENT input format
-    // fresh each time. sourceRate is captured per-tap, never cached across the
-    // session, so a device swap is handled correctly.
-    private func installInputTap() {
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        inputFormat = format
-        let sourceRate = format.sampleRate
-        VRLog.d("Dict", "installTap — sourceRate=\(Int(sourceRate))Hz ch=\(format.channelCount)")
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            let pcm = self.floatToS16LE16k(buffer: buffer, sourceRate: sourceRate)
-            guard !pcm.isEmpty else { return }
-            Task { @MainActor in self.handleCapturedFrame(pcm) }
-        }
-    }
-
-    // Called when AudioSessionManager reports a live input-device change. The
-    // AVAudioEngine must be stopped before removing/re-adding a tap, then
-    // restarted — hot-swapping a tap on a running engine throws. PCM already
-    // captured stays in allFrames/pending, so the transcript is continuous
-    // across the swap (a brief ~100ms gap during restart is acceptable).
-    private func rebuildInputTap(reason: String) {
-        guard !stopped else { return }
-        VRLog.d("Dict", "rebuildInputTap — reason=\(reason) engineRunning=\(engine.isRunning)")
-        let wasRunning = engine.isRunning
-        if wasRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
-        installInputTap()
-        if wasRunning {
-            engine.prepare()
-            do {
-                try engine.start()
-                VRLog.d("Dict", "rebuildInputTap — engine restarted ok")
-            } catch {
-                // If restart fails the user can still stop and retry; surface it.
-                delegate?.dictation(self, didError: "mic switch failed: \(error.localizedDescription)")
-                VRLog.e("Dict", "rebuildInputTap — engine restart failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
     func stop() async {
         VRLog.d("Dict", "stop() — entered, stopped=\(stopped) wsOpen=\(wsOpen) recorded=\(String(format: "%.1f", Double(allSamples16k)/targetRate))s lastFinalEnd=\(String(format: "%.1f", lastFinalEndMs/1000))s lag=\(String(format: "%.1f", lagSeconds))s")
         if stopped {
@@ -200,16 +163,15 @@ final class DictationSession: NSObject {
         }
         stopped = true
 
-        // CRITICAL: stop the mic immediately — we don't want to record (or
-        // send to Soniox) anything captured AFTER the user pressed Stop.
-        // The PCM history (collectedPCM → .wav) also freezes here. Soniox
-        // already has everything we want transcribed; we're just waiting
-        // for it to commit final tokens for the audio we already sent.
-        // Without this, `handleCapturedFrame` would keep appending to
-        // `allFrames` and emitting to the WS during the entire finalize
-        // wait — both wrong (extra audio shipped post-Stop) and wasteful.
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
+        // CRITICAL: detach from the capture hub immediately — we don't want to
+        // record (or send to Soniox) anything captured AFTER the user pressed
+        // Stop. The PCM history (collectedPCM → .wav) also freezes here because
+        // micDidCapture short-circuits on `stopped`. Soniox already has
+        // everything we want transcribed; we're just waiting for it to commit
+        // final tokens for the audio we already sent. Detach (not engine.stop):
+        // the hub keeps the shared engine alive while other sinks exist and
+        // stops it only when the last sink leaves.
+        MicCaptureHub.shared.detach(self)
         bufStatsTimer?.invalidate()
         bufStatsTimer = nil
 
@@ -321,14 +283,32 @@ final class DictationSession: NSObject {
 
     // MARK: - Internal
 
-    private func handleCapturedFrame(_ pcm: Data) {
-        allFrames.append(pcm)
+    // MicPCMSink — a fresh 16 kHz s16le frame from the shared hub. Each sink
+    // keeps its own copy in allFrames (→ its own .wav).
+    func micDidCapture(_ pcm: Data) {
+        // Ignore anything arriving after we've stopped — the hub may push one
+        // more buffered frame between our detach() and the next render tick.
+        guard !stopped else { return }
         allSamples16k += pcm.count / 2
+        allFrames.append(pcm)
         if wsOpen, let task = wsTask {
             task.send(.data(pcm)) { _ in /* swallow per-frame errors; ws.onclose handles disconnect */ }
         } else {
+            // Offline / not-yet-connected: buffer for replay on WS open. But the
+            // .wav (allFrames) is the source of truth — `pending` is ONLY the
+            // Soniox replay buffer, so cap it. Without a cap a long no-internet
+            // stretch grows this array without bound until memory pressure
+            // jetsams the app and the WHOLE recording is lost. When the cap is
+            // hit we drop the OLDEST frames (a partial live-transcript is
+            // acceptable; the audio is safe on disk and the user can Reload-
+            // transcribe the full .wav later). 10 min @ 16kHz/s16le ≈ 18 MB.
             pending.append(pcm)
             bufferedSamples16k += pcm.count / 2
+            while bufferedSamples16k > Self.maxPendingSamples16k, !pending.isEmpty {
+                let dropped = pending.removeFirst()
+                bufferedSamples16k -= dropped.count / 2
+                pendingOverflowed = true
+            }
         }
     }
 
@@ -350,9 +330,11 @@ final class DictationSession: NSObject {
     }
 
     private func cleanup() {
-        AudioSessionManager.shared.onActiveRouteChange = nil
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
+        // Leave the shared capture hub. Detach (not engine.stop) so a parallel
+        // recording still attached keeps the engine running; the hub stops it
+        // only when the last sink detaches. Idempotent if already detached in
+        // stop(). The route-change hook is owned by the hub now, not us.
+        MicCaptureHub.shared.detach(self)
         wsTask?.cancel()
         wsTask = nil
         wsSession?.invalidateAndCancel()
@@ -459,7 +441,14 @@ final class DictationSession: NSObject {
         // Flush pending PCM frames.
         let pendingCount = pending.count
         if pendingCount > 0 {
-            VRLog.d("Dict", "ws flush — \(pendingCount) buffered PCM frames")
+            VRLog.d("Dict", "ws flush — \(pendingCount) buffered PCM frames (overflowed=\(pendingOverflowed))")
+        }
+        // If the offline buffer overflowed (>10 min without internet) the live
+        // transcript will be missing its oldest part — tell the user ONCE, but
+        // do NOT stop: the full audio is on disk and Reload re-transcribes it.
+        if pendingOverflowed {
+            pendingOverflowed = false
+            delegate?.dictation(self, didError: "Долго не было интернета — часть живого текста пропущена, но аудио записано. Можно перераспознать запись из истории.")
         }
         for buf in pending {
             try? await task.send(.data(buf))
@@ -570,29 +559,6 @@ final class DictationSession: NSObject {
         return lag > 0 ? lag : 0
     }
 
-    // MARK: - PCM convert (Float32 mono → s16le @ 16kHz)
-
-    private func floatToS16LE16k(buffer: AVAudioPCMBuffer, sourceRate: Double) -> Data {
-        guard let channelData = buffer.floatChannelData?[0] else { return Data() }
-        let inputCount = Int(buffer.frameLength)
-        if inputCount <= 0 { return Data() }
-        let outputCount = Int(Double(inputCount) * targetRate / sourceRate)
-        if outputCount <= 0 { return Data() }
-
-        var bytes = Data(count: outputCount * 2)
-        let ratio = sourceRate / targetRate
-        bytes.withUnsafeMutableBytes { (rawPtr: UnsafeMutableRawBufferPointer) in
-            let p = rawPtr.bindMemory(to: Int16.self)
-            for i in 0..<outputCount {
-                let idx = Double(i) * ratio
-                let i0 = Int(idx)
-                let i1 = min(i0 + 1, inputCount - 1)
-                let frac = Float(idx - Double(i0))
-                let s = channelData[i0] * (1 - frac) + channelData[i1] * frac
-                let clamped = max(-1.0, min(1.0, s))
-                p[i] = clamped < 0 ? Int16(clamped * 32768) : Int16(clamped * 32767)
-            }
-        }
-        return bytes
-    }
+    // PCM resampling (Float32 mono → s16le @ 16 kHz) now lives in MicCaptureHub
+    // — sinks receive ready-made 16 kHz frames via micDidCapture.
 }

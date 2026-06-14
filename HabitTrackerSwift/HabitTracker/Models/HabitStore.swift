@@ -125,17 +125,24 @@ class HabitStore: ObservableObject {
         saveData()
     }
 
-    func updateHabit(_ habitId: UUID, name: String, color: HabitColor, groupId: UUID? = nil) {
+    func updateHabit(_ habitId: UUID, name: String, color: HabitColor, notes: String?, groupId: UUID? = nil) {
+        // Empty/whitespace notes normalise to nil so an emptied field doesn't
+        // persist a blank string (keeps "has a description?" checks simple).
+        let trimmedNotes = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedNotes = (trimmedNotes?.isEmpty ?? true) ? nil : trimmedNotes
+
         if let groupId = groupId {
             if let groupIndex = groups.firstIndex(where: { $0.id == groupId }),
                let habitIndex = groups[groupIndex].habits.firstIndex(where: { $0.id == habitId }) {
                 groups[groupIndex].habits[habitIndex].name = name
                 groups[groupIndex].habits[habitIndex].colorName = color
+                groups[groupIndex].habits[habitIndex].notes = normalizedNotes
             }
         } else {
             if let index = standaloneHabits.firstIndex(where: { $0.id == habitId }) {
                 standaloneHabits[index].name = name
                 standaloneHabits[index].colorName = color
+                standaloneHabits[index].notes = normalizedNotes
             }
         }
         triggerHaptic(.success)

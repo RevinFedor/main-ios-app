@@ -45,8 +45,8 @@ struct DateHelper {
         case .sunday:
             startOfWeek = calendar.date(byAdding: .day, value: -(currentWeekday - 1) + weekOffset * 7, to: today) ?? today
         case .relative:
-            // Today is penultimate (position 5 of 7), show [today-5 ... today ... today+1]
-            startOfWeek = calendar.date(byAdding: .day, value: -5 + weekOffset * 7, to: today) ?? today
+            // Today is the last visible column, show [today-6 ... today].
+            startOfWeek = calendar.date(byAdding: .day, value: -6 + weekOffset * 7, to: today) ?? today
         }
 
         var days: [WeekDay] = []
@@ -94,7 +94,13 @@ struct DateHelper {
 
 // MARK: - Week Day Model
 struct WeekDay: Identifiable {
-    let id = UUID()
+    // Identity MUST be the date string, NOT a fresh UUID. weekDates() rebuilds
+    // these structs on every body pass; with a per-call UUID, ForEach saw 7 new
+    // identities each time the store published a change (e.g. a group toggle
+    // wrapped in withAnimation), so the header's day columns animated out+in —
+    // the "Monday/Tuesday flicker on expand/collapse". The date key is stable
+    // across recomputations → same column keeps its identity, no transition.
+    var id: String { key }
     let key: String
     let date: Date
     let label: String
@@ -106,5 +112,5 @@ struct WeekDay: Identifiable {
 enum FirstDayOfWeek: String, Codable {
     case monday
     case sunday
-    case relative  // today is always penultimate column
+    case relative  // today is always the last column
 }

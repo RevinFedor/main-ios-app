@@ -34,14 +34,40 @@ struct RemoteTabView: View {
     @State private var activeIsDev = false
     @State private var activeHost = ""
 
+    // Tap-to-edit URL bar. Tapping the host in the navbar swaps it for a full-URL
+    // text field; the user can type any address and load it. Tapping the app
+    // (dim overlay) cancels back to the host view without loading.
+    @State private var isEditingURL = false
+    @State private var urlDraft = ""
+    @FocusState private var urlFieldFocused: Bool
+
     var body: some View {
         NavigationStack {
             ZStack {
                 Color(white: 0.04).ignoresSafeArea()
 
+                // NOTE: do NOT .ignoresSafeArea(.bottom) here. The web view sits
+                // above the app's TabView bar; if it extends under that bar,
+                // WKWebView reports the whole bar+home-indicator height (~80pt)
+                // as env(safe-area-inset-bottom). mobile-web's chat composer
+                // pads by max(8px, env(safe-area-inset-bottom)), so that inflated
+                // inset became a fat dark gap between the input and the tab bar
+                // (only visible on the chat page — other pages have no bottom
+                // element reading the inset). Letting the web view end at the
+                // safe-area boundary makes its bottom inset 0 → composer sits
+                // flush, matching Chrome.
                 RemoteWebViewContainer(controller: web)
-                    .ignoresSafeArea(.container, edges: .bottom)
                     .opacity(web.didFail ? 0 : 1)
+
+                // Tapping anywhere on the app while the URL bar is in edit mode
+                // cancels the edit and returns to the host view, no load.
+                if isEditingURL {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { cancelURLEdit() }
+                        .transition(.opacity)
+                }
 
                 // Thin top progress line during load (anchored under the navbar).
                 if web.isLoading && web.estimatedProgress < 1 {
@@ -70,15 +96,36 @@ struct RemoteTabView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(web.didFail ? Color.red : (activeIsDev ? Color.orange : Color.green))
-                            .frame(width: 7, height: 7)
-                        Text(activeHost)
+                    if isEditingURL {
+                        TextField("https://…", text: $urlDraft)
+                            .focused($urlFieldFocused)
+                            .textFieldStyle(.plain)
                             .font(.footnote.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .foregroundStyle(.white)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .submitLabel(.go)
+                            .onSubmit { commitURLEdit() }
+                            .frame(minWidth: 200)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule().fill(Color.white.opacity(0.12))
+                            )
+                    } else {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(web.didFail ? Color.red : (activeIsDev ? Color.orange : Color.green))
+                                .frame(width: 7, height: 7)
+                            Text(activeHost)
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginURLEdit() }
                     }
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
@@ -124,6 +171,39 @@ struct RemoteTabView: View {
         // page immediately, in lockstep with web.load (see activeIsDev above).
         activeIsDev = isDev
         activeHost = RemoteConfig.displayHost(useDev: isDev, devHost: host)
+        web.load(url)
+    }
+
+    private func beginURLEdit() {
+        // Prefill the full current URL, token stripped (mobile-web removes
+        // ?token=… from the bar after bootstrap, but a fresh load may still
+        // carry it — never expose it in an editable field).
+        urlDraft = web.currentDisplayURLString
+            ?? RemoteConfig.baseURLString(useDev: activeIsDev, devHost: devHost)
+        isEditingURL = true
+        // Focus on the next runloop so the field exists before we focus it.
+        DispatchQueue.main.async { urlFieldFocused = true }
+    }
+
+    private func cancelURLEdit() {
+        urlFieldFocused = false
+        isEditingURL = false
+    }
+
+    private func commitURLEdit() {
+        let trimmed = urlDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        urlFieldFocused = false
+        isEditingURL = false
+        guard !trimmed.isEmpty else { return }
+        // Accept any address: prepend https:// when no scheme was typed.
+        let withScheme = (trimmed.contains("://")) ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: withScheme), let host = url.host else { return }
+        // Load the typed URL verbatim — no token injection ("any url").
+        if let port = url.port {
+            activeHost = "\(host):\(port)"
+        } else {
+            activeHost = host
+        }
         web.load(url)
     }
 }

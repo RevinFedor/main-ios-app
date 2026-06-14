@@ -38,6 +38,14 @@
 
 **Стартовый лаг анимации 0.5-1с = синхронный диск-I/O на main thread.** Симптом: между тапом «объединить» и началом анимации интерфейс замирал на полсекунды-секунду. Корень: `mergeDirectional` конкатенирует два `.wav` PCM + переписывает JSON, `loadAll()` перечитывает — всё синхронно через `ioQueue.sync` на `@MainActor`. SwiftUI планирует первый кадр анимации, но следующая же работа на main thread (блокирующий I/O) выполняется **до** того как runloop успеет закоммитить кадр → фриз ровно на старте. Фикс: тяжёлую работу в `await Task.detached(priority: .userInitiated) { … }`, на main actor вернуться только для публикации `@Published history` (внутри `withAnimation`). Плюс haptic-генератор `prepare()` заранее (`onAppear`/перед использованием) — первый `notificationOccurred` без prepare добавляет ~200мс Taptic Engine cold-start синхронно на тот же thread. Первый кадр теперь рендерится на следующем vsync (~8мс), I/O невидим.
 
+**Haptic молчит во время записи — iOS глушит app-haptics в AVAudioSession recording-режиме (НАСТОЯЩАЯ причина, не cold engine).** Симптом был **асимметричный** и потому увёл по ложному следу на ДВЕ итерации: при раскрытии long-панели вибрации нет, а при нажатии ✕/■ в той же панели — иногда есть. Корень — **`setAllowHapticsAndSystemSoundsDuringRecording` по умолчанию `false`**: пока сессия в recording-категории (`.playAndRecord` с активным движком), iOS **подавляет все haptics приложения и системные звуки**. Long-панель существует ТОЛЬКО во время живой long-записи → её expand-buzz всегда бил в этот mute. ✕/■ иногда срабатывали лишь потому, что они ЗАВЕРШАЮТ запись, и их импульс гонится с тем, как mute снимается на деактивации. `mergeHaptic` в истории «работал из коробки» НЕ из-за retained-инстанса, а потому что **в History записи нет** — mute не активен. Решение (одна строка): `try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)` в `AudioSessionManager.activate` (единственная точка активации always-active сессии; флаг сбрасывается в `false` только на деактивации, так что ставим там же). Подтверждено external-research (Perplexity, search-mode): при AV-записи haptics подавлены до этого opt-in — это пункт, который мы пропустили, гоняясь за движком.
+
+⚠️ **Две ложные гипотезы, которые мы отвергли (чтобы следующая сессия не повторяла) — обе НЕ были причиной silent-buzz здесь, хотя сами по себе верны:**
+- **Cold Taptic Engine.** «Первый импульс на холодном движке глохнет» — реальный эффект (см. merge-лаг выше), и `prepare()` его лечит. НО тут движок был тёплым (юзер только что тапал по экрану), а buzz всё равно молчал → не это. `prepare()` оставили как defensive latency-warming, не как фикс.
+- **`let`-vs-`@State` для генератора.** SwiftUI `View` — value-type, пересоздаётся на каждом `@Published`-апдейте (а `RecordingCoordinator` во время записи публикует пачками — таймер/WS/LA), и plain `let gen = UIImpactFeedbackGenerator()` ре-инициализируется холодным на каждом rebuild'е; переживает только `@State`. Это корректное общее правило (для гонок prepare/fire в часто-ребилдящейся вью держи генератор в `@State`), и мы перевели на `@State` — но в ДАННОМ баге это было не при чём: глушил recording-mute, а не подмена инстанса. Перепутать легко: оба дают «buzz молчит». Дифф-диагностика: **если вибрация молчит ИМЕННО во время активной записи, а в не-записывающих экранах работает — это recording-mute, а не engine/инстанс.** Сначала проверь `setAllowHapticsAndSystemSoundsDuringRecording`, потом уже cold-start/`@State`.
+
+**`onChange`/`onDisappear` на условно-удаляемой вьюхе не срабатывает на falling-edge.** Соседняя засада из той же сессии: long-панель reset'ила `longPanelExpanded = false` через `.onChange(of: isLongRecording) { if !active … }`, повешенный **на саму панель**. Но панель рендерится `if recorder.isLongRecording` — на falling-edge SwiftUI удаляет поддерево, и onChange для ЭТОГО же перехода не доставляется надёжно (обработчик висит на размонтируемой вью). Итог: стейт `true` протекал в следующую запись — «панель стартует уже раскрытой». Решение: вешать reset на **стабильного предка** (корневой ZStack, всегда в дереве) и реагировать на **rising-edge** (`if active { …=false }`), а не пытаться поймать teardown удаляемого поддерева. Правило: **modifier'ы жизненного цикла, которые должны отработать на исчезновение условного блока, нельзя вешать на сам этот блок — только на родителя, который переживает оба состояния.**
+
 **iOS 18/26: кастомный `DragGesture` на строке `List`/`ScrollView` убивает вертикальный скролл.** Подтверждённый Apple-баг (FB14688465, открыт с Xcode 16), на iOS 26 **усугубился** — `.simultaneousGesture` перестал работать вовсе, gesture arbitration переписан. Единственный надёжный обход для кастомного свайпа — `UIGestureRecognizerRepresentable` + `gestureRecognizerShouldBegin` (фильтр по горизонтальной скорости + edge-guard), либо уход на `ScrollView + LazyVStack` с `DragGesture(minimumDistance:)` + guard `abs(dx) > abs(dy)`. Поэтому кастомный свайп-reveal (круглые вертикальные кнопки) был прототипирован на ScrollView и **откатан** на нативный `List` + `.swipeActions` ради надёжности скролла — см. `methodology/переносимый-дизайн.md::Нативный компонент vs кастом`.
 
 **Что пробовали (graveyard):**
@@ -47,7 +55,44 @@
 - Кастомный свайп с круглыми вертикальными кнопками на `ScrollView+LazyVStack` — работал, но требовал ручной возни с шириной панели и порогом full-swipe; откатан на нативный.
 - Full-swipe-to-delete с растущей красной зоной и haptic-«защёлкой» на 50% — прототип рабочий, но native `.swipeActions` его не даёт (только кастом), а в native delete-кнопке при full-swipe label НЕ растягивается (иконка едет влево, центр пустой) — текст «Удалить запись» по центру там показать нельзя без полного кастома.
 
-### 7. Build database disk I/O error после прерванного билда
+### 7. iOS 26 keyboard notifications и SwiftUI composer desync
+
+**Симптом**: в AI Chat input то отстаёт от клавиатуры на раскрытии, то при закрытии
+«зависает» наверху на долю секунды; в другой итерации input оставался под клавиатурой.
+По ощущениям это выглядит как «клавиатура живёт своей анимацией, а composer своей».
+
+**Причина**: на iOS 26 keyboard notifications не дают удобный SwiftUI-ready контракт.
+В логах реального устройства приходила приватная animation curve `7` с duration около
+`0.383` на open, а на hide `keyboardWillChangeFrame` мог приходить уже как финальное
+событие с `duration=0`. Обычный fallback `.easeOut(duration:)` на private curve заставлял
+composer ехать медленнее клавиатуры; ожидание финального hide frame оставляло dock наверху
+до позднего state update. Поздний `keyboardWillHide` тоже не спасает app-owned close: в
+реальных логах он приходил уже после финального frame и с `priorHeight=0`, когда вычислять
+плавный collapse было поздно. Отдельная ловушка: считать высоту через SwiftUI reader view
+или safe-area push нельзя — reader может иметь не тот bounds, а safe-area обновляется не в
+фазе keyboard movement.
+
+**Решение**: считать keyboard overlap в координатах `window.bounds` (`window.convert(endFrame,
+from: screen.coordinateSpace)` + intersection), хранить baseline bottom inset только когда
+keyboard hidden, а сам composer двигать overlay-`offset`, не reflow'ить transcript. Для
+private curve `7` на open использовать front-loaded timing, чтобы dock стартовал вместе с
+клавиатурой. Для app-owned hide не ждать системного notification: `dismissKeyboard()` сначала
+запускает proactive collapse (`0.160s`, строка лога `collapse reason=dismissKeyboard`), затем
+снимает focus; `keyboardWillHide` остаётся страховкой для внешних системных путей закрытия.
+Логи `[Keyboard]` должны писать `frameEnd/inWindow/safeBase/height/lift/curve/anim/willHide`,
+`collapse reason=...` и отдельный `input tap`, иначе нельзя отличить геометрию, timing и
+перехват touch. Конкретная реализация и UX-модель — `fact-voice-chat-tab.md::Composer keyboard`.
+
+**Что пробовали и почему не сработало**: чистый `.ignoresSafeArea(.keyboard)` + padding по
+safe area сдвигал историю и давал рассинхрон; `keyboardWillChangeFrame` без `willHide` не
+ловил начало закрытия; обычная `.easeOut` для `curve=7` выглядела нормально на hide, но
+заметно отставала на open; Reddit/GPT research не дал готовой нативной константы для
+private curve `7`, только подтвердил направление диагностики (`keyboardWillChangeFrame`,
+`inputAccessoryView`, `UIKeyboardLayoutGuide`). Следующая ступень, если iOS 26 снова изменит
+контракт, — UIKit `UIKeyboardLayoutGuide` или `inputAccessoryView`, не очередной слой SwiftUI
+padding.
+
+### 8. Build database disk I/O error после прерванного билда
 
 **Симптом**: `./deploy.sh` падает пачкой `error closing '.../Objects-normal/arm64/<File>.o' ... No such file or directory` + финальное `accessing build database "...XCBuildData/build.db": disk I/O error`. Выглядит как катастрофа компиляции, но ни одной реальной ошибки в коде нет.
 

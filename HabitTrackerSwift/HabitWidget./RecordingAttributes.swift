@@ -43,8 +43,9 @@ struct RecordingAttributes: ActivityAttributes {
     }
 
     public struct ContentState: Codable, Hashable {
-        // Absolute moment recording started — used by Text(timerInterval:) so
-        // the system ticks the timer for free, no Activity.update() per second.
+        // Absolute moment the DICTATION recording started — used by
+        // Text(timerInterval:) so the system ticks the timer for free, no
+        // Activity.update() per second.
         public var startedAt: Date
         // Mirror of the WS connection state — UI shows red dot pulsing vs.
         // an offline indicator depending on this flag.
@@ -57,7 +58,8 @@ struct RecordingAttributes: ActivityAttributes {
         // when combined with everything else. Updated by RecordingCoordinator
         // — throttled to avoid burning the per-app update budget.
         public var previewText: String = ""
-        // Drives the spinner / red-dot / check icon picks.
+        // Recording phase mirrored into the Live Activity content. Drives the
+        // spinner / red-dot / check icon picks and the Dynamic Island chrome.
         public var phase: Phase = .recording
         // Active mic source rendered as a small line in Lock Screen / NC /
         // Dynamic Island expanded ("iPhone" / "AirPods Pro" / ...). Default
@@ -67,6 +69,7 @@ struct RecordingAttributes: ActivityAttributes {
         // keys. Name fallback to empty string for the same reason.
         public var micSourceKind: MicSourceKind = .unknown
         public var micSourceName: String = ""
+
     }
     public var sessionId: UUID
     public var title: String

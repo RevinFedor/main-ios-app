@@ -80,12 +80,37 @@ final class ReloadSession {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         do {
-            try await task.send(.data(Data()))
-            VRLog.d("Reload", "finalize signal sent — chunks total=\(chunkN)")
+            // CRITICAL: Soniox stt-rt-v4 listens for an empty TEXT frame ("") as
+            // the end-of-stream signal, NOT an empty BINARY frame (Data()). They
+            // are different WebSocket opcodes (0x1 vs 0x2); the binary variant is
+            // SILENTLY IGNORED — no {finished:true}, no socket close, so the
+            // receive loop below spins until the 300 s resource timeout. THAT is
+            // the "retranscribe крутится бесконечно" bug: this finalize was a
+            // binary frame while the live DictationSession.stop() (which works)
+            // sends .string(""). Same root cause + fix as
+            // fix-history-archive.md::Шрам #17 — it was ported to DictationSession
+            // but this one-shot reload kept the old binary finalize.
+            try await task.send(.string(""))
+            VRLog.d("Reload", "finalize TEXT frame sent — chunks total=\(chunkN)")
         } catch {
             VRLog.e("Reload", "finalize failed: \(error.localizedDescription)")
             return .failure(error)
         }
+
+        // Defense-in-depth watchdog: the empty-TEXT finalize above is the real
+        // cure, but if Soniox ever stalls mid-drain (network split after we've
+        // sent everything), `task.receive()` would otherwise block until the
+        // 300 s resource timeout. Cancelling the task makes the pending
+        // receive() throw, which breaks the loop and returns whatever final
+        // text we have. 60 s mirrors DictationSession.stopHardCapSeconds (the
+        // worst real finalize tail is ~30 s).
+        let stallWatchdog = Task { [weak task] in
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            guard !Task.isCancelled else { return }
+            VRLog.e("Reload", "stall watchdog FIRED (60s) — cancelling receive")
+            task?.cancel()
+        }
+        defer { stallWatchdog.cancel() }
 
         // Receive until socket closes or `finished:true` arrives. Soniox
         // sends final tokens then closes the socket.

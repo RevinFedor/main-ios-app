@@ -8,17 +8,37 @@ struct EditHabitSheet: View {
     let groupId: UUID?
 
     @State private var name: String = ""
+    @State private var notes: String = ""
     @State private var selectedColor: HabitColor = .blue
     @State private var showDeleteAlert = false
 
     var body: some View {
         NavigationStack {
             Form {
+                // Title + description in ONE section → the native row separator
+                // between them IS the "прочерк". Hierarchy is deliberately
+                // REVERSED from a normal title: the description is the prominent
+                // text (17pt white), the title is the subordinate, label-like
+                // element (14pt .secondary grey). User ask: заголовок не должен
+                // выделяться размером — он помечен по-другому (цвет+меньше), а
+                // описание читается заметнее. Title font is therefore ≤ description.
                 Section {
                     TextField("Название", text: $name)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .submitLabel(.done)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
+
+                    // Grows from ONE line (not a forced 2-line box) so the empty
+                    // state has symmetric top/bottom padding — the earlier
+                    // lineLimit(2...) reserved a blank 2nd line, which read as
+                    // "снизу пединг больше". Native iOS 16+ multi-line field:
+                    // built-in placeholder, no TextEditor background hacks.
+                    TextField("Описание", text: $notes, axis: .vertical)
                         .font(.system(size: 17))
                         .foregroundColor(.white)
-                        .submitLabel(.done)
+                        .lineLimit(1...6)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
                 }
 
                 Section {
@@ -62,6 +82,10 @@ struct EditHabitSheet: View {
                     }
                 }
             }
+            // Pull the first section up toward the navbar — the default Form top
+            // inset left a large empty band under "Закрыть/Сохранить" (user:
+            // "слишком большое расстояние … нужно сделать меньше").
+            .contentMargins(.top, 8, for: .scrollContent)
             .scrollContentBackground(.hidden)
             .background(Color(hex: "1C1C1E"))
             .navigationTitle("Привычка")
@@ -89,6 +113,7 @@ struct EditHabitSheet: View {
         .preferredColorScheme(.dark)
         .onAppear {
             name = habit.name
+            notes = habit.notes ?? ""
             selectedColor = habit.colorName
         }
     }
@@ -102,6 +127,7 @@ struct EditHabitSheet: View {
     private var isDirty: Bool {
         name.trimmingCharacters(in: .whitespaces) != habit.name
             || selectedColor != habit.colorName
+            || notes.trimmingCharacters(in: .whitespacesAndNewlines) != (habit.notes ?? "")
     }
 
     private func saveChanges() {
@@ -109,6 +135,7 @@ struct EditHabitSheet: View {
             habit.id,
             name: name.trimmingCharacters(in: .whitespaces),
             color: selectedColor,
+            notes: notes,
             groupId: groupId
         )
         dismiss()

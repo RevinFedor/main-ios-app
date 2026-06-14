@@ -24,6 +24,15 @@ struct VoiceSettingsSheet: View {
         return d?.object(forKey: VoiceRecordConfig.SharedKeys.liveActivityTrailingPadding) as? Double ?? 8
     }()
 
+    // Default playback speed for the History audio player. Seeded from the App
+    // Group (fallback 1.0); every new playback starts here. Persisted on change
+    // so the next item played picks it up without a restart.
+    @State private var playbackDefaultRate: Double = {
+        let d = UserDefaults(suiteName: VoiceRecordConfig.appGroup)
+        return d?.object(forKey: VoiceRecordConfig.SharedKeys.playbackDefaultRate) as? Double
+            ?? VoiceRecordConfig.playbackDefaultRateFallback
+    }()
+
     var body: some View {
         NavigationStack {
             Form {
@@ -68,6 +77,24 @@ struct VoiceSettingsSheet: View {
                     Text("Live Activity")
                 } footer: {
                     Text("Extra padding on the right side of the preview text in the Lock Screen and Dynamic Island so the last visible line doesn't run into the corner.")
+                }
+
+                Section {
+                    Picker("Default speed", selection: $playbackDefaultRate) {
+                        ForEach(VoiceRecordConfig.playbackRates, id: \.self) { r in
+                            Text(VoiceRecordConfig.playbackRateLabel(r)).tag(r)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: playbackDefaultRate) { _, newValue in
+                        let d = UserDefaults(suiteName: VoiceRecordConfig.appGroup)
+                        d?.set(newValue, forKey: VoiceRecordConfig.SharedKeys.playbackDefaultRate)
+                        d?.synchronize()
+                    }
+                } header: {
+                    Text("Playback")
+                } footer: {
+                    Text("Скорость, с которой стартует каждое новое воспроизведение в Истории. Кнопка скорости в плеере дальше переключает 1 → 1.5 → 2 → 2.5 для текущей записи.")
                 }
 
                 Section("Available inputs") {

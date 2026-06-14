@@ -55,6 +55,15 @@ final class AudioSessionManager {
     // Activity manager subscribes and silently updates ContentState so the
     // user sees the new mic name in Lock Screen / NC / Dynamic Island.
     static let micSourceDidChange = Notification.Name("AudioSessionManager.micSourceDidChange")
+    // Posted whenever the built-in data-source pick (Bottom/Front/Back) changes.
+    // SEPARATE from micSourceDidChange because a capsule switch does NOT change
+    // the resolved (kind, name) = (iphone, "iPhone") — that pair is deduped, so
+    // it can't carry this signal. There is ONE shared data source for the whole
+    // app (one mic, one route), so BOTH MicSourcePicker instances (bottom row +
+    // long panel) must re-read on this to stay in sync — otherwise one shows a
+    // stale pick and it looks like two independent settings (which is
+    // impossible: the capsule is shared by every concurrent recording).
+    static let micDataSourceDidChange = Notification.Name("AudioSessionManager.micDataSourceDidChange")
     // Re-entrancy guard for probeInputs(): probe activate/deactivate themselves
     // post routeChangeNotification, and the picker re-probes on route change —
     // without this flag that's an infinite probe loop (and a flickering orange
@@ -82,6 +91,26 @@ final class AudioSessionManager {
     // one captured at engine.start() — keeping the old rate makes the resampler
     // produce chipmunk/slow audio and garbled transcripts.
     var onActiveRouteChange: (() -> Void)?
+    // Fired on AVAudioSession interruptions: `true` on .began (system is about to
+    // / has deactivated the session and stopped the engine — a call, Siri, an
+    // alarm, another app seizing the route), `false` on .ended (safe to resume).
+    // MicCaptureHub subscribes to restart the engine so an interruption never
+    // silently kills a live recording — the user's rule is "only Stop stops it".
+    // Owned by the hub for the engine's lifetime, cleared when the engine stops.
+    var onInterruption: ((_ began: Bool) -> Void)?
+
+    // Sticky preference for WHICH built-in mic records (Bottom/Front/Back),
+    // stored as MicDataSource.rawValue. nil = let iOS pick the default data
+    // source. Persisted in App Group like forceBuiltInMic; applied via
+    // selectMicDataSource / reapplyMicDataSourceIfNeeded so it survives relaunch
+    // and re-activation.
+    var preferredMicDataSource: String? {
+        get { AppGroupContainer.defaults.string(forKey: VoiceRecordConfig.SharedKeys.preferredMicDataSource) }
+        set {
+            AppGroupContainer.defaults.set(newValue, forKey: VoiceRecordConfig.SharedKeys.preferredMicDataSource)
+            AppGroupContainer.defaults.synchronize()
+        }
+    }
 
     var forceBuiltInMic: Bool {
         get { AppGroupContainer.defaults.bool(forKey: VoiceRecordConfig.SharedKeys.forceBuiltInMic) }
@@ -190,9 +219,16 @@ final class AudioSessionManager {
     }
 
     // .bluetoothHighQualityRecording (iOS 26) is ONLY valid with .default mode.
-    // The iPhone path uses .measurement (minimal processing, cleanest capture).
+    // The iPhone path uses .measurement (minimal processing, cleanest capture) —
+    // EXCEPT when the user explicitly picked a built-in mic data source
+    // (Bottom/Front/Back). Research (Perplexity): .measurement "minimizes audio
+    // processing and often forces the primary bottom microphone, OVERRIDING
+    // custom data source selections". So if a data source is pinned we drop to
+    // .default, where setPreferredDataSource is honoured.
     private var categoryMode: AVAudioSession.Mode {
-        wantsBluetoothMic ? .default : .measurement
+        if wantsBluetoothMic { return .default }
+        if preferredMicDataSource != nil { return .default }
+        return .measurement
     }
 
     // ALWAYS-ACTIVE SESSION pattern (per Apple QA1631 + WWDC lab guidance summarized
@@ -226,13 +262,30 @@ final class AudioSessionManager {
         let sess = session
         let forceBI = forceBuiltInMic
         let wantsBT = wantsBluetoothMic
+        let dataSourceRaw = preferredMicDataSource
         audioQueue.async { [weak self] in
             do {
                 try sess.setCategory(.playAndRecord, mode: mode, options: options)
                 try sess.setActive(true, options: [.notifyOthersOnDeactivation])
+                // Permit our OWN UI haptics while the engine captures. iOS mutes
+                // ALL app-originated haptics + system sounds during recording by
+                // DEFAULT (the property resets to false only on session
+                // deactivation). The long-record panel exists ONLY during a live
+                // capture, so its long-press "expand" buzz was always firing into
+                // that mute — THE real reason it stayed silent (not a cold Taptic
+                // Engine, not gesture arbitration). Setting it here, the single
+                // activation/reactivation point of the always-active session, is
+                // enough. See fix-ios-stability.md::Haptic muted during recording.
+                try? sess.setAllowHapticsAndSystemSoundsDuringRecording(true)
                 let chosen = Self.pickPort(from: sess.availableInputs ?? [], forceBuiltIn: forceBI, wantsBT: wantsBT)
                 if sess.preferredInput?.uid != chosen?.uid {
                     try? sess.setPreferredInput(chosen)
+                }
+                // setActive can reset the selected built-in data source; re-apply
+                // the sticky Bottom/Front/Back pick now (after the input is set so
+                // the builtInMic port is enumerable). No-op when unset/unavailable.
+                if let raw = dataSourceRaw, let want = MicDataSource(rawValue: raw) {
+                    self?.applyPreferredDataSourceOnQueue(sess, want)
                 }
                 let settled = sess.currentRoute.inputs.first?.portType
                 Task { @MainActor in
@@ -248,6 +301,19 @@ final class AudioSessionManager {
                 Task { @MainActor in completion(.failure(error)) }
             }
         }
+    }
+
+    // Force a real setCategory + setActive(true), bypassing the idempotency
+    // guard in activate(). Needed after a session loss (interruption / media
+    // reset / a -50 engine.start): in those cases the SYSTEM deactivated the
+    // session but `session.category` can still read .playAndRecord, so activate()
+    // would short-circuit and never actually reactivate. We flip isActive=false
+    // first so activate()'s guard can't skip, then call activate(). This is the
+    // single "make the session genuinely live again" entry point for recovery.
+    func reactivateHard(completion: @escaping (Result<Void, Error>) -> Void) {
+        isActive = false
+        VRLog.d("Audio", "reactivateHard — forcing real setActive(true)")
+        activate(completion: completion)
     }
 
     // Convenience: warm the session up the very first time the Voice tab is
@@ -411,6 +477,128 @@ final class AudioSessionManager {
         return nil
     }
 
+    // ── BUILT-IN MIC DATA SOURCE (Bottom / Front / Back) ──────────────────────
+    // The built-in mic PORT exposes multiple "data sources" — the physical mics
+    // on the device (Bottom near the dock, Front near the earpiece/camera, Back).
+    // Selecting one routes capture to that physical mic. This is the input-side
+    // analogue of the speaker override (which we removed — output routing was
+    // useless for a recording app). API: AVAudioSessionPortDescription.dataSources
+    // + port.setPreferredDataSource(_:). Only the builtInMic port carries them;
+    // AirPods/USB have none, so the card is shown only on the iPhone-mic path.
+    enum MicDataSource: String, CaseIterable {
+        case bottom, front, back
+    }
+
+    // Map iOS dataSource (localized name / orientation) to our coarse enum.
+    // iOS exposes `.orientation` (.bottom/.top/.front/.back) on newer devices;
+    // fall back to the localized dataSourceName text when orientation is nil.
+    private nonisolated func classifyDataSource(_ ds: AVAudioSessionDataSourceDescription) -> MicDataSource? {
+        if let o = ds.orientation {
+            switch o {
+            case .bottom:        return .bottom
+            case .top, .front:   return .front   // earpiece/top mic == "front" for us
+            case .back:          return .back
+            default: break
+            }
+        }
+        let n = ds.dataSourceName.lowercased()
+        if n.contains("bottom") { return .bottom }
+        if n.contains("front") || n.contains("top") { return .front }
+        if n.contains("back")  { return .back }
+        return nil
+    }
+
+    // The data sources the built-in mic offers right now, as our enum. Empty when
+    // the built-in mic isn't the input (AirPods/USB) or the session can't yet
+    // enumerate (inactive + never probed). Reads availableInputs, so it needs a
+    // category set — true during/after activate or a probe.
+    func availableMicDataSources() -> [MicDataSource] {
+        guard let builtIn = (session.availableInputs ?? []).first(where: { $0.portType == .builtInMic }),
+              let sources = builtIn.dataSources, !sources.isEmpty else { return [] }
+        return sources.compactMap { classifyDataSource($0) }
+    }
+
+    // The data source CURRENTLY selected on the built-in mic (real route truth),
+    // or nil if built-in isn't active / has no data sources.
+    func currentMicDataSource() -> MicDataSource? {
+        guard let builtIn = session.currentRoute.inputs.first(where: { $0.portType == .builtInMic }) else {
+            // Not the live input — fall back to the selected source on the port
+            // description (set even before activation reflects it on the route).
+            if let bi = (session.availableInputs ?? []).first(where: { $0.portType == .builtInMic }),
+               let sel = bi.selectedDataSource {
+                return classifyDataSource(sel)
+            }
+            return nil
+        }
+        if let sel = builtIn.selectedDataSource { return classifyDataSource(sel) }
+        return nil
+    }
+
+    // Select which physical built-in mic records. Persists the choice in
+    // `preferredMicDataSource` (sticky). Picking a non-default source forces the
+    // category mode to .default (see categoryMode: .measurement would override
+    // the pick back to the bottom mic), so when the session is live we re-apply
+    // the whole category before pinning the data source. Blocking call →
+    // audioQueue. NOTE: research says hardware data-source switching mid-recording
+    // is NOT seamless (brief I/O halt). The picker disables this while recording;
+    // callers should only reach here when idle, where it's free.
+    func selectMicDataSource(_ choice: MicDataSource, completion: (() -> Void)? = nil) {
+        let wasMode = categoryMode
+        preferredMicDataSource = choice.rawValue
+        let want = choice
+        // ONE shared data source for the whole app — tell BOTH pickers to re-read
+        // so they never drift into looking like two independent settings.
+        NotificationCenter.default.post(name: Self.micDataSourceDidChange, object: nil)
+        guard isActive else {
+            // Idle: just persist; next activate() applies it with the right mode.
+            VRLog.d("Audio", "selectMicDataSource(\(want.rawValue)) — inactive, persisted for next activate")
+            publishMicSource(reason: "micDataSource-inactive")
+            completion?()
+            return
+        }
+        let newMode = categoryMode
+        let options = categoryOptions
+        let sess = session
+        audioQueue.async { [weak self] in
+            guard let self else { Task { @MainActor in completion?() }; return }
+            if newMode != wasMode {
+                try? sess.setCategory(.playAndRecord, mode: newMode, options: options)
+            }
+            self.applyPreferredDataSourceOnQueue(sess, want)
+            let settled = sess.currentRoute.inputs.first(where: { $0.portType == .builtInMic })?.selectedDataSource?.dataSourceName ?? "nil"
+            Task { @MainActor in
+                VRLog.d("Audio", "selectMicDataSource(\(want.rawValue)) applied mode=\(newMode == .measurement ? "measurement" : "default") → selected=\(settled)")
+                self.publishMicSource(reason: "micDataSource")
+                completion?()
+            }
+        }
+    }
+
+    // Re-apply the sticky data-source pick after activate()/route changes, which
+    // can reset the selected source. No-op when unset or built-in unavailable.
+    func reapplyMicDataSourceIfNeeded() {
+        guard let raw = preferredMicDataSource, let want = MicDataSource(rawValue: raw) else { return }
+        let sess = session
+        audioQueue.async { [weak self] in
+            self?.applyPreferredDataSourceOnQueue(sess, want)
+        }
+    }
+
+    // Off-actor helper: find the matching dataSource on the built-in mic port and
+    // pin it. nonisolated because it runs on audioQueue, touching only the passed
+    // session + pure classify. Idempotent (skips if already selected).
+    private nonisolated func applyPreferredDataSourceOnQueue(_ sess: AVAudioSession, _ want: MicDataSource) {
+        guard let builtIn = (sess.availableInputs ?? []).first(where: { $0.portType == .builtInMic }),
+              let sources = builtIn.dataSources else { return }
+        guard let match = sources.first(where: { self.classifyDataSource($0) == want }) else { return }
+        if builtIn.selectedDataSource?.dataSourceID == match.dataSourceID { return }
+        do {
+            try builtIn.setPreferredDataSource(match)
+        } catch {
+            VRLog.e("Audio", "setPreferredDataSource(\(want.rawValue)) failed: \(error.localizedDescription)")
+        }
+    }
+
     // Resolve the mic source the user effectively records from RIGHT NOW.
     // Order of precedence:
     //   1. The explicit user pick (wantsBluetoothMic → BT port from output
@@ -422,17 +610,24 @@ final class AudioSessionManager {
     // Returns (.unknown, "") when there's truly no input wired up — should be
     // rare; only happens right after launch before the first activate() lands.
     func currentMicSource() -> (kind: RecordingAttributes.MicSourceKind, name: String) {
-        // Path 1: user explicitly picked BT. The HFP input may not be published
-        // yet (category flip still settling), but the BT output device gives us
-        // the same name iOS will eventually use for the input.
-        if wantsBluetoothMic, let bt = btOutputDevice() {
-            return (classifyBluetooth(name: bt.name), bt.name)
-        }
-        // Path 2: read the live input port.
+        // DETERMINISTIC: the LIVE input port is the single source of truth, read
+        // FIRST. This guarantees the resolved source can never claim AirPods
+        // while the route is actually the built-in mic — the A2DP-only default
+        // path records from the iPhone even with AirPods connected for music, so
+        // "BT is connected" must NOT be mistaken for "BT is the mic". Only when
+        // there is no live input (session inactive, currentRoute empty) do we
+        // anticipate the explicit pick or fall back to the cached port.
         if let port = session.currentRoute.inputs.first {
             return (classify(port: port.portType, name: port.portName), port.portName)
         }
-        // Path 3: cached last-active port (currentRoute is empty between records).
+        // Inactive, route empty: if the user explicitly picked BT and it's still
+        // connected, anticipate that pick — the HFP input only materialises once
+        // the session activates, but btOutputDevice gives the same name iOS will
+        // use for the input.
+        if wantsBluetoothMic, let bt = btOutputDevice() {
+            return (classifyBluetooth(name: bt.name), bt.name)
+        }
+        // Last resort: the port we saw while last active (badge between records).
         if let last = lastActiveInputPort {
             return (classify(port: last, name: ""), portTypeFallbackName(last))
         }
@@ -501,6 +696,40 @@ final class AudioSessionManager {
         )
     }
 
+    // Re-apply the CURRENT target (forceBuiltInMic / wantsBluetoothMic) to a LIVE
+    // session: flip the category if it differs and pin the matching input port.
+    // This is the single mechanism for switching the mic mid-recording, in EITHER
+    // direction — picking AirPods (A2DP-only → HFP) and picking the iPhone back
+    // (HFP → A2DP-only) both go through here. Whenever the resulting input port
+    // differs from the one captured at engine.start(), the routeChange handler
+    // fires onActiveRouteChange and DictationSession rebuilds its tap at the new
+    // sample rate, so the resampler never runs on a stale rate. No-op when the
+    // session isn't active (the next activate() will pick the target up). Blocking
+    // calls run off-main so the picker never freezes during the HFP handshake.
+    func reapplyLiveTarget(completion: (() -> Void)? = nil) {
+        guard isActive else { completion?(); return }
+        let mode = categoryMode
+        let options = categoryOptions
+        let sess = session
+        let forceBI = forceBuiltInMic
+        let wantsBT = wantsBluetoothMic
+        audioQueue.async { [weak self] in
+            if sess.categoryOptions != options {
+                try? sess.setCategory(.playAndRecord, mode: mode, options: options)
+            }
+            let chosen = Self.pickPort(from: sess.availableInputs ?? [], forceBuiltIn: forceBI, wantsBT: wantsBT)
+            if sess.preferredInput?.uid != chosen?.uid {
+                try? sess.setPreferredInput(chosen)
+            }
+            let settled = sess.currentRoute.inputs.first?.portType
+            Task { @MainActor in
+                if let s = settled { self?.lastActiveInputPort = s }
+                self?.publishMicSource(reason: "reapplyLiveTarget")
+                completion?()
+            }
+        }
+    }
+
     // Picker calls this when the user taps a device in the menu. Records the
     // session-scoped target. Switching the TARGET may flip the category (iPhone
     // A2DP-only ↔ AirPods HFP), so when recording is live we must re-apply the
@@ -524,28 +753,10 @@ final class AudioSessionManager {
         let categoryFlipped = (wasBT != wantsBluetoothMic)
         VRLog.d("Audio", "selectInput → \(port.rawValue) wantsBT=\(wantsBluetoothMic) categoryFlipped=\(categoryFlipped)")
         if isActive {
-            // Live recording: blocking setCategory/setPreferredInput off-main so
-            // the picker doesn't freeze during the HFP handshake on the BT path.
-            let mode = categoryMode
-            let options = categoryOptions
-            let sess = session
-            let forceBI = forceBuiltInMic
-            let wantsBT = wantsBluetoothMic
-            audioQueue.async { [weak self] in
-                if categoryFlipped {
-                    try? sess.setCategory(.playAndRecord, mode: mode, options: options)
-                }
-                let chosen = Self.pickPort(from: sess.availableInputs ?? [], forceBuiltIn: forceBI, wantsBT: wantsBT)
-                if sess.preferredInput?.uid != chosen?.uid {
-                    try? sess.setPreferredInput(chosen)
-                }
-                let settled = sess.currentRoute.inputs.first?.portType
-                Task { @MainActor in
-                    if let s = settled { self?.lastActiveInputPort = s }
-                    self?.publishMicSource(reason: "selectInput-active")
-                    completion?()
-                }
-            }
+            // Live recording: re-apply category + preferred input off-main (shared
+            // path with pick-iPhone), so the picker doesn't freeze during the HFP
+            // handshake on the BT path and the tap rebuilds at the new rate.
+            reapplyLiveTarget(completion: completion)
         } else {
             // Not recording: DON'T touch the session at all. Just persist the
             // target via the flags above; the next activate() (when the user
@@ -574,7 +785,12 @@ final class AudioSessionManager {
         let inputs = availableInputs
         let list = inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ", ")
         let current = currentInputPortType?.rawValue ?? "nil"
-        VRLog.d("Audio", "[\(context)] availableInputs=[\(list)] current=\(current) forceBuiltIn=\(forceBuiltInMic) active=\(isActive)")
+        // Output side too: the active output port(s) + our speaker-override
+        // intent, so the speaker picker can be diagnosed from the device log.
+        let outs = session.currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ", ")
+        let dsList = availableMicDataSources().map { $0.rawValue }.joined(separator: "/")
+        let dsCur = currentMicDataSource()?.rawValue ?? "nil"
+        VRLog.d("Audio", "[\(context)] availableInputs=[\(list)] current=\(current) forceBuiltIn=\(forceBuiltInMic) | outputs=[\(outs)] micDataSources=[\(dsList)] selected=\(dsCur) prefDS=\(preferredMicDataSource ?? "nil") active=\(isActive)")
     }
 
     func applyPreferredInput() throws {
@@ -638,7 +854,20 @@ final class AudioSessionManager {
             object: session,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.activate { _ in } }
+            Task { @MainActor in
+                guard let self else { return }
+                // mediaserverd was reset — the session AND the engine are dead.
+                // Flag is stale-true, so drop it and let the hub do a hard
+                // reactivate + engine restart (same recovery as interruption
+                // end). If nothing is recording, just re-warm the session.
+                VRLog.d("Audio", "mediaServicesWereReset — full recovery")
+                self.isActive = false
+                if let onInterruption = self.onInterruption {
+                    onInterruption(false)
+                } else {
+                    self.activate { _ in }
+                }
+            }
         }
     }
 
@@ -662,11 +891,41 @@ final class AudioSessionManager {
         VRLog.d("Audio", "routeChange reason=\(routeReasonName(reason))")
         switch reason {
         case .newDeviceAvailable, .oldDeviceUnavailable, .categoryChange, .wakeFromSleep, .override:
+            // DETERMINISTIC FALLBACK on BT disconnect: if the user had picked
+            // AirPods (override set) and the BT device is now GONE from the route,
+            // drop the override. Otherwise wantsBluetoothMic stays true with a
+            // device that no longer exists — the badge would keep showing AirPods
+            // and the next recording would use the HFP category (no .mixWithOthers,
+            // kills music) for a mic that isn't there. Clearing it returns us to
+            // the iPhone A2DP path cleanly. This is the user-visible "отключил
+            // AirPods → детерминированно показывает iPhone" guarantee.
+            var clearedBTOverride = false
+            if reason == .oldDeviceUnavailable,
+               preferredPortOverride != nil, preferredPortOverride != .builtInMic,
+               btOutputDevice() == nil {
+                preferredPortOverride = nil
+                clearedBTOverride = true
+                VRLog.d("Audio", "BT device gone (oldDeviceUnavailable) — cleared BT override, back to iPhone path")
+            }
             // iOS may have nilled preferredInput. Re-apply on next runloop turn.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let before = self.currentInputPortType
-                try? self.applyPreferredInput()
+                // If we just cleared a BT override mid-recording, the category
+                // must flip back to A2DP-only too (not only preferredInput), so
+                // reapply the whole target ONCE. We gate on clearedBTOverride to
+                // avoid issuing setCategory on every route change (it would echo
+                // its own categoryChange notification). reapplyLiveTarget calls
+                // applyPreferredInput's equivalent internally, so skip the manual
+                // re-pin below in that case.
+                if clearedBTOverride, self.isActive {
+                    self.reapplyLiveTarget()
+                } else {
+                    try? self.applyPreferredInput()
+                }
+                // Data-source pick does NOT survive a route change (research) —
+                // re-apply the sticky Bottom/Front/Back on the built-in mic.
+                self.reapplyMicDataSourceIfNeeded()
                 let after = self.currentInputPortType
                 if self.isActive { self.lastActiveInputPort = after }
                 self.logRoute("routeChange:\(self.routeReasonName(reason))")
@@ -703,10 +962,32 @@ final class AudioSessionManager {
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         switch type {
         case .began:
-            break
+            // The system has DEACTIVATED our session and stopped the engine (a
+            // call, Siri, an alarm, another app seizing a non-mixable route).
+            // CRITICAL: drop the isActive flag NOW. If it stays stale-true, the
+            // next activate() hits its idempotency guard, skips the real
+            // setActive(true), and engine.start() then returns AVFoundation -50
+            // — the "blue mic, tap start, error -50 until I relaunch the app"
+            // bug. Marking it false makes the next activate() truly reactivate.
+            VRLog.d("Audio", "interruption began — session deactivated by system, isActive→false")
+            isActive = false
+            onInterruption?(true)
         case .ended:
-            if let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt,
-               AVAudioSession.InterruptionOptions(rawValue: optsRaw).contains(.shouldResume) {
+            // Always attempt to resume — a live recording must come back, the
+            // user's rule is "only the Stop button stops it". We don't gate on
+            // .shouldResume (some interruptions omit it yet we still want our
+            // recording back); reactivation simply fails harmlessly if another
+            // app still holds the route, and a later route change retries.
+            let canResume = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+                .map { AVAudioSession.InterruptionOptions(rawValue: $0).contains(.shouldResume) } ?? false
+            VRLog.d("Audio", "interruption ended — resuming (shouldResume=\(canResume))")
+            // If a recording is live the hub owns recovery (it reactivates the
+            // session AND restarts its engine). When nothing is recording, just
+            // re-warm the always-active session so the indicator + next record
+            // are ready.
+            if let onInterruption {
+                onInterruption(false)
+            } else {
                 reactivateAfterInterruption()
             }
         @unknown default:

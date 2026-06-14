@@ -23,6 +23,19 @@ final class RemoteWebController: NSObject, ObservableObject {
     private var progressObservation: NSKeyValueObservation?
     private var currentURL: URL?
 
+    // The URL currently shown, as a string with the ?token=… query stripped, for
+    // prefilling the editable URL bar. Prefers the live web-view URL (reflects
+    // in-page navigations); falls back to the last URL we loaded.
+    var currentDisplayURLString: String? {
+        let src = webView.url ?? currentURL
+        guard let src, var comps = URLComponents(url: src, resolvingAgainstBaseURL: false) else {
+            return src?.absoluteString
+        }
+        comps.queryItems = comps.queryItems?.filter { $0.name != "token" }
+        if comps.queryItems?.isEmpty == true { comps.queryItems = nil }
+        return comps.url?.absoluteString ?? src.absoluteString
+    }
+
     override init() {
         let config = WKWebViewConfiguration()
         // Persistent store — cookies + localStorage outlive the process.

@@ -12,9 +12,31 @@ import Foundation
 
 @MainActor
 final class TabRouter: ObservableObject {
-    enum Tab: String { case voice, remote, habits }
+    enum Tab: String { case chat, voice, habits }
 
     @Published var selected: Tab = .voice
+
+    // AI Chat navigation request — a UUID-stamped token so the chat tab can tell
+    // "load this conversation" from "no request" even when chatId is nil (open the
+    // list). The chat tab loads on whichever signal lands and clears `seq` once
+    // handled, so the load can't be dropped by @Published delivery ordering.
+    struct ChatRequest: Equatable { let seq: UUID; let chatId: String? }
+    @Published var pendingChatRequest: ChatRequest? = nil
+
+    /// Switch to the AI Chat tab and open a conversation (nil = the chat list).
+    /// Order matters: set the request BEFORE switching tabs so the chat tab sees
+    /// it whether it reacts to the request change or to becoming the active tab.
+    func openChat(_ chatId: String?) {
+        pendingChatRequest = ChatRequest(seq: UUID(), chatId: chatId)
+        selected = .chat
+    }
+
+    // Chat-creation status, presented at the ROOT (above the TabView) so it
+    // survives the Voice→AI Chat tab switch. The Voice "Chat" button's POST runs
+    // detached; if it fails after we've already left the Voice tab, an alert bound
+    // to that tab would never show. These live on the router instead.
+    @Published var chatCreating: Bool = false
+    @Published var chatCreateError: String? = nil
 
     func handle(url: URL) {
         guard url.scheme == "habittracker" else { return }
@@ -23,7 +45,8 @@ final class TabRouter: ObservableObject {
         // builds still installed) route to the habits tab.
         case "habits", "home": selected = .habits
         case "voice":          selected = .voice
-        case "remote":         selected = .remote
+        case "remote":         selected = .chat
+        case "chat":           selected = .chat
         default:               break
         }
     }
@@ -36,6 +59,10 @@ final class TabRouter: ObservableObject {
         guard d?.bool(forKey: VoiceRecordConfig.SharedKeys.wantsVoiceTab) == true else { return }
         d?.removeObject(forKey: VoiceRecordConfig.SharedKeys.wantsVoiceTab)
         d?.synchronize()
+        if selected == .chat && VoiceChatStore.shared.isComposerVisible {
+            VRLog.d("Router", "consumeVoiceTabFlag → staying in Chat (composer visible)")
+            return
+        }
         VRLog.d("Router", "consumeVoiceTabFlag → switching to Voice")
         selected = .voice
     }

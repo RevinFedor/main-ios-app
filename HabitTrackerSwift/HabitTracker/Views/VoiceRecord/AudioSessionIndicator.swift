@@ -6,11 +6,13 @@ import SwiftUI
 // (Apple QA1631) — making that lifecycle visible and controllable in the UI
 // turns an invisible side effect into a deterministic action the user owns.
 //
-// States:
-//   • OFF (icon: speaker.slash) — session inactive. First Record press will
+// States (icons are deliberately NON-audio — a readiness STATUS, not a speaker;
+// the user found the speaker glyph misleading since this isn't about playback):
+//   • OFF (icon: circle.dotted, dim) — session inactive. First Record press will
 //     activate and pay the one music dip.
-//   • ON  (icon: speaker.wave.2.fill, green tint) — session is alive, prewarmed.
-//     Every Record press from now on is silent — no setActive, no route flush.
+//   • ON  (icon: checkmark.circle.fill, green tint) — session is alive,
+//     prewarmed. Every Record press from now on is silent — no setActive, no
+//     route flush.
 //
 // Tap → toggle. Activation produces the expected one-time dip; deactivation is
 // instant (no music side effect, since the session merely releases its hold —
@@ -38,7 +40,7 @@ struct AudioSessionIndicator: View {
                     .controlSize(.small)
                     .tint(.white)
             } else {
-                Image(systemName: isActive ? "speaker.wave.2.fill" : "speaker.slash")
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle.dotted")
                     .foregroundStyle(isActive ? Color.green : Color.white.opacity(0.55))
             }
         }

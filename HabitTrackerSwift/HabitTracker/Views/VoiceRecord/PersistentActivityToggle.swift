@@ -47,21 +47,19 @@ struct PersistentActivityToggle: View {
         .accessibilityLabel(keepAlive ? "Закреплено в Dynamic Island" : "Не закреплено")
     }
 
-    // Sync the on-screen toggle change with the actual Activity state:
-    //   ON: ensure an .idle Activity exists.
-    //   OFF: tear down the Activity if it's currently in .idle (don't
-    //        kill an active recording — let the running recording finish).
+    // DEAD UI — the persistent-idle Activity mode was deprecated (keepAlive is
+    // permanently false; LiveActivityIntent.perform() is foreground-equivalent
+    // for Activity.request() on iOS 17+, so the idle workaround is unneeded).
+    // This view is no longer mounted anywhere. Kept compiling against the
+    // current RecordingActivityManager API; the startIdle path is gone.
     private func syncActivity() async {
         let mgr = RecordingActivityManager.shared
-        if keepAlive {
-            mgr.startIdle()
-            return
-        }
-        // Off path: only dismiss if Activity is idle. Active recordings
-        // (.recording / .starting / .stopping) should not be interrupted
-        // by accidental untap of this toggle.
-        if let act = mgr.current, act.content.state.phase == .idle {
-            await mgr.end(immediate: true)
+        if keepAlive { return }
+        // Off path: only dismiss if the Activity is idle.
+        // Active captures must not be interrupted by an accidental untap.
+        if let act = mgr.current,
+           act.content.state.phase == .idle {
+            await mgr.endAllOrphans()
         }
     }
 }

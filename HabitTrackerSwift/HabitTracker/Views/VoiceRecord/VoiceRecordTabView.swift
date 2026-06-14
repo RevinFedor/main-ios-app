@@ -5,7 +5,21 @@ struct VoiceRecordTabView: View {
     @EnvironmentObject var recorder: RecordingCoordinator
     @State private var showHistory = false
     @State private var showSettings = false
+    // Voice Chat — the "Chat" action button seeds the voice-record Mac chat with
+    // the just-recorded transcript. Flow: tap → bottom-sheet prompt picker →
+    // POST /api/chat/send → switch to the AI Chat tab on the returned chatId.
+    // chatTranscript is snapshotted at tap time so it survives the picker.
+    @EnvironmentObject private var router: TabRouter
+    @ObservedObject private var chatStore = VoiceChatStore.shared
+    @State private var chatTranscript = ""
+    @State private var showPromptPicker = false
     @State private var copiedFlashAt: Date? = nil
+    // Locally-mirrored copy of recorder.notice so the banner can stay up for its
+    // own dismiss window and animate out independently of the coordinator. We
+    // copy on .onChange (keyed by notice.id so repeats re-trigger) and clear it
+    // here after a delay; the coordinator's published value is just the signal.
+    @State private var shownNotice: RecordingCoordinator.UserNotice? = nil
+    @State private var noticeDismissTask: Task<Void, Never>? = nil
     // Live counter of lines currently in the debug log. Shown next to the
     // copy-log icon when devMode is on, so the user can tell at a glance
     // whether the log has been growing since the last clear. Refreshed on
@@ -32,12 +46,11 @@ struct VoiceRecordTabView: View {
                             .transition(.opacity)
                     }
                     HStack(spacing: 16) {
-                        // ✕ Cancel — slots in next to the big mic button while
-                        // a session is active, so the user always has an
-                        // escape hatch (e.g. if Stopping… hangs).
-                        if recorder.phase != .idle {
+                        if recorder.dictationPhase != .idle {
                             cancelButton
                                 .transition(.scale.combined(with: .opacity))
+                        } else {
+                            Color.clear.frame(width: 56, height: 56)
                         }
                         bigRecordButton
                         // Compact mic source picker — lives to the right of
@@ -48,9 +61,22 @@ struct VoiceRecordTabView: View {
                         MicSourcePicker()
                     }
                     .padding(.bottom, 24)
-                    .animation(.easeInOut(duration: 0.2), value: recorder.phase)
+                    .animation(.easeInOut(duration: 0.2), value: recorder.dictationPhase)
+                }
+
+                // Top verdict banner — green on a successful recording /
+                // retranscribe, red on failure (no internet, token/WS error,
+                // empty result). Anchored to the top so it reads as a system-
+                // style notification dropping in, above all the content. Auto-
+                // dismisses; tappable to dismiss early. Driven by recorder.notice.
+                if let notice = activeNotice {
+                    noticeBanner(notice)
+                        .padding(.horizontal, 12)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
+            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: activeNotice)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -122,11 +148,44 @@ struct VoiceRecordTabView: View {
             .sheet(isPresented: $showSettings) {
                 VoiceSettingsSheet()
             }
+            // Prompt picker as a BOTTOM SHEET (not fullscreen). Pick → send →
+            // jump to the AI Chat tab. "Отправить без промпта" sends bare text.
+            .sheet(isPresented: $showPromptPicker) {
+                VoiceChatPromptPicker(
+                    onPick: { pid, vid, _ in showPromptPicker = false; Task { await sendChat(promptId: pid, variationId: vid) } },
+                    onSkip: { showPromptPicker = false; Task { await sendChat(promptId: nil, variationId: nil) } }
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            // Progress + error for chat creation are presented at the ROOT
+            // (RootTabView, via router) so they survive the tab switch to AI Chat.
         }
         .task {
             await requestMicPermissionIfNeeded()
+            VoiceChatStore.shared.start()
             await recorder.handlePendingActionIfNeeded()
             logLineCount = VRLog.lineCount()
+        }
+        // Drive the verdict banner from the coordinator. Keyed on the notice
+        // identity (a fresh UUID per post) so even an identical message repeats
+        // the show+auto-dismiss. Error banners linger longer than success so the
+        // user has time to read what went wrong.
+        .onChange(of: recorder.notice) { _, newValue in
+            guard let n = newValue else { return }
+            noticeDismissTask?.cancel()
+            shownNotice = n
+            UINotificationFeedbackGenerator().notificationOccurred(
+                n.kind == .success ? .success : .error
+            )
+            let lingerNs: UInt64 = n.kind == .success ? 2_200_000_000 : 4_000_000_000
+            noticeDismissTask = Task {
+                try? await Task.sleep(nanoseconds: lingerNs)
+                if !Task.isCancelled, shownNotice?.id == n.id {
+                    shownNotice = nil
+                    recorder.clearNotice()
+                }
+            }
         }
         .onReceive(logCountTimer) { _ in
             // Polling once a second is cheap (a single Data load + byte scan
@@ -153,7 +212,11 @@ struct VoiceRecordTabView: View {
     }
 
     private var toolbarTitle: String {
-        switch recorder.phase {
+        // The navbar reflects the DICTATION slot only — a long capture is
+        // self-contained in its panel icon and must NOT show "Recording…" /
+        // "Finalizing…" here. With parallel slots the navbar simply follows
+        // dictationPhase; long never touches it.
+        switch recorder.dictationPhase {
         case .idle:        return "Voice Record"
         case .starting:    return "Starting…"
         case .recording:   return "Recording…"
@@ -179,7 +242,15 @@ struct VoiceRecordTabView: View {
                         errorBanner(err)
                     }
 
-                    if combined.isEmpty && !recorder.isRecording {
+                    if !combined.isEmpty {
+                        // Dictation transcript (live or just-finished).
+                        Text(combined)
+                            .font(.system(size: 18, weight: .regular))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    } else if !recorder.isRecording {
+                        // Truly idle (not recording, no transcript) → empty state.
                         VStack(spacing: 8) {
                             Image(systemName: "waveform")
                                 .font(.system(size: 36))
@@ -204,15 +275,10 @@ struct VoiceRecordTabView: View {
                             .controlSize(.large)
                             .tint(.gray)
                             .padding(.top, 12)
+
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)
-                    } else if !combined.isEmpty {
-                        Text(combined)
-                            .font(.system(size: 18, weight: .regular))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
                     }
 
                     if recorder.isRecording {
@@ -240,52 +306,77 @@ struct VoiceRecordTabView: View {
                     }
 
                     if !recorder.isRecording && !combined.isEmpty {
-                        HStack {
-                            Button {
-                                UIPasteboard.general.string = combined
-                                UINotificationFeedbackGenerator().notificationOccurred(.success)
-                                copiedFlashAt = Date()
-                                Task {
-                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                    if let stamp = copiedFlashAt, Date().timeIntervalSince(stamp) >= 1.4 {
-                                        copiedFlashAt = nil
+                        // Row 1: Copy / Notes / Share (left-aligned). Row 2: Chat,
+                        // also left, normal size (not full-width). The trailing
+                        // Spacer()s push the rows left inside the leading VStack.
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Button {
+                                    UIPasteboard.general.string = combined
+                                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                    copiedFlashAt = Date()
+                                    Task {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                        if let stamp = copiedFlashAt, Date().timeIntervalSince(stamp) >= 1.4 {
+                                            copiedFlashAt = nil
+                                        }
+                                    }
+                                } label: {
+                                    if isCopiedFlash {
+                                        Label("Copied", systemImage: "checkmark.circle.fill")
+                                    } else {
+                                        Label("Copy", systemImage: "doc.on.doc")
                                     }
                                 }
-                            } label: {
-                                if isCopiedFlash {
-                                    Label("Copied", systemImage: "checkmark.circle.fill")
-                                } else {
-                                    Label("Copy", systemImage: "doc.on.doc")
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(isCopiedFlash ? .green : .blue)
-                            .animation(.easeInOut(duration: 0.15), value: isCopiedFlash)
+                                .buttonStyle(.bordered)
+                                .tint(isCopiedFlash ? .green : .blue)
+                                .animation(.easeInOut(duration: 0.15), value: isCopiedFlash)
 
-                            // +Notes: promote the just-recorded entry to a note
-                            // (its auto-derived title is kept). It's a toggle —
-                            // once added it shows a filled/checked state, and a
-                            // second tap removes it from Notes.
-                            let isNote = recorder.lastEntryIsNote
+                                // +Notes: promote the just-recorded entry to a note
+                                // (its auto-derived title is kept). It's a toggle —
+                                // once added it shows a filled/checked state, and a
+                                // second tap removes it from Notes.
+                                let isNote = recorder.lastEntryIsNote
+                                Button {
+                                    recorder.toggleLastEntryNote()
+                                } label: {
+                                    if isNote {
+                                        Label("In Notes", systemImage: "checkmark.circle.fill")
+                                    } else {
+                                        Label("Notes", systemImage: "note.text.badge.plus")
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(isNote ? .yellow : .blue)
+                                .animation(.easeInOut(duration: 0.15), value: isNote)
+
+                                ShareLink(item: combined) {
+                                    Label("Share", systemImage: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.blue)
+
+                                Spacer(minLength: 0)   // keep Copy/Notes/Share left
+                            }
+
+                            // Chat — its own row, last, LEFT-aligned, normal size
+                            // (not full-width). Snapshot `combined` NOW so it
+                            // survives even if a new recording starts. Opens the
+                            // prompt picker as a bottom sheet (not a fullscreen).
                             Button {
-                                recorder.toggleLastEntryNote()
+                                guard !chatStore.offline, !router.chatCreating else { return }
+                                chatTranscript = combined
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                showPromptPicker = true
                             } label: {
-                                if isNote {
-                                    Label("In Notes", systemImage: "checkmark.circle.fill")
-                                } else {
-                                    Label("Notes", systemImage: "note.text.badge.plus")
-                                }
+                                Label("Chat", systemImage: "bubble.left.and.bubble.right")
                             }
-                            .buttonStyle(.bordered)
-                            .tint(isNote ? .yellow : .blue)
-                            .animation(.easeInOut(duration: 0.15), value: isNote)
-
-                            ShareLink(item: combined) {
-                                Label("Share", systemImage: "square.and.arrow.up")
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.blue)
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(hex: "7C3AED"))
+                            .disabled(chatStore.offline || router.chatCreating)
+                            .opacity(chatStore.offline || router.chatCreating ? 0.45 : 1)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     Color.clear.frame(height: 1).id("bottomAnchor")
@@ -318,6 +409,50 @@ struct VoiceRecordTabView: View {
     private var isCopiedFlash: Bool {
         guard let stamp = copiedFlashAt else { return false }
         return Date().timeIntervalSince(stamp) < 1.5
+    }
+
+    // The notice currently being shown (local mirror, drives the banner).
+    private var activeNotice: RecordingCoordinator.UserNotice? { shownNotice }
+
+    // Top verdict banner. Green capsule for success, red for failure — same
+    // visual family as the inline errorBanner but compact and self-dismissing.
+    // Tap anywhere on it to dismiss early.
+    private func noticeBanner(_ notice: RecordingCoordinator.UserNotice) -> some View {
+        let ok = notice.kind == .success
+        let tint: Color = ok ? .green : .red
+        return HStack(spacing: 10) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 16, weight: .bold))
+            Text(notice.message)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(2)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(tint.opacity(0.16))
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(tint.opacity(0.45), lineWidth: 1)
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            noticeDismissTask?.cancel()
+            shownNotice = nil
+            recorder.clearNotice()
+        }
+        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel((ok ? "Успех: " : "Ошибка: ") + notice.message)
     }
 
     private var reloadingBadge: some View {
@@ -407,7 +542,9 @@ struct VoiceRecordTabView: View {
     }
 
     private var bigRecordButton: some View {
-        Button {
+        // The big centre button starts/stops dictation.
+        let dictationActive = recorder.isRecording
+        return Button {
             guard !recorder.isBusy else { return }
             Task {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -416,16 +553,16 @@ struct VoiceRecordTabView: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(buttonColor)
+                    .fill(dictationActive ? Color.red : Color.blue)
                     .frame(width: 96, height: 96)
-                    .shadow(color: buttonColor.opacity(0.4), radius: 18, y: 6)
+                    .shadow(color: (dictationActive ? Color.red : Color.blue).opacity(0.4), radius: 18, y: 6)
                 if recorder.isBusy {
                     ProgressView()
                         .controlSize(.large)
                         .progressViewStyle(.circular)
                         .tint(.white)
                 } else {
-                    Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
+                    Image(systemName: dictationActive ? "stop.fill" : "mic.fill")
                         .font(.system(size: 36, weight: .semibold))
                         .foregroundStyle(.white)
                 }
@@ -433,18 +570,8 @@ struct VoiceRecordTabView: View {
         }
         .buttonStyle(.plain)
         .disabled(recorder.isBusy)
-        .accessibilityLabel(recorder.isRecording ? "Stop recording" : "Start recording")
-        .animation(.easeInOut(duration: 0.15), value: recorder.phase)
-    }
-
-    private var buttonColor: Color {
-        switch recorder.phase {
-        case .idle:        return .blue
-        case .starting:    return .blue
-        case .recording:   return .red
-        case .stopping:    return .red
-        case .finalizing:  return .red
-        }
+        .accessibilityLabel(dictationActive ? "Stop recording" : "Start recording")
+        .animation(.easeInOut(duration: 0.15), value: recorder.dictationPhase)
     }
 
     private func requestMicPermissionIfNeeded() async {
@@ -455,6 +582,23 @@ struct VoiceRecordTabView: View {
             _ = await AVAudioApplication.requestRecordPermission()
             let newStatus = AVAudioApplication.shared.recordPermission
             VRLog.d("UI", "mic permission after request=\(newStatus.rawValue)")
+        }
+    }
+
+    // ── Voice Chat ──
+    // Pick (or skip) → POST the transcript + prompt → switch to the AI Chat tab on
+    // the new conversation. Progress/error live on the router (presented at root)
+    // so they survive the tab switch. Guarded against double-send: two fast taps
+    // on the picker would otherwise fire two POSTs → two chats.
+    private func sendChat(promptId: String?, variationId: String?) async {
+        guard !chatStore.offline, !router.chatCreating else { return }
+        router.chatCreating = true
+        defer { router.chatCreating = false }
+        do {
+            let id = try await VoiceChatAPI.send(text: chatTranscript, promptId: promptId, variationId: variationId)
+            router.openChat(id)
+        } catch {
+            router.chatCreateError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 }
