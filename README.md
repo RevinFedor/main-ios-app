@@ -34,7 +34,7 @@ Voice recording is still present: a normal dictation flow with Soniox streaming 
 ## Related Repositories
 
 - [Main iOS App](https://github.com/RevinFedor/main-ios-app) — this repository.
-- [Desktop AI App](https://github.com/RevinFedor/Desktop-ai-app) — Mac-side Voice Record / Gemini chat host used by Voice Record chat.
+- [AI Mac Electron](https://github.com/RevinFedor/ai-mac-electron) — Mac-side Voice Record / Gemini chat host used by Voice Record chat.
 - [Noted Terminal](https://github.com/RevinFedor/custom-terminal) — Mac-side terminal/session host used by Terminal mode.
 
 ---
@@ -181,7 +181,7 @@ habit-tracker/
 - A paired iPhone for wireless install through `devicectl`.
 - Soniox API key if you want voice transcription.
 - Running Mac-side services if you want AI Chat / Terminal mode:
-  - [Desktop AI App](https://github.com/RevinFedor/Desktop-ai-app) exposing the Voice Record chat REST/SSE API;
+  - [AI Mac Electron](https://github.com/RevinFedor/ai-mac-electron) exposing the Voice Record chat REST/SSE API;
   - [Noted Terminal](https://github.com/RevinFedor/custom-terminal) exposing project/tab and SDK-tab APIs;
   - the shared remote web token configured on both sides.
 
