@@ -31,6 +31,12 @@ The current product center is **AI Chat**. It has two modes in one SwiftUI tab:
 
 Voice recording is still present: a normal dictation flow with Soniox streaming ASR, history, clipboard handoff, Shortcuts / Action Button / Control Center entry points, and Live Activity feedback. Habits is the original app this project started from: a gesture-first habit tracker with widgets and grouped rows. It is still maintained, but it is not the part with the most advanced Apple-platform work anymore.
 
+## Related Repositories
+
+- [Main iOS App](https://github.com/RevinFedor/main-ios-app) — this repository.
+- [Desktop AI App](https://github.com/RevinFedor/Desktop-ai-app) — Mac-side Voice Record / Gemini chat host used by Voice Record chat.
+- [Noted Terminal](https://github.com/RevinFedor/custom-terminal) — Mac-side terminal/session host used by Terminal mode.
+
 ---
 
 ## Architecture
@@ -175,8 +181,8 @@ habit-tracker/
 - A paired iPhone for wireless install through `devicectl`.
 - Soniox API key if you want voice transcription.
 - Running Mac-side services if you want AI Chat / Terminal mode:
-  - Voice Record Electron app exposing the chat REST/SSE API;
-  - custom-terminal / Noted Terminal exposing project/tab and SDK-tab APIs;
+  - [Desktop AI App](https://github.com/RevinFedor/Desktop-ai-app) exposing the Voice Record chat REST/SSE API;
+  - [Noted Terminal](https://github.com/RevinFedor/custom-terminal) exposing project/tab and SDK-tab APIs;
   - the shared remote web token configured on both sides.
 
 ---
@@ -244,6 +250,8 @@ Deploy logs go to `deploy-logs/`.
 
 The repository uses `docs_search` and `.semantic-index.json` as the main documentation router. `docs/knowledge/` files are constraints: they capture subsystem behavior, known platform traps, and fixes that should not be rediscovered.
 
+The reusable MCP package is published separately: [docs_search MCP](https://github.com/RevinFedor/docs_search_mcp). It lets an AI agent send a symptom or feature request to `docs_search`, receive exact markdown files from `.semantic-index.json`, and read only those files into context before editing SwiftUI, REST/SSE, terminal, or voice-recording code.
+
 Important docs:
 
 - [`docs/knowledge/fact-voice-chat-tab.md`](docs/knowledge/fact-voice-chat-tab.md) — native AI Chat and Terminal mode.
@@ -263,3 +271,5 @@ bash scripts/ai/build-index.sh
 ## License
 
 Personal project. No public license is defined.
+
+> ! Documentation is routed through `docs_search MCP`: agents call `docs_search`, receive relevant files from `.semantic-index.json`, and read those files into context before non-trivial code changes.
