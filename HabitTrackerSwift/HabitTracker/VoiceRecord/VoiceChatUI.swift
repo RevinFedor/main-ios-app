@@ -207,6 +207,35 @@ private struct HistoryDrawerPanEnd {
     let velocityX: CGFloat
 }
 
+enum SideDrawerEdge {
+    case leading
+    case trailing
+}
+
+enum SideDrawerTarget: Equatable {
+    case closed
+    case open
+
+    func offset(width: CGFloat) -> CGFloat {
+        switch self {
+        case .closed: return 0
+        case .open: return width
+        }
+    }
+}
+
+struct SideDrawerCommand: Equatable {
+    let id: UUID
+    let target: SideDrawerTarget
+    let animated: Bool
+
+    init(target: SideDrawerTarget, animated: Bool = true) {
+        self.id = UUID()
+        self.target = target
+        self.animated = animated
+    }
+}
+
 private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
         Swift.min(range.upperBound, Swift.max(range.lowerBound, self))
@@ -222,6 +251,386 @@ private final class HistoryDrawerPanRecognizer: UIPanGestureRecognizer {
     override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
         if preventingGestureRecognizer.isScrollViewPanGesture { return false }
         return super.canBePrevented(by: preventingGestureRecognizer)
+    }
+}
+
+private final class SideDrawerPanRecognizer: UIPanGestureRecognizer {
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        if preventedGestureRecognizer.isScrollViewPanGesture { return true }
+        return super.canPrevent(preventedGestureRecognizer)
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        if preventingGestureRecognizer.isScrollViewPanGesture { return false }
+        return super.canBePrevented(by: preventingGestureRecognizer)
+    }
+}
+
+struct SideDrawerUIKitHost<Main: View, Drawer: View>: UIViewControllerRepresentable {
+    let edge: SideDrawerEdge
+    let drawerWidth: CGFloat
+    let command: SideDrawerCommand?
+    let reduceMotion: Bool
+    let movesMain: Bool
+    let isGestureEnabled: Bool
+    let fullScreenOpenEnabled: Bool
+    let navigationCanGoBack: Bool
+    let edgeActivationWidth: CGFloat
+    let main: Main
+    let drawer: Drawer
+    let onBegan: (CGFloat) -> Void
+    let onSettleStarted: (SideDrawerTarget, CGFloat) -> Void
+    let onSettled: (SideDrawerTarget) -> Void
+
+    init(
+        edge: SideDrawerEdge,
+        drawerWidth: CGFloat,
+        command: SideDrawerCommand?,
+        reduceMotion: Bool,
+        movesMain: Bool = true,
+        isGestureEnabled: Bool = true,
+        fullScreenOpenEnabled: Bool = true,
+        navigationCanGoBack: Bool = false,
+        edgeActivationWidth: CGFloat = 28,
+        onBegan: @escaping (CGFloat) -> Void = { _ in },
+        onSettleStarted: @escaping (SideDrawerTarget, CGFloat) -> Void = { _, _ in },
+        onSettled: @escaping (SideDrawerTarget) -> Void = { _ in },
+        @ViewBuilder main: () -> Main,
+        @ViewBuilder drawer: () -> Drawer
+    ) {
+        self.edge = edge
+        self.drawerWidth = drawerWidth
+        self.command = command
+        self.reduceMotion = reduceMotion
+        self.movesMain = movesMain
+        self.isGestureEnabled = isGestureEnabled
+        self.fullScreenOpenEnabled = fullScreenOpenEnabled
+        self.navigationCanGoBack = navigationCanGoBack
+        self.edgeActivationWidth = edgeActivationWidth
+        self.main = main()
+        self.drawer = drawer()
+        self.onBegan = onBegan
+        self.onSettleStarted = onSettleStarted
+        self.onSettled = onSettled
+    }
+
+    func makeUIViewController(context: Context) -> SideDrawerUIKitController {
+        let controller = SideDrawerUIKitController()
+        controller.update(
+            edge: edge,
+            drawerWidth: drawerWidth,
+            reduceMotion: reduceMotion,
+            movesMain: movesMain,
+            isGestureEnabled: isGestureEnabled,
+            fullScreenOpenEnabled: fullScreenOpenEnabled,
+            navigationCanGoBack: navigationCanGoBack,
+            edgeActivationWidth: edgeActivationWidth,
+            onBegan: onBegan,
+            onSettleStarted: onSettleStarted,
+            onSettled: onSettled
+        )
+        controller.setContent(main: AnyView(main), drawer: AnyView(drawer))
+        return controller
+    }
+
+    func updateUIViewController(_ controller: SideDrawerUIKitController, context: Context) {
+        controller.update(
+            edge: edge,
+            drawerWidth: drawerWidth,
+            reduceMotion: reduceMotion,
+            movesMain: movesMain,
+            isGestureEnabled: isGestureEnabled,
+            fullScreenOpenEnabled: fullScreenOpenEnabled,
+            navigationCanGoBack: navigationCanGoBack,
+            edgeActivationWidth: edgeActivationWidth,
+            onBegan: onBegan,
+            onSettleStarted: onSettleStarted,
+            onSettled: onSettled
+        )
+        controller.setContent(main: AnyView(main), drawer: AnyView(drawer))
+        controller.apply(command: command)
+    }
+}
+
+final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDelegate {
+    private let mainHost = UIHostingController(rootView: AnyView(EmptyView()))
+    private let drawerHost = UIHostingController(rootView: AnyView(EmptyView()))
+    private let dimControl = UIControl()
+    private var panRecognizer: SideDrawerPanRecognizer?
+    private var lastCommandID: UUID?
+    private var startOffset: CGFloat = 0
+    private var offset: CGFloat = 0
+
+    private var edge: SideDrawerEdge = .leading
+    private var drawerWidth: CGFloat = 0
+    private var reduceMotion = false
+    private var movesMain = true
+    private var isGestureEnabled = true
+    private var fullScreenOpenEnabled = true
+    private var navigationCanGoBack = false
+    private var edgeActivationWidth: CGFloat = 28
+    private var onBegan: (CGFloat) -> Void = { _ in }
+    private var onSettleStarted: (SideDrawerTarget, CGFloat) -> Void = { _, _ in }
+    private var onSettled: (SideDrawerTarget) -> Void = { _ in }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        install(host: mainHost)
+        dimControl.backgroundColor = UIColor.black
+        dimControl.alpha = 0
+        dimControl.isHidden = true
+        dimControl.addTarget(self, action: #selector(dimTapped), for: .touchUpInside)
+        view.addSubview(dimControl)
+        install(host: drawerHost)
+        drawerHost.view.clipsToBounds = true
+
+        let pan = SideDrawerPanRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.cancelsTouchesInView = true
+        pan.delaysTouchesBegan = false
+        pan.delaysTouchesEnded = false
+        pan.delegate = self
+        view.addGestureRecognizer(pan)
+        panRecognizer = pan
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyOffset(offset, notify: false)
+    }
+
+    func setContent(main: AnyView, drawer: AnyView) {
+        mainHost.rootView = main
+        drawerHost.rootView = drawer
+    }
+
+    func update(
+        edge: SideDrawerEdge,
+        drawerWidth: CGFloat,
+        reduceMotion: Bool,
+        movesMain: Bool,
+        isGestureEnabled: Bool,
+        fullScreenOpenEnabled: Bool,
+        navigationCanGoBack: Bool,
+        edgeActivationWidth: CGFloat,
+        onBegan: @escaping (CGFloat) -> Void,
+        onSettleStarted: @escaping (SideDrawerTarget, CGFloat) -> Void,
+        onSettled: @escaping (SideDrawerTarget) -> Void
+    ) {
+        self.edge = edge
+        self.drawerWidth = max(0, drawerWidth)
+        self.reduceMotion = reduceMotion
+        self.movesMain = movesMain
+        self.isGestureEnabled = isGestureEnabled
+        self.fullScreenOpenEnabled = fullScreenOpenEnabled
+        self.navigationCanGoBack = navigationCanGoBack
+        self.edgeActivationWidth = edgeActivationWidth
+        self.onBegan = onBegan
+        self.onSettleStarted = onSettleStarted
+        self.onSettled = onSettled
+        offset = offset.clamped(to: 0...max(0, drawerWidth))
+        applyOffset(offset, notify: false)
+    }
+
+    func apply(command: SideDrawerCommand?) {
+        guard let command, command.id != lastCommandID else { return }
+        lastCommandID = command.id
+        settle(to: command.target, velocity: 0, animated: command.animated, notifyStart: false)
+    }
+
+    private func install(host: UIHostingController<AnyView>) {
+        addChild(host)
+        host.view.backgroundColor = .clear
+        view.addSubview(host.view)
+        host.didMove(toParent: self)
+    }
+
+    @objc private func dimTapped() {
+        settle(to: .closed, velocity: 0, animated: true, notifyStart: true)
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        let width = max(1, drawerWidth)
+        let translation = normalizedTranslation(recognizer.translation(in: view).x)
+        let velocity = normalizedTranslation(recognizer.velocity(in: view).x)
+        switch recognizer.state {
+        case .began:
+            startOffset = offset.clamped(to: 0...width)
+            onBegan(startOffset)
+        case .changed:
+            applyOffset(rubberBand(startOffset + translation, width: width), notify: false)
+        case .ended:
+            let current = (startOffset + translation).clamped(to: 0...width)
+            let target = targetForEnd(startOffset: startOffset, current: current, velocity: velocity, width: width)
+            settle(to: target, velocity: velocity, animated: true, notifyStart: true)
+        case .cancelled, .failed:
+            let target: SideDrawerTarget = offset > width * 0.5 ? .open : .closed
+            settle(to: target, velocity: 0, animated: true, notifyStart: true)
+        default:
+            break
+        }
+    }
+
+    private func settle(to target: SideDrawerTarget, velocity: CGFloat, animated: Bool, notifyStart: Bool) {
+        let width = max(0, drawerWidth)
+        let destination = target.offset(width: width)
+        if notifyStart {
+            onSettleStarted(target, velocity)
+        }
+        let updates = {
+            self.applyOffset(destination, notify: false)
+        }
+        let completion: (Bool) -> Void = { _ in
+            self.offset = destination
+            self.applyOffset(destination, notify: false)
+            self.onSettled(target)
+        }
+        guard animated, !reduceMotion else {
+            UIView.performWithoutAnimation(updates)
+            completion(true)
+            return
+        }
+        UIView.animate(
+            withDuration: 0.18,
+            delay: 0,
+            options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut],
+            animations: updates,
+            completion: completion
+        )
+    }
+
+    private func applyOffset(_ proposed: CGFloat, notify: Bool) {
+        let width = max(0, drawerWidth)
+        offset = width <= 0 ? 0 : proposed.clamped(to: -28...(width + 28))
+        let clamped = width <= 0 ? 0 : offset.clamped(to: 0...width)
+        let bounds = view.bounds
+        mainHost.view.frame = bounds
+        dimControl.frame = bounds
+        let drawerX: CGFloat
+        switch edge {
+        case .leading:
+            mainHost.view.transform = movesMain ? CGAffineTransform(translationX: clamped, y: 0) : .identity
+            drawerX = -width + offset
+        case .trailing:
+            mainHost.view.transform = movesMain ? CGAffineTransform(translationX: -clamped, y: 0) : .identity
+            drawerX = bounds.width - offset
+        }
+        drawerHost.view.frame = CGRect(x: drawerX, y: 0, width: width, height: bounds.height)
+        let progress = width <= 1 ? 0 : clamped / width
+        dimControl.alpha = 0.20 * progress
+        dimControl.isHidden = progress < 0.01
+        dimControl.isUserInteractionEnabled = progress > 0.02
+        if notify {
+            onBegan(clamped)
+        }
+    }
+
+    private func targetForEnd(startOffset: CGFloat, current: CGFloat, velocity: CGFloat, width: CGFloat) -> SideDrawerTarget {
+        let projected = (current + velocity * 0.18).clamped(to: 0...width)
+        if abs(velocity) >= 650 {
+            return velocity > 0 ? .open : .closed
+        }
+        if startOffset < width * 0.5 {
+            return projected > width * 0.32 ? .open : .closed
+        } else {
+            return projected > width * 0.68 ? .open : .closed
+        }
+    }
+
+    private func normalizedTranslation(_ x: CGFloat) -> CGFloat {
+        edge == .leading ? x : -x
+    }
+
+    private func denormalizedVelocity(_ x: CGFloat) -> CGFloat {
+        edge == .leading ? x : -x
+    }
+
+    private func rubberBand(_ proposed: CGFloat, width: CGFloat) -> CGFloat {
+        let limit: CGFloat = 28
+        if proposed < 0 {
+            return -min(limit, rubberDistance(-proposed, dimension: width))
+        }
+        if proposed > width {
+            return width + min(limit, rubberDistance(proposed - width, dimension: width))
+        }
+        return proposed
+    }
+
+    private func rubberDistance(_ overflow: CGFloat, dimension: CGFloat) -> CGFloat {
+        guard dimension > 0 else { return 0 }
+        return (overflow * 0.55 * dimension) / (dimension + 0.55 * overflow)
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === panRecognizer,
+              isGestureEnabled,
+              drawerWidth > 1,
+              let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+
+        let translation = pan.translation(in: view)
+        let velocity = pan.velocity(in: view)
+        let normalizedX = normalizedTranslation(translation.x)
+        let normalizedVelocity = normalizedTranslation(velocity.x)
+        let horizontal =
+            (abs(translation.x) >= 8 && abs(translation.x) >= abs(translation.y) * 0.75) ||
+            (abs(velocity.x) >= 220 && abs(velocity.x) >= abs(velocity.y) * 0.80)
+        guard horizontal else { return false }
+
+        let width = max(1, drawerWidth)
+        let clamped = offset.clamped(to: 0...width)
+        let isClosed = clamped <= 1
+        let isOpen = clamped >= width - 1
+        if !isClosed && !isOpen { return true }
+
+        if isClosed {
+            guard !navigationCanGoBack else { return false }
+            guard normalizedX > 0 || normalizedVelocity > 0 else { return false }
+            guard !fullScreenOpenEnabled else { return true }
+            let locationX = pan.location(in: view).x
+            switch edge {
+            case .leading:
+                return locationX <= edgeActivationWidth
+            case .trailing:
+                return locationX >= view.bounds.width - edgeActivationWidth
+            }
+        }
+
+        if isOpen {
+            return normalizedX < 0 || normalizedVelocity < -120
+        }
+
+        return false
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if viewChainContains(touch.view, where: { view in
+            view is UITextField ||
+            view is UITextView ||
+            String(describing: type(of: view)).contains("UISearchTextField")
+        }) {
+            return false
+        }
+
+        if offset <= 1, viewChainContains(touch.view, where: { $0 is UIControl }) {
+            return false
+        }
+
+        return true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    private func viewChainContains(_ view: UIView?, where predicate: (UIView) -> Bool) -> Bool {
+        var current = view
+        while let view = current {
+            if predicate(view) { return true }
+            current = view.superview
+        }
+        return false
     }
 }
 
@@ -418,6 +827,7 @@ struct VoiceChatTabView: View {
     @State private var handledSeq: UUID? = nil
     @State private var drawerPhase: HistoryDrawerPhase = .closed
     @State private var drawerOffset: CGFloat = 0
+    @State private var drawerCommand: SideDrawerCommand? = nil
     @State private var scrollLockedByDrawer = false
     @State private var drawerAnimationToken = UUID()
     @State private var pendingDrawerCloseAction: DrawerCloseAction? = nil
@@ -517,13 +927,20 @@ struct VoiceChatTabView: View {
     private var compactDrawerLayout: some View {
         GeometryReader { geo in
             let drawerWidth = preferredDrawerWidth(in: geo.size)
-            let visualOffset = drawerOffset.clamped(to: -28...(drawerWidth + 28))
-            let clampedOffset = visualOffset.clamped(to: 0...drawerWidth)
-            let progress = drawerWidth == 0 ? 0 : clampedOffset / drawerWidth
-
-            ZStack(alignment: .leading) {
-                VCPageBackground.ignoresSafeArea()
-
+            SideDrawerUIKitHost(
+                edge: .leading,
+                drawerWidth: drawerWidth,
+                command: drawerCommand,
+                reduceMotion: reduceMotion,
+                movesMain: false,
+                isGestureEnabled: true,
+                fullScreenOpenEnabled: true,
+                navigationCanGoBack: terminalMode && terminal.canStepBack,
+                edgeActivationWidth: 28,
+                onBegan: { startOffset in beginDrawerDrag(startOffset: startOffset, width: drawerWidth) },
+                onSettleStarted: { target, velocity in drawerSettleStarted(target: target, velocityX: velocity, width: drawerWidth) },
+                onSettled: { target in drawerSettled(target: target, width: drawerWidth) }
+            ) {
                 NavigationStack {
                     chatContent(
                         onShowSidebar: { openHistory(width: drawerWidth) },
@@ -531,43 +948,12 @@ struct VoiceChatTabView: View {
                         onNewChat: { startNewChat(closeWidth: drawerWidth) }
                     )
                 }
-                .offset(x: visualOffset)
                 .background(VCPageBackground.ignoresSafeArea())
-                .overlay {
-                    if progress > 0 {
-                        Color.black.opacity(0.2 * progress)
-                            .ignoresSafeArea(.container, edges: [.top, .horizontal])
-                            .contentShape(Rectangle())
-                            .onTapGesture { closeHistory(width: drawerWidth) }
-                            .accessibilityLabel("Close chat history")
-                            .accessibilityAddTraits(.isButton)
-                    }
-                }
-                .accessibilityHidden(progress > 0.5)
-
+            } drawer: {
                 historyDrawer(width: drawerWidth)
-                    .frame(width: drawerWidth)
-                    .offset(x: -drawerWidth + visualOffset)
-                    .accessibilityHidden(progress < 0.02)
             }
             .clipped()
-            .contentShape(Rectangle())
             .scrollDisabled(scrollLockedByDrawer)
-            .gesture(
-                HistoryDrawerPanGesture(
-                    drawerWidth: drawerWidth,
-                    currentOffset: clampedOffset,
-                    isEnabled: true,
-                    fullScreenOpenEnabled: true,
-                    navigationCanGoBack: terminalMode && terminal.canStepBack,
-                    textInputActive: textInputActive,
-                    edgeActivationWidth: 28,
-                    onBegan: { startOffset in beginDrawerDrag(startOffset: startOffset, width: drawerWidth) },
-                    onChanged: { newOffset in updateDrawerDrag(to: newOffset, width: drawerWidth) },
-                    onEnded: { end in endDrawerDrag(end, width: drawerWidth) },
-                    onCancelled: { cancelDrawerDrag(width: drawerWidth) }
-                )
-            )
             .onChange(of: drawerWidth) { _, newWidth in
                 normalizeDrawerForWidthChange(newWidth)
             }
@@ -635,8 +1021,8 @@ struct VoiceChatTabView: View {
     }
 
     private func preferredDrawerWidth(in size: CGSize) -> CGFloat {
-        let desired = size.width * 0.90
-        let maxAllowed = max(0, size.width - 44)
+        let desired = size.width * 0.85
+        let maxAllowed = max(0, size.width - 56)
         return min(max(280, desired), maxAllowed)
     }
 
@@ -683,7 +1069,13 @@ struct VoiceChatTabView: View {
         Task { await store.refreshChats() }
         FrameMonitor.shared.arm(reason: "chat-drawer", label: "open surface=\(drawerSurfaceLabel)", phase: "animate")
         terminal.setInteractionActive(true, source: "chat-drawer")
-        settleDrawer(to: .open, velocityX: 0, width: width)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            drawerPhase = .settling(to: .open)
+            scrollLockedByDrawer = true
+        }
+        drawerCommand = SideDrawerCommand(target: .open)
     }
 
     private func closeHistory(width: CGFloat, after action: DrawerCloseAction? = nil) {
@@ -691,7 +1083,13 @@ struct VoiceChatTabView: View {
         let suffix = action.map { " next=\($0.label)" } ?? ""
         FrameMonitor.shared.arm(reason: "chat-drawer", label: "close surface=\(drawerSurfaceLabel)\(suffix)", phase: "animate")
         terminal.setInteractionActive(true, source: "chat-drawer")
-        settleDrawer(to: .closed, velocityX: 0, width: width)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            drawerPhase = .settling(to: .closed)
+            scrollLockedByDrawer = true
+        }
+        drawerCommand = SideDrawerCommand(target: .closed)
     }
 
     private func resetDrawerClosed() {
@@ -701,6 +1099,46 @@ struct VoiceChatTabView: View {
         scrollLockedByDrawer = false
         drawerPhase = .closed
         drawerOffset = 0
+        drawerCommand = SideDrawerCommand(target: .closed, animated: false)
+    }
+
+    private func historyTarget(from sideTarget: SideDrawerTarget) -> HistoryDrawerTarget {
+        switch sideTarget {
+        case .closed: return .closed
+        case .open: return .open
+        }
+    }
+
+    private func drawerSettleStarted(target sideTarget: SideDrawerTarget, velocityX: CGFloat, width: CGFloat) {
+        let target = historyTarget(from: sideTarget)
+        FrameMonitor.shared.setPhase("animate")
+        VCLog.log("drawer", "settle target=\(drawerTargetLabel(target)) surface=\(drawerSurfaceLabel) velocity=\(Int(velocityX))")
+        drawerAnimationToken = UUID()
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            drawerPhase = .settling(to: target)
+            scrollLockedByDrawer = true
+        }
+        terminal.setInteractionActive(true, source: "chat-drawer")
+    }
+
+    private func drawerSettled(target sideTarget: SideDrawerTarget, width: CGFloat) {
+        let target = historyTarget(from: sideTarget)
+        FrameMonitor.shared.setPhase("settle")
+        drawerPhase = target == .open ? .open : .closed
+        drawerOffset = target.offset(width: width)
+        scrollLockedByDrawer = false
+        terminal.setInteractionActive(false, source: "chat-drawer")
+        let action = target == .closed ? pendingDrawerCloseAction : nil
+        pendingDrawerCloseAction = nil
+        if let action {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                applyDrawerCloseAction(action)
+            }
+        }
     }
 
     private func drawerTarget(for end: HistoryDrawerPanEnd, width: CGFloat) -> HistoryDrawerTarget {

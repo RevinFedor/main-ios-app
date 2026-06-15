@@ -1,14 +1,5 @@
 [
   {
-    "path": "docs/terminal-navigation-jank-investigation-2026-06-15.md",
-    "hash": "981e4ca704cdff86d2f16085d3a06dc7a7555e4737d9df354c6f5a12652dce85",
-    "type": "unknown",
-    "explicit": [],
-    "implicit": [],
-    "related_components": [],
-    "raw_response": "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
-  },
-  {
     "path": "docs/methodology/переносимый-дизайн.md",
     "type": "fact",
     "explicit": [
@@ -23,7 +14,9 @@
       "settings_ui",
       "keyboard_behavior",
       "audio_session_lifecycle",
-      "native_vs_custom_components"
+      "native_vs_custom_components",
+      "interactive_container_transitions",
+      "stable_surface_animation"
     ],
     "implicit": [
       "stealth_recording_indicator_toggle",
@@ -37,7 +30,9 @@
       "floating_action_safe_area_overlay",
       "verdict_always_visible_success_fail",
       "offline_resilience_durable_local",
-      "seed_on_open_live_delta_sync"
+      "seed_on_open_live_delta_sync",
+      "terminal_uikit_container_not_swiftui_snapshot",
+      "cached_content_not_skeleton_transition_mask"
     ],
     "symptoms": [
       "Recording mic icon shown even when AVAudioSession not active; user confused whether app is recording",
@@ -53,7 +48,10 @@
       "Recording stops when network drops; should continue local capture and sync later as deltas",
       "Chat runtime facts inconsistent; model shows immediately on open, context-percent arrives 30 seconds later",
       "Native component does not support desired visual form (rounded buttons, partial sheet height); tempted to rebuild",
-      "Keyboard appears and chat history scrolls up unexpectedly; user loses reading position in message thread"
+      "Keyboard appears and chat history scrolls up unexpectedly; user loses reading position in message thread",
+      "Custom page transition stutters because a live list or declarative tree is mounted while the finger drags",
+      "Skeleton placeholder makes navigation smooth but hides cached content that should be visible immediately",
+      "Vertical scroll resets or jumps when a horizontal container transition rebuilds the moving page"
     ],
     "related_components": [
       "knowledge/fact-voice-record.md",
@@ -66,7 +64,7 @@
       "knowledge/fact-remote-tab.md",
       "methodology/сценарии-использования.md"
     ],
-    "hash": "a7d6e4bf4d314f9fbc09f3c9b1c6d464df38f43186b828bbfa5eea5e042d6a4a"
+    "hash": "cd5cdaa60364a7e226cf42d6cba3856a3be3a8ca7fa04103a51e3e468c30e46f"
   },
   {
     "path": "docs/methodology/сценарии-использования.md",
@@ -523,7 +521,9 @@
       "iOS Keyboard Handling",
       "Voice Recording & Haptics",
       "Xcode Build Database",
-      "Terminal Navigation Performance"
+      "Terminal Navigation Performance",
+      "Terminal UIKit Navigation Container",
+      "Terminal Scroll Ownership"
     ],
     "implicit": [
       "widget_deployment_target_mismatch",
@@ -537,14 +537,22 @@
       "ondisappear_conditional_view_teardown",
       "draggesture_scroll_arbitration_ios18_bug",
       "keyboard_private_curve_timing_notification",
-      "xcbuilddata_sqlite_corruption_recovery"
+      "xcbuilddata_sqlite_corruption_recovery",
+      "terminal_uikit_navigation_shells",
+      "terminal_swiftui_snapshot_bitmap_graveyard",
+      "terminal_tableview_scroll_offset_ownership",
+      "terminal_cold_load_skeleton_not_transition_mask"
     ],
     "symptoms": [
       "Widget shows stale data after app updates it; doesn't refresh even after long delay",
       "List rows disappear instantly with empty space remaining when deleted; neighbors don't slide up",
       "App freezes 0.5-1 second before animation starts when deleting or merging rows",
       "Haptic feedback is completely silent during voice recording sessions",
-      "Terminal navigation stutters and freezes for 100-500ms when switching tabs or returning from chat"
+      "Terminal navigation stutters and freezes for 100-500ms when switching tabs or returning from chat",
+      "Terminal project or tab page stutters even when tabs are cached and network reload is skipped",
+      "Back swipe preview does not move under the finger or jumps to the wrong page after release",
+      "Project list scroll resets on click or shortly after returning from a project page",
+      "Bitmap or SwiftUI snapshot transition shows the same page sliding over itself or teleports without a proper slide"
     ],
     "related_components": [
       "src/iOS/Widgets/HabitWidget_.swift",
@@ -554,9 +562,12 @@
       "src/iOS/UI/Terminal/TerminalView.swift",
       "src/iOS/History/HistoryManager.swift",
       "src/iOS/UI/Components/TerminalHeaderBar.swift",
-      "src/iOS/UI/Components/TerminalTabRow.swift"
+      "src/iOS/UI/Components/TerminalTabRow.swift",
+      "HabitTrackerSwift/HabitTracker/VoiceRecord/TerminalControlUI.swift",
+      "HabitTrackerSwift/HabitTracker/VoiceRecord/TerminalControlStore.swift",
+      "HabitTrackerSwift/HabitTracker/VoiceRecord/VoiceChatUI.swift"
     ],
-    "hash": "4547a51b789d2d66f9c54b9212426ca8f8890c55ed3fd89a8140a0373bdc86a4"
+    "hash": "18388fd24db3ef0edf14b4a591ac6c725941c27b022458f3f6e68614751fc055"
   },
   {
     "path": "docs/knowledge/fact-wireless-deploy.md",
@@ -760,7 +771,10 @@
       "drawer-pan-gesture",
       "prompt-picker-sheet",
       "gtfile-attachments",
-      "composer-send-button"
+      "composer-send-button",
+      "terminal-uikit-navigation-container",
+      "terminal-cold-load-skeletons",
+      "terminal-root-pager-lock"
     ],
     "implicit": [
       "vcchatstore_sse_reconnect_idempotent",
@@ -777,7 +791,11 @@
       "contextpct_params_pull_on_open",
       "markdown_color_literal_token",
       "chatbusy_router_root_presenter",
-      "settingssection_per_tab_memory"
+      "settingssection_per_tab_memory",
+      "terminal_projects_tabs_tableview_container",
+      "terminal_activity_ring_project_badge",
+      "terminal_selectedtab_root_pager_lock",
+      "terminal_uikit_skeleton_cells_cold_load"
     ],
     "symptoms": [
       "Отправленное сообщение скрывается за клавиатурой, история прыгает вверх на целый экран вверх при нажатии Send",
@@ -786,7 +804,11 @@
       "История не обновляется после получения сообщения от ассистента, требует выхода и повторного входа в чат",
       "Drawer с историей открывается случайно при вводе текста или неправильно реагирует на свайпы по экрану",
       "Composer находится за клавиатурой, input не получает focus или недоступен для ввода",
-      "Длинное сообщение или tool output зависает, приложение не отвечает на несколько секунд"
+      "Длинное сообщение или tool output зависает, приложение не отвечает на несколько секунд",
+      "Terminal project list or tabs list should preserve scroll while navigating between projects and tabs",
+      "Terminal shows empty first-load state and needs skeleton rows only until projects or tabs arrive",
+      "Project row shows active count but loader ring does not match running terminal activity",
+      "Swipe from Terminal tabs should go to Voice, but swipe from Terminal chat should stay owned by Terminal or timeline"
     ],
     "related_components": [
       "HabitTracker/VoiceRecord/VoiceChat.swift",
@@ -800,9 +822,11 @@
       "HabitTracker/VoiceChat/VoiceChatGTFilePicker.swift",
       "HabitTracker/Terminal/TerminalControlStore.swift",
       "voice-record/docs/knowledge/fact-mobile-bridge.md",
-      "custom-terminal/docs/knowledge/fact-mobile-web.md"
+      "custom-terminal/docs/knowledge/fact-mobile-web.md",
+      "HabitTrackerSwift/HabitTracker/VoiceRecord/TerminalControlUI.swift",
+      "HabitTrackerSwift/HabitTracker/VoiceRecord/TerminalControlStore.swift"
     ],
-    "hash": "63569c6635099d3d44e5f3515950e2cf207da6e3a08848cd100c6bf20bb992af"
+    "hash": "a429bcc75e43c351cba9a27f980984f556ff96af9ae440882d6db2af47031d2a"
   },
   {
     "path": "docs/knowledge/fix-coredevice-no-provider.md",
@@ -836,5 +860,29 @@
     ],
     "related_components": [],
     "hash": "417c379b4d419018c20fba7d9b2e6d71f307fad6ce8b129b7a0369730325a2f2"
+  },
+  {
+    "path": "docs/промпт-новой-сессии.md",
+    "type": "fact",
+    "explicit": [
+      "Terminal iOS handoff prompt",
+      "Terminal navigation debug checklist"
+    ],
+    "implicit": [
+      "terminal_uikit_container_handoff",
+      "avoid_swiftui_snapshot_regression",
+      "terminal_logs_frame_monitor_nav"
+    ],
+    "symptoms": [
+      "Need to start a new AI session for Terminal iOS navigation work without losing the UIKit container constraints",
+      "New session proposes returning to SwiftUI snapshot or bitmap overlay for Terminal navigation",
+      "Need a compact prompt that tells the next agent which Terminal approaches already failed"
+    ],
+    "related_components": [
+      "docs/knowledge/fact-voice-chat-tab.md",
+      "docs/knowledge/fix-ios-stability.md",
+      "docs/methodology/переносимый-дизайн.md"
+    ],
+    "hash": "ef89dae539fdb6f38feb8ac78cc2e96a4d9be94c86e8b535d5d9f206924fe597"
   }
 ]

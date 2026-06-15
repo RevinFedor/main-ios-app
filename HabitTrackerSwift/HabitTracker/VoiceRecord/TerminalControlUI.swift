@@ -4605,6 +4605,7 @@ private struct TerminalChatDetailView: View {
     @ObservedObject private var voiceStore = VoiceChatStore.shared
     @EnvironmentObject private var router: TabRouter
     @Environment(\.bottomBarInset) private var bottomBarInset
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var input = ""
     @State private var showTerminalPrompts = false
     @State private var showVoicePrompts = false
@@ -4613,7 +4614,7 @@ private struct TerminalChatDetailView: View {
     @State private var gtPreviewTarget: GTFilePreviewTarget? = nil
     @State private var draftNotice: String?
     @State private var showQueue = false
-    @State private var showTimeline = false
+    @State private var timelineDrawerCommand: SideDrawerCommand? = nil
     @State private var showRename = false
     @State private var localSending = false
     @State private var followBottom = true
@@ -4707,6 +4708,22 @@ private struct TerminalChatDetailView: View {
                     .buttonStyle(.plain)
                 }
             }
+        GeometryReader { geo in
+            let timelineWidth = preferredTimelineDrawerWidth(in: geo.size)
+            SideDrawerUIKitHost(
+                edge: .trailing,
+                drawerWidth: timelineWidth,
+                command: timelineDrawerCommand,
+                reduceMotion: reduceMotion,
+                movesMain: false,
+                isGestureEnabled: !composerFocused,
+                fullScreenOpenEnabled: true,
+                navigationCanGoBack: false,
+                edgeActivationWidth: 28,
+                onBegan: { startOffset in beginTimelineDrawer(startOffset: startOffset, width: timelineWidth) },
+                onSettleStarted: { target, velocity in timelineSettleStarted(target: target, velocity: velocity, width: timelineWidth) },
+                onSettled: { target in timelineSettled(target: target, width: timelineWidth) }
+            ) {
         ZStack {
             CTPageBackground.ignoresSafeArea()
             ScrollViewReader { proxy in
@@ -4761,7 +4778,7 @@ private struct TerminalChatDetailView: View {
                         canQueue: tab.isClaudePTY || tab.isCodexPTY,
                         timelineCount: tab.timelineCount,
                         onQueue: { showQueue = true },
-                        onTimeline: { showTimeline = true },
+                        onTimeline: { openTimeline(width: timelineWidth) },
                         onStopProcess: { store.stopProcess(tabId: tabId) }
                     )
                     .padding(.top, 8)
@@ -4787,6 +4804,14 @@ private struct TerminalChatDetailView: View {
                 .onChange(of: keyboardOverlap) { oldValue, newValue in
                     logScroll("keyboard old=\(Int(oldValue)) new=\(Int(newValue))", force: true)
                 }
+            }
+        }
+            } drawer: {
+                TerminalTimelineSheet(
+                    tabId: tabId,
+                    showsGrabber: false,
+                    onClose: { closeTimeline(width: timelineWidth) }
+                )
             }
         }
         }
@@ -4831,6 +4856,7 @@ private struct TerminalChatDetailView: View {
             VCLog.log("TerminalSSE", "task(id:) activate done tab=\(tabId.suffix(6))")
         }
         .onDisappear {
+            store.setInteractionActive(false, source: "terminal-timeline")
             // Only release dictation ownership when we are TRULY leaving this tab.
             // During the animated drill-in, TerminalControlRootView mounts this
             // view twice (transient forward-push copy + committed content copy)
@@ -4883,10 +4909,6 @@ private struct TerminalChatDetailView: View {
             TerminalQueueSheet(tabId: tabId)
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showTimeline) {
-            TerminalTimelineSheet(tabId: tabId)
-                .presentationDetents([.large])
-        }
         .sheet(isPresented: $showRename) {
             CTRenameSheet(title: "Rename tab", label: "Tab name", initialName: tab.name) { newName in
                 store.renameTab(tab, to: newName)
@@ -4918,6 +4940,48 @@ private struct TerminalChatDetailView: View {
         .onChange(of: voiceStore.pendingComposerInsert) { _, _ in
             consumePendingDictationInsert()
         }
+    }
+
+    private func preferredTimelineDrawerWidth(in size: CGSize) -> CGFloat {
+        let desired = size.width * 0.88
+        let maxAllowed = max(0, size.width - 44)
+        return min(max(300, desired), maxAllowed)
+    }
+
+    private func openTimeline(width: CGFloat) {
+        guard !tabId.isEmpty else { return }
+        composerFocused = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        Task { await store.refreshTimeline(tabId: tabId) }
+        FrameMonitor.shared.arm(reason: "terminal-timeline", label: "open tab=\(tabId.suffix(6))", phase: "animate")
+        store.setInteractionActive(true, source: "terminal-timeline")
+        timelineDrawerCommand = SideDrawerCommand(target: .open)
+    }
+
+    private func closeTimeline(width: CGFloat) {
+        FrameMonitor.shared.arm(reason: "terminal-timeline", label: "close tab=\(tabId.suffix(6))", phase: "animate")
+        store.setInteractionActive(true, source: "terminal-timeline")
+        timelineDrawerCommand = SideDrawerCommand(target: .closed)
+    }
+
+    private func beginTimelineDrawer(startOffset: CGFloat, width: CGFloat) {
+        if startOffset < width * 0.5 {
+            composerFocused = false
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+        FrameMonitor.shared.arm(reason: "terminal-timeline", label: "drag tab=\(tabId.suffix(6))", phase: "gesture")
+        store.setInteractionActive(true, source: "terminal-timeline")
+    }
+
+    private func timelineSettleStarted(target: SideDrawerTarget, velocity: CGFloat, width: CGFloat) {
+        FrameMonitor.shared.setPhase("animate")
+        VCLog.log("timeline", "settle target=\(target == .open ? "open" : "closed") tab=\(tabId.suffix(6)) velocity=\(Int(velocity))")
+        store.setInteractionActive(true, source: "terminal-timeline")
+    }
+
+    private func timelineSettled(target: SideDrawerTarget, width: CGFloat) {
+        FrameMonitor.shared.setPhase("settle")
+        store.setInteractionActive(false, source: "terminal-timeline")
     }
 
     private var statusColor: Color {
@@ -6170,6 +6234,8 @@ private struct TerminalQueueSheet: View {
 
 private struct TerminalTimelineSheet: View {
     let tabId: String
+    var showsGrabber = true
+    var onClose: (() -> Void)? = nil
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
 
     private var entries: [CTTimelineEntry]? { store.timelineByTab[tabId] }
@@ -6178,12 +6244,26 @@ private struct TerminalTimelineSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule().fill(Color(white: 0.28)).frame(width: 36, height: 4).padding(.top, 8).padding(.bottom, 12)
+            if showsGrabber {
+                Capsule().fill(Color(white: 0.28)).frame(width: 36, height: 4).padding(.top, 8).padding(.bottom, 12)
+            } else {
+                Color.clear.frame(height: 8)
+            }
             HStack {
                 Text("Timeline")
                     .font(.headline)
                     .foregroundStyle(.white)
                 Spacer()
+                if let onClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .frame(width: 34, height: 32)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                }
                 Button { Task { await store.refreshTimeline(tabId: tabId) } } label: {
                     Group {
                         if loading {
@@ -6204,23 +6284,31 @@ private struct TerminalTimelineSheet: View {
             .padding(.bottom, 10)
 
             if let entries, !entries.isEmpty {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        if let error {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(Color(hex: "fca5a5"))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: "7f1d1d").opacity(0.22)))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            if let error {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(Color(hex: "fca5a5"))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: "7f1d1d").opacity(0.22)))
+                            }
+                            ForEach(entries) { e in
+                                TerminalTimelineEntryRow(entry: e)
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .id("TIMELINE_BOTTOM")
                         }
-                        ForEach(entries) { e in
-                            TerminalTimelineEntryRow(entry: e)
-                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 18)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 18)
+                    .defaultScrollAnchor(.bottom)
+                    .onAppear { scrollTimelineToBottom(proxy) }
+                    .onChange(of: entries.count) { _, _ in scrollTimelineToBottom(proxy) }
                 }
             } else if loading {
                 VStack(spacing: 10) {
@@ -6268,6 +6356,17 @@ private struct TerminalTimelineSheet: View {
         }
         .background(Color(white: 0.04).ignoresSafeArea())
         .task { await store.refreshTimeline(tabId: tabId) }
+    }
+
+    private func scrollTimelineToBottom(_ proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            await Task.yield()
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo("TIMELINE_BOTTOM", anchor: .bottom)
+            }
+        }
     }
 }
 

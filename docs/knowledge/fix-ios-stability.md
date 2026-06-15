@@ -104,56 +104,56 @@ rm -rf build/DerivedData/Build/Intermediates.noindex/XCBuildData
 ```
 Полную `DerivedData` сносить не нужно — достаточно build-базы. Не путать с нехваткой места (`fact-xcode-disk-usage.md`) — тут база битая, а не диск полный.
 
-### 9. Terminal navigation jank: не main-thread, не строки, а commit/render поверхности
+### 9. Terminal navigation jank: SwiftUI snapshots не спасли, сработал UIKit-owned container
 
-**Симптом**: переходы `projects → project tabs → chat` и back-свайпы в Terminal визуально
-дёргались. Сначала пара переходов могла быть плавной, потом лаг появлялся; если подождать
-5-10 секунд, часть back-переходов становилась нормальной. На больших чатах отдельный симптом
-был жёстче: при открытии или возврате из вкладки приложение могло зависнуть на сотни мс или
-секунды, хотя сеть уже ответила.
+Симптом снаружи выглядел обманчиво простым: всего 16-17 карточек вкладок на iPhone 15 Pro,
+но переходы `projects → project tabs` и back-свайпы давали `worst=70-100ms`, иногда экран
+дёргался, preview назад не двигался под пальцем, scroll проектов то сбрасывался при клике, то
+восстанавливался после back, а первый tap/scroll после перехода мог не сработать. Важное
+наблюдение: это происходило и при `cachedTabs=true fresh=true skip tabs reload`, то есть не
+сеть, не cache miss и не `/tabs` payload были главным корнем.
 
-Диагностика сработала только когда появились три независимых наблюдателя. Main-thread
-watchdog пинговал main с фоновой очереди и ловил реальные блокировки (`[hang]`); он молчал
-на обычных 44-79ms slide-hitch'ах, значит это не полный main hang. CADisplayLink
-`FrameMonitor` видел предъявленные кадры и фазировал окно на `mount/animate/swap/settle` —
-это отделило render-server/commit hitch от движения offset'а. `TerminalRenderProbe` считал
-body eval строк (`row bodies/distinct`); когда bodies совпадали с числом строк без повторов,
-гипотеза "штормит весь список" отпала. `OpsRegistry` и `TerminalPerfContext` добавили
-`inFlight`, `lastOp` и `nav#`, чтобы не путать nearby network log с причиной кадра.
+Диагностика стала полезной только после разделения сигналов. `MainThreadWatchdog` ловит
+реальные hangs, но молчит на обычном frame-budget miss; значит 70-90ms в `[frame]` — не
+обязательно "main завис", а часто commit/render/layout. `FrameMonitor` с фазами
+`mount/animate/swap/settle` показывает, где именно платится кадр. `TerminalPerfContext` с
+`nav#` нужен, чтобы не привязать соседний HTTP-log к неправильному переходу. `TerminalRenderProbe`
+помог снять гипотезу "всё штормит body": когда `row bodies` совпадали с числом строк без
+повторов, проблема была ниже — в moving surface/layout/compositor, а не в бесконечной
+пересборке строк.
 
-Что оказалось не причиной. Prefetch действительно мог попадать в окно анимации, поэтому его
-припарковали, но это не объясняло постоянный `commit≈77-95ms`. `.drawingGroup()` на moving
-layers дал чёрный ScrollView и не уменьшил dropped frames — значит причина не "слишком много
-пикселей каждый кадр". Snapshot-cover поверх живого экрана сделал хуже: коммит всё равно
-платится под обложкой, плюс обложка добавляет ещё один render. Off-main normalize/history
-нужен, но если после него остаётся 12s freeze, это уже не парсинг, а layout гигантского
-`Text` в одном row. `activeOps=0` тоже не доказывает idle — нужен recent/last op контекст.
+Что было проверено и почему это не финальное решение. Deferred prefetch/reload уменьшил
+плохие публикации в хвосте перехода, но не объяснил лаг при fresh cache. Удаление системного
+`NavigationStack` toolbar убрало часть Liquid Glass/nav-bar churn и симптом с двоящимся
+header, но project→tabs всё ещё лагал. SwiftUI value snapshots и lightweight rows доказали,
+что live rows/controls тяжёлые, но сами snapshots оставались SwiftUI-деревом в движущемся
+контейнере. Grey skeletons сделали субъективно плавнее, но это неприемлемый UX как постоянная
+маска перехода: пользователь должен видеть реальные вкладки, если они уже cached. Bitmap
+overlay/`UIImageView` ускорял отдельные кадры, но дал более опасные визуальные гонки: forward
+телепортировал экран, back показывал не тот preview, текущая страница ехала поверх себя, а
+store selection/live layer/cached bitmap жили в разных фазах.
 
-Первый большой корень был системный navigation bar. Все три Terminal-level'а жили внутри
-одного shared `NavigationStack`, но каждый объявлял свой `.toolbar` и
-`.toolbarBackground(.visible)`. При custom `.offset`-slide SwiftUI не делает настоящий
-push/pop, но всё равно пересобирает iOS 26 Liquid Glass nav-bar chrome на swap уровня.
-Фазовые логи показали тяжёлые кадры в `commit/swap`, а не в `animate`; `toolbarBackground`
-DIAG улучшал только случаи с похожими header'ами; визуальный симптом "gear/hamburger
-двоится на кадр" совпадал с двумя nav bar chrome. Фикс: убрать системный toolbar из этих
-трёх уровней, поставить custom `TerminalHeaderBar` и `.navigationBarHidden(true)`.
+Финальное решение — не чинить ещё один restore/snapshot, а перенести ownership границы
+`projects/tabs/chat` в UIKit. `TerminalUIKitNavigationController` держит постоянные shells
+`projectsShell`, `tabsShell`, `chatShell`; projects/tabs — `UITableView` controllers, chat —
+один hosted SwiftUI controller. Push ставит destination shell справа и двигает transform,
+interactive back двигает source shell по raw translation пальца, `viewDidLayoutSubviews` не
+переукладывает shells во время transition. Scroll offsets живут в UIKit table view, store
+anchors остаются backup'ом, а не единственным механизмом удержания позиции. После этого логи
+стали вида `label="uikit pushProject..."`, `dropped=0`, `worst≈17-22ms` на обычном push, а
+пользователь подтвердил быстрый forward/back без skeleton-transition.
 
-Второй оставшийся корень — project→tabs transition surface. Свежие логи после toolbar-fix:
-`pushProject ... cachedTabs=true fresh=true skip tabs reload`, но `worst=44-59ms` в
-`animate/commit`. Это уже не сеть и не `loadTabs`; тяжёлым оказался сам moving tabs-list:
-`ScrollView + TerminalTabRow + AgentIconView + glass refresh + contextMenu/FAB` даже на
-3-10 строках. Текущий mitigation: forward project snapshot рендерит lightweight rows без
-ScrollView, asset lookup, spinner, glass-refresh и floating controls; live tabs view во
-время `interactionsSuspended` тоже сначала показывает дешёвый список, а полные controls
-появляются в `settle`. Следующий лог должен проверять именно фазы: если дорогой кадр остался
-в `animate` — moving surface всё ещё тяжёлая; если ушёл в `settle` — навигация чистая, а
-интерактивные controls дорисовываются после неё.
+Loader/preloader после этого разделены по смыслу. Skeleton cells в UIKit projects/tabs lists
+показываются только при первой холодной загрузке, когда данных вообще нет. Cached rows
+показываются сразу; stale reload и prefetch ждут quiet-window и не сбрасывают scroll. Activity
+на project row рисуется ring-loader + count из агрегированного project activity; если project
+count показывает `1`, но ring не крутится, смотреть надо не навигацию, а источник
+`CTActivitySummary.streaming`.
 
-Отдельный фикс для history: публикация загруженной истории не имеет права попадать в back
-transition. Старый guard содержал `|| historyLoading.contains(tabId)` и поэтому никогда не
-дропал publish для вкладки, с которой пользователь уже ушёл; 250 entries могли переписать
-`entriesByTab` во время следующего экрана. Сейчас история нормализуется в `Task.detached`,
-публикуется только если tab всё ещё selected, а при активной навигации пишет
-`history publish WAIT interaction` и после ожидания либо публикует, либо `DROP after wait`.
-Именно это объясняет свежий пользовательский результат: "во время подгрузки чата лагов нет,
-перехожу в чат, возвращаюсь обратно — лага нет".
+Правило на будущее: не возвращать Terminal boundary на SwiftUI `.offset`/snapshot/bitmap
+overlay, пока требование — интерактивный "как книжка" back gesture + стабильный vertical
+scroll. Для таких экранов root gesture и vertical scroll должны принадлежать одному
+platform-owned container. SwiftUI внутри ячейки/детали допустим, но не как moving root tree.
+Если снова появятся `worst=70-90ms` при `uikit ...` labels, сначала смотреть
+`[term-swipe-geo]` и layout-reset/gesture ownership; если labels снова `bitmap` или
+`term-nav pushProject` без `uikit`, значит тестируется старый путь.

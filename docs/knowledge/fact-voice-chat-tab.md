@@ -34,22 +34,32 @@ Voice Record chat (`VoiceChatStore`) и custom-terminal control (`TerminalContro
 четвёртая root-вкладка.
 
 Terminal root имеет три уровня: список проектов custom-terminal → список вкладок проекта →
-нативный чат выбранной Claude/Codex/SDK вкладки. Project list берёт `/api/projects` и
-показывает project icon из custom-terminal, а не folder-only fallback; это важно для parity
-с desktop проектами. Порядок этого списка тоже приходит с сервера: открытые проекты идут
-как project tabs на desktop слева направо, только на телефоне сверху вниз; закрытые проекты
-идут ниже. iOS не пересортировывает ответ по `updatedAt`, иначе мобильная навигация начинает
-жить своей логикой и расходится с тем, как пользователь уже разложил рабочие проекты на Mac.
-Если у проекта нет icon, fallback folder остаётся чёрно-белым; прозрачный PNG icon сидит на
-нейтральном сером фоне, не на Codex-green — зелёный зарезервирован для runtime/agent
-semantics. Active-count badge (`N`) и ring-loader рисуются напротив названия каждой
-директории/проекта, а не рядом с кнопкой Terminal в header: пользователь смотрит на строку
-директории и должен сразу видеть, где сейчас идёт работа. Список вкладок берёт
-`/api/projects/:id/tabs` и разделяет две оси: agent icon слева (Claude/Codex SVG asset)
-показывает тип движка, assigned status marker рядом с первой строкой показывает
-пользовательскую категорию вкладки, runtime status (`starting/active/busy/inactive`)
-рисуется точкой/loader'ом и фоном строки. Session id в строке не показывается: это
-debug-поле, которое пользователь не выбирает глазами.
+нативный чат выбранной Claude/Codex/SDK вкладки. На compact iPhone граница этих уровней
+принадлежит `TerminalUIKitNavigationController`: `projectsShell`, `tabsShell` и `chatShell`
+остаются смонтированными, horizontal push/back двигает их UIKit-transform'ами, а списки
+проектов и вкладок — это `UITableView`, не SwiftUI `ScrollView` в движущемся дереве. Chat
+остаётся SwiftUI через `UIHostingController`, потому что тяжёлый transcript и composer
+активируются только на уровне выбранной вкладки.
+
+Project list берёт `/api/projects` и показывает project icon из custom-terminal, а не
+folder-only fallback; это важно для parity с desktop проектами. Порядок этого списка тоже
+приходит с сервера: открытые проекты идут как project tabs на desktop слева направо, только
+на телефоне сверху вниз; закрытые проекты идут ниже. iOS не пересортировывает ответ по
+`updatedAt`, иначе мобильная навигация начинает жить своей логикой и расходится с тем, как
+пользователь уже разложил рабочие проекты на Mac. Если у проекта нет icon, fallback folder
+остаётся чёрно-белым; прозрачный PNG icon сидит на нейтральном сером фоне, не на Codex-green
+— зелёный зарезервирован для runtime/agent semantics. Active-count badge (`N`) и ring-loader
+рисуются напротив названия каждой директории/проекта, а не рядом с кнопкой Terminal в header:
+пользователь смотрит на строку директории и должен сразу видеть, где сейчас идёт работа.
+
+Список вкладок берёт `/api/projects/:id/tabs` и разделяет две оси: agent icon слева
+(Claude/Codex SVG asset) показывает тип движка, assigned status marker рядом с первой
+строкой показывает пользовательскую категорию вкладки, runtime status
+(`starting/active/busy/inactive`) рисуется точкой/loader'ом и фоном строки. Session id в
+строке не показывается: это debug-поле, которое пользователь не выбирает глазами. Skeleton
+cells есть только для холодной загрузки, когда `loadingProjects && projects.isEmpty` или
+`loadingTabs && tabs.isEmpty`; если cache уже есть, показываются реальные строки, а stale
+reload ждёт quiet-window и не превращает переход в серую маску.
 
 Кнопка **New Terminal** — floating action справа снизу, как **New Chat** в истории. Она
 открывает sheet с первичными действиями Codex и Claude; Claude SDK спрятан в ellipsis menu,
@@ -70,12 +80,15 @@ PTY-tab с `pendingAction` тем же путём, что desktop. iOS не пи
 возврате в foreground: `/api/projects`, затем тихий prefetch `/api/projects/:id/tabs` для
 проектов с вкладками/open-state. Это навигационный cache, не preload transcript'ов: истории
 Claude/Codex читаются только при входе в конкретный tab, потому что history имеет отдельные
-детерминированные JSONL/rollout правила и намного тяжелее проекта/списка вкладок.
-Позиция списков тоже store-owned: root project list хранит последний видимый project id, а
-каждый project tabs list — последний видимый tab id. При переходе `проекты → директория →
-чат → назад` SwiftUI view может пересоздаться, но `scrollPosition(id:)` восстанавливает
-ближайший row вместо сброса списка наверх. Это только навигационная память списков, не
-preload/scroll-memory transcript'ов.
+детерминированные JSONL/rollout правила и намного тяжелее проекта/списка вкладок. Fresh tabs
+cache пропускает reload полностью; stale reload планируется после навигационного quiet-window,
+а prefetch паркуется, если `interactionActive=true`.
+
+Позиция списков хранится на двух уровнях: UIKit table view держит реальный `contentOffset`
+между переходами, store сохраняет последний видимый project/tab id как backup anchor для
+пересоздания контроллера. Нельзя делать fallback restore к первой строке, если сохранённого
+anchor ещё нет: это выглядит как "восстановление", но фактически программно поднимает список
+наверх после первого mount/update.
 
 В chat detail лента рендерится нативно: user/assistant/thinking/tool/slash/compact-summary
 нормализуются из custom-terminal history endpoint. Composer похож на Voice Chat composer по
@@ -110,44 +123,41 @@ desktop `Cmd+\` History и предотвращает регрессию «promp
 а не по JSONL/rollout событию».
 
 Back-swipe внутри Terminal потребляется локальной иерархией: chat detail → список вкладок
-проекта → список проектов. Только когда Terminal уже на root, тот же left-edge gesture
-передаётся AI Chat drawer/history. Иначе жест с экрана чата неожиданно открывал бы общий
-список AI-чатов вместо ближайшего родительского уровня Terminal. Внутренний переход назад
-коммитит `store.stepBackOneLevel()` только в completion самой slide-анимации; `Task.sleep`
-или фиксированный delay даёт видимый double-jump: старая поверхность уже доехала, затем
-предыдущий список появляется второй раз как новый layout. Тот же horizontal drag обязан
-временно гасить row taps: SwiftUI `simultaneousGesture` сам не отменяет `Button` release под
-пальцем, поэтому без `terminalSelectionSuppressed` свайп вправо по списку проектов/вкладок
-мог после отпускания открыть директорию или чат, хотя пользователь делал навигационный жест.
+проекта → список проектов. Внутренний переход назад коммитит `store.stepBackOneLevel()` только
+после завершения UIKit-анимации; `Task.sleep` или фиксированный delay даёт видимый
+double-jump: старая поверхность уже доехала, затем предыдущий список появляется второй раз как
+новый layout. Root pager при этом лочится только на chat level (`terminal.selectedTab != nil`):
+на project-tabs level пользователь может свайпом уйти к Voice, а на chat level
+right-to-left/left-to-right жесты зарезервированы под Terminal/timeline. Горизонтальный drag
+обязан временно гасить row taps: без container-owned pan release по строке мог открыть проект
+или вкладку, хотя пользователь делал навигационный жест.
 
-## Terminal navigation: custom slide, snapshots, logs
+## Terminal navigation: UIKit container, стабильные shells, logs
 
-Три уровня Terminal (`projects → project tabs → chat`) не являются `NavigationStack` push'ами.
-Это один custom horizontal container: текущая поверхность и destination/preview слои двигаются
-через `.offset(x:)`, а commit выбранного проекта/таба делается только в completion анимации.
-Из-за этого любые живые `@Observable` reads внутри moving layer считаются частью анимации:
-статус-poll, SSE snapshot или tabs-prefetch могут пересобрать subtree ровно в кадр slide'а.
-Инвариант: слой, который едет, рендерится из value snapshot и не читает store. Back-preview
-снимает `projects`/`tabs` в value-модели на `begin drag`; forward project→tabs использует
-static tabs snapshot; forward tab→chat показывает placeholder header, а live transcript
-монтируется только после commit.
+Три уровня Terminal (`projects → project tabs → chat`) не являются `NavigationStack` push'ами
+и больше не являются SwiftUI `.offset`-slide поверх live lists. Это один UIKit-owned
+container: `projectsShell`, `tabsShell`, `chatShell` лежат рядом, push ставит destination за
+правый край и двигает shell transform, back-pan двигает source shell по raw translation
+пальца. `viewDidLayoutSubviews` не переукладывает shells во время transition, иначе медленный
+drag получает "дёрганье" от layout reset. Геометрический лог `[term-swipe-geo]` должен
+показывать, что во время drag двигается source shell, а destination остаётся стабильной
+страницей слева.
 
-Проект→tabs отдельно держит лёгкую transition-поверхность. Даже 3-10 строк могут давать
-`worst=44-59ms`, если во время slide тащить `ScrollView + TerminalTabRow + AgentIconView +
-glass refresh + contextMenu/FAB`. Поэтому forward snapshot использует simplified row:
-статичный SF Symbol вместо asset lookup, точка runtime вместо spinner, без `ScrollView`,
-refreshable, context menu и floating action. Live `TerminalProjectTabsView` пока
-`interactionsSuspended` тоже сначала показывает тот же дешёвый список; полные controls
-появляются уже в `settle`, после навигационного кадра.
+Критичный инвариант: навигационный жест не должен двигать freshly mounted SwiftUI subtree.
+`projects/tabs` — UIKit tables с reuse cells и собственным scroll offset; `chat` — hosted
+SwiftUI, но входит в shell как один контроллер. Skeleton cells используются только когда
+данных вообще нет при первой загрузке. Если данные cached, transition показывает реальные
+строки сразу, а loader/status updates приходят как updates table cells, а не как пересборка
+moving SwiftUI layer.
 
 Логи этой навигации должны читаться по `nav#`, а не по соседним строкам. `FrameMonitor` пишет
-окно `reason=term-nav label="pushProject ..."` / `back from=chat` и фазы
-`mount / animate / swap / settle`; `MainThreadWatchdog` пишет `[hang]` только если main
-реально не отвечает; `TerminalRenderProbe` пишет `row bodies/distinct/burstMs` с тем же
-`nav=`. Диагноз по ним: если `cachedTabs=true fresh=true skip tabs reload`, а frame-window
-всё равно дорогой — это render/commit поверхности, не сеть; если `history publish WAIT` и
-`DROP after wait` срабатывают при back-swipe — history не публикуется в анимацию; если
-`row bodies==distinct` без повторов — это не body-churn storm.
+окно `reason=term-nav label="uikit pushProject ..."` / `uikit back from=tabs`; хороший профиль
+на iPhone — `dropped=0-3`, `worst≈17-30ms` во время `animate/gesture`. `MainThreadWatchdog`
+пишет `[hang]` только если main реально не отвечает. Диагноз по логам: если
+`cachedTabs=true fresh=true skip tabs reload`, а frame-window всё равно дорогой — это UI
+surface, не сеть; если `uikit shouldBegin=NO enabled=false` на project root — жест правильно
+отдан root pager/drawer; если на tabs/chat level нет `[term-swipe-geo] drag`, значит pan не
+выиграл у дочернего scroll/control.
 
 ## Store singleton — источник правды, не view-state
 

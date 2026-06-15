@@ -13,6 +13,19 @@
   </step>
 </instructions>
 
+## Локальная long-запись: НЕ пушить
+
+В этом клоне есть локальная недоделанная функциональность long-записи / фоновой лог-записи. Она нужна только для локальной full-сборки пользователя и **ни при каких обстоятельствах не должна попадать в git / GitHub**.
+
+Сейчас она удерживается локально через `git update-index --skip-worktree`, а не через runtime-флаг приложения. Это состояние хранится только в локальном git index. Перед любым commit/push по Voice/Live Activity обязательно проверь:
+
+```bash
+git ls-files -v | rg '^S '
+git grep -E 'recordingtape|isLong|longActive|toggleLong|LongAudioFileWriter' HEAD -- HabitTrackerSwift
+```
+
+Ожидание: long-файлы остаются с префиксом `S`, а `git grep -E ... HEAD -- HabitTrackerSwift` ничего не находит. Не снимай `skip-worktree` с этих файлов и не добавляй long-запись, long-плашки, long-историю, long Live Activity поля или связанную локальную лог-запись в коммиты без прямого приказа пользователя.
+
 ## Обзор проекта
 
 Нативное iOS-приложение для трекинга привычек на SwiftUI с интегрированной голосовой диктовкой через Soniox + Live Activity. Фокус на жестах, минимализме, iOS 26 Liquid Glass виджетах.
@@ -37,6 +50,7 @@
 - **`NSSupportsLiveActivities` обязателен в ОБОИХ Info.plist** (main app + widget extension). Иначе `Activity.request()` возвращает валидный ID, но не рендерит. См. `knowledge/fact-live-activity.md`.
 - **Не делать on-device Wake-on-LAN для пробуждения Mac — пробовали, отклонили.** Unicast-magic-packet будит только ~5 мин после засыпания (потом ARP-запись истекает, кадр дропается), broadcast закрыт `multicast`-entitlement'ом (недоступен free Apple ID), sleep-proxy нет. Фичу удалили, юзер выбрал «не усыплять Mac». Надёжный wake потребовал бы always-on relay в LAN. Не переизобретать. См. `knowledge/fix-пробуждение-mac.md`.
 - **Не строить AI Chat history drawer на SwiftUI `DragGesture` / hidden `UIViewRepresentable` superview bridge.** Это root-level custom container transition, конкурирующий с `UIScrollView`, search/text input, iOS 26 back-swipe и tab bar. Compact iPhone drawer делается через `UIGestureRecognizerRepresentable` + кастомный `UIPanGestureRecognizer` с intent-lock и scroll arbitration; regular width — `NavigationSplitView`. См. `knowledge/fact-voice-chat-tab.md::History drawer gesture`.
+- **Не возвращать Terminal `projects/tabs/chat` навигацию на SwiftUI `.offset` / snapshot / bitmap overlay.** Для интерактивного back-swipe и стабильного scroll ownership граница уровней живёт в UIKit-owned container (`TerminalUIKitNavigationController` + `UITableView` для projects/tabs). См. `knowledge/fix-ios-stability.md::Terminal navigation jank`.
 
 ## Стандарт long-press (единый по проекту)
 
