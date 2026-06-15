@@ -7,16 +7,14 @@ import UIKit
 // taps via URL scheme) and by intents that set the wantsVoiceTab flag in
 // the App-Group container.
 //
-// Default tab is .voice: this app's most-used entry point is voice
-// dictation; the habits tracker is a secondary view that the user explicitly
-// navigates to (either via the habit Home Screen widget, which deep-links
-// straight there, or by tapping the Habits tab).
+// Default tab is .chat: current primary workflow is the native Terminal surface
+// inside AI Chat. Voice intents/deep links still switch to Voice explicitly.
 
 @MainActor
 final class TabRouter: ObservableObject {
     enum Tab: String, CaseIterable { case chat, voice, habits }
 
-    @Published var selected: Tab = .voice {
+    @Published var selected: Tab = .chat {
         didSet {
             guard selected != oldValue else { return }
             // Settings section follows the tab you're ON: switching root tabs
@@ -35,7 +33,7 @@ final class TabRouter: ObservableObject {
     // segment — re-seeded from the current tab on every tab change (see `selected`
     // didSet), then freely changed by the in-settings segmented control / swipe.
     @Published var showSettings: Bool = false
-    @Published var settingsSection: Tab = .voice
+    @Published var settingsSection: Tab = .chat
 
     func openSettings() {
         showSettings = true

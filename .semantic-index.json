@@ -1,5 +1,14 @@
 [
   {
+    "path": "docs/terminal-navigation-jank-investigation-2026-06-15.md",
+    "hash": "981e4ca704cdff86d2f16085d3a06dc7a7555e4737d9df354c6f5a12652dce85",
+    "type": "unknown",
+    "explicit": [],
+    "implicit": [],
+    "related_components": [],
+    "raw_response": "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
+  },
+  {
     "path": "docs/methodology/переносимый-дизайн.md",
     "type": "fact",
     "explicit": [

@@ -82,9 +82,9 @@ struct HabitTrackerApp: App {
 //
 // `router.selected` is the single source of truth. The pager binds an Int index
 // (`scrollPosition(id:)` — the iOS-17 binding, NOT the iOS-26 `ScrollPosition`
-// object, which silently no-ops on scrollTo). Start at index 0, then animate to
-// the real default (.voice) onAppear — dodges the iOS-26 bug where a non-zero
-// start page renders offset under a bottom bar.
+// object, which silently no-ops on scrollTo). Start at index 0; the real default
+// is also index 0 (.chat), dodging the iOS-26 bug where a non-zero start page
+// renders offset under a bottom bar.
 struct RootTabView: View {
     @EnvironmentObject var recorder: RecordingCoordinator
     @EnvironmentObject var router: TabRouter

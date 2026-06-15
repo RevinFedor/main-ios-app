@@ -183,6 +183,24 @@ private enum HistoryDrawerPhase: Equatable {
     case settling(to: HistoryDrawerTarget)
 }
 
+private enum DrawerCloseAction: Equatable {
+    case startNewChat
+    case selectChat(String)
+    case showAllChats
+    case showTerminal
+    case showChat
+
+    var label: String {
+        switch self {
+        case .startNewChat: return "new-chat"
+        case .selectChat: return "select-chat"
+        case .showAllChats: return "all-chats"
+        case .showTerminal: return "terminal"
+        case .showChat: return "chat"
+        }
+    }
+}
+
 private struct HistoryDrawerPanEnd {
     let startOffset: CGFloat
     let currentOffset: CGFloat
@@ -402,10 +420,11 @@ struct VoiceChatTabView: View {
     @State private var drawerOffset: CGFloat = 0
     @State private var scrollLockedByDrawer = false
     @State private var drawerAnimationToken = UUID()
+    @State private var pendingDrawerCloseAction: DrawerCloseAction? = nil
     @State private var showingAllChats = false
     @State private var renameTarget: VCChatMeta? = nil
     @State private var chatComposerFocused = false
-    @State private var terminalMode = false
+    @State private var terminalMode = true
     @State private var terminalComposerFocused = false
     @State private var allChatsSearchActive = false
 
@@ -417,19 +436,16 @@ struct VoiceChatTabView: View {
         chatComposerFocused || terminalComposerFocused || allChatsSearchActive
     }
 
-    // Coarse lock for the root pager: only while the user types or the history
-    // drawer is open/dragging. NOT for the Terminal back-swipe.
-    //
-    // Terminal back-swipe is handled by a UIKit recognizer (TerminalBackPanGesture)
-    // that arbitrates directionally with the root pager via canPrevent: rightward
-    // → it claims the gesture and prevents the pager's scroll pan (back a level);
-    // leftward → it declines so the pager pages to Voice. Locking the pager on
-    // `canStepBack` (an earlier attempt) was wrong twice over: it killed
-    // leftward→Voice on the tabs/chat level, and toggling .scrollDisabled as
-    // canStepBack flipped at the projects boundary re-laid-out the ScrollView
-    // mid-animation — the jerk the user saw "именно на проектах".
+    // Coarse lock for the root pager: while the user types, the history drawer is
+    // active, or Terminal is inside its own nested stack. The Terminal recognizer
+    // still owns the rightward back-swipe, but device logs showed occasional
+    // `[pager-leak]` with no adjacent `term-swipe-miss`, meaning the root pager
+    // could still rubber-band into the black leading area. On nested Terminal
+    // levels, root paging is therefore disabled; return to Terminal root first,
+    // then page to Voice. The bitmap transition below removed the old relayout
+    // penalty from toggling this at the projects boundary.
     private var pagingShouldLock: Bool {
-        textInputActive || drawerPhase != .closed
+        textInputActive || drawerPhase != .closed || (terminalMode && terminal.canStepBack)
     }
 
     var body: some View {
@@ -452,7 +468,7 @@ struct VoiceChatTabView: View {
         // this surface, so the page-swipe must yield while any is active.
         .onChange(of: pagingShouldLock) { _, lock in
             router.pagingLocked = lock
-            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed)]")
+            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed) terminalBack=\(terminalMode && terminal.canStepBack)]")
         }
         // Focus-driven bar hide: the moment the composer/search is focused, tell
         // the root shell to slide its glass bar away (and back on blur). Synchronous
@@ -611,6 +627,17 @@ struct VoiceChatTabView: View {
         "detail-" + draftToken.uuidString
     }
 
+    private var drawerSurfaceLabel: String {
+        terminalMode ? "terminal" : "chat"
+    }
+
+    private func drawerTargetLabel(_ target: HistoryDrawerTarget) -> String {
+        switch target {
+        case .closed: return "closed"
+        case .open: return "open"
+        }
+    }
+
     private func preferredDrawerWidth(in size: CGSize) -> CGFloat {
         let desired = size.width * 0.90
         let maxAllowed = max(0, size.width - 44)
@@ -621,6 +648,9 @@ struct VoiceChatTabView: View {
         if startOffset < width * 0.5 {
             dismissChatKeyboard()
         }
+        pendingDrawerCloseAction = nil
+        FrameMonitor.shared.arm(reason: "chat-drawer", label: "drag surface=\(drawerSurfaceLabel)", phase: "gesture")
+        terminal.setInteractionActive(true, source: "chat-drawer")
         drawerAnimationToken = UUID()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -642,26 +672,36 @@ struct VoiceChatTabView: View {
     }
 
     private func endDrawerDrag(_ end: HistoryDrawerPanEnd, width: CGFloat) {
+        FrameMonitor.shared.setPhase("animate")
         settleDrawer(to: drawerTarget(for: end, width: width), velocityX: end.velocityX, width: width)
     }
 
     private func cancelDrawerDrag(width: CGFloat) {
         let target: HistoryDrawerTarget = drawerOffset > width * 0.5 ? .open : .closed
+        FrameMonitor.shared.setPhase("animate")
         settleDrawer(to: target, velocityX: 0, width: width)
     }
 
     private func openHistory(width: CGFloat) {
         dismissChatKeyboard()
         Task { await store.refreshChats() }
+        FrameMonitor.shared.arm(reason: "chat-drawer", label: "open surface=\(drawerSurfaceLabel)", phase: "animate")
+        terminal.setInteractionActive(true, source: "chat-drawer")
         settleDrawer(to: .open, velocityX: 0, width: width)
     }
 
-    private func closeHistory(width: CGFloat) {
+    private func closeHistory(width: CGFloat, after action: DrawerCloseAction? = nil) {
+        pendingDrawerCloseAction = action
+        let suffix = action.map { " next=\($0.label)" } ?? ""
+        FrameMonitor.shared.arm(reason: "chat-drawer", label: "close surface=\(drawerSurfaceLabel)\(suffix)", phase: "animate")
+        terminal.setInteractionActive(true, source: "chat-drawer")
         settleDrawer(to: .closed, velocityX: 0, width: width)
     }
 
     private func resetDrawerClosed() {
         drawerAnimationToken = UUID()
+        pendingDrawerCloseAction = nil
+        terminal.setInteractionActive(false, source: "chat-drawer")
         scrollLockedByDrawer = false
         drawerPhase = .closed
         drawerOffset = 0
@@ -687,6 +727,7 @@ struct VoiceChatTabView: View {
     }
 
     private func settleDrawer(to target: HistoryDrawerTarget, velocityX: CGFloat, width: CGFloat) {
+        VCLog.log("drawer", "settle target=\(drawerTargetLabel(target)) surface=\(drawerSurfaceLabel) velocity=\(Int(velocityX))")
         let token = UUID()
         drawerAnimationToken = token
         let destination = target.offset(width: width)
@@ -706,9 +747,20 @@ struct VoiceChatTabView: View {
             try? await Task.sleep(nanoseconds: duration)
             await MainActor.run {
                 guard drawerAnimationToken == token else { return }
+                FrameMonitor.shared.setPhase("settle")
                 drawerPhase = target == .open ? .open : .closed
                 drawerOffset = destination
                 scrollLockedByDrawer = false
+                terminal.setInteractionActive(false, source: "chat-drawer")
+                let action = target == .closed ? pendingDrawerCloseAction : nil
+                pendingDrawerCloseAction = nil
+                if let action {
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        applyDrawerCloseAction(action)
+                    }
+                }
             }
         }
     }
@@ -737,37 +789,91 @@ struct VoiceChatTabView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
+    private func applyDrawerCloseAction(_ action: DrawerCloseAction) {
+        switch action {
+        case .startNewChat:
+            selectedChatId = nil
+            draftToken = UUID()
+            showingAllChats = false
+            terminalMode = false
+            terminalComposerFocused = false
+        case .selectChat(let id):
+            selectedChatId = id
+            draftToken = UUID()
+            showingAllChats = false
+            terminalMode = false
+            terminalComposerFocused = false
+        case .showAllChats:
+            showingAllChats = true
+            terminalMode = false
+            terminalComposerFocused = false
+        case .showTerminal:
+            showingAllChats = false
+            terminalMode = true
+        case .showChat:
+            terminalComposerFocused = false
+            terminalMode = false
+        }
+    }
+
+    private func waitForDrawerOpenBeforeSurfaceSwap(width: CGFloat) async {
+        guard width > 0 else { return }
+        var waits = 0
+        while waits < 28 {
+            if case .open = drawerPhase { return }
+            if drawerOffset >= width - 2 && !scrollLockedByDrawer { return }
+            try? await Task.sleep(for: .milliseconds(20))
+            waits += 1
+        }
+        VCLog.log("drawer", "surface swap wait timeout phase=\(drawerTargetLabel(drawerOffset > width * 0.5 ? .open : .closed)) off=\(Int(drawerOffset)) width=\(Int(width))")
+    }
+
     private func startNewChat(closeWidth width: CGFloat?) {
-        selectedChatId = nil
-        draftToken = UUID()
-        showingAllChats = false
-        terminalMode = false
-        terminalComposerFocused = false
-        if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+        if let width {
+            closeHistory(width: width, after: .startNewChat)
+        } else {
+            applyDrawerCloseAction(.startNewChat)
+            resetDrawerClosed()
+        }
     }
 
     private func selectChat(_ id: String, closeWidth width: CGFloat?) {
-        selectedChatId = id
-        draftToken = UUID()
-        showingAllChats = false
-        terminalMode = false
-        terminalComposerFocused = false
-        if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+        if let width {
+            closeHistory(width: width, after: .selectChat(id))
+        } else {
+            applyDrawerCloseAction(.selectChat(id))
+            resetDrawerClosed()
+        }
     }
 
     private func showAllChats(closeWidth width: CGFloat?) {
-        showingAllChats = true
-        terminalMode = false
-        terminalComposerFocused = false
-        if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+        if let width {
+            closeHistory(width: width, after: .showAllChats)
+        } else {
+            applyDrawerCloseAction(.showAllChats)
+            resetDrawerClosed()
+        }
     }
 
     private func openTerminal(closeWidth width: CGFloat?) {
         dismissChatKeyboard()
-        showingAllChats = false
-        terminalMode = true
-        terminal.start()
-        if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+        if let width {
+            Task { @MainActor in
+                // If the Terminal row is tapped while the drawer is still settling
+                // open, do NOT mount the Terminal root in that same frame window.
+                // That was the new first-open hitch: `drag surface=chat` absorbed the
+                // terminalMode mount. Wait for the drawer-open monitor to finish,
+                // then pre-mount behind the now-static drawer before closing it.
+                await waitForDrawerOpenBeforeSurfaceSwap(width: width)
+                showingAllChats = false
+                terminalMode = true
+                try? await Task.sleep(for: .milliseconds(120))
+                closeHistory(width: width)
+            }
+        } else {
+            applyDrawerCloseAction(.showTerminal)
+            resetDrawerClosed()
+        }
     }
 
     // Drawer Terminal row tap. Toggle: in Terminal → back to the chat surface
@@ -776,9 +882,18 @@ struct VoiceChatTabView: View {
     private func toggleTerminal(closeWidth width: CGFloat?) {
         if terminalMode {
             dismissChatKeyboard()
-            terminalComposerFocused = false
-            terminalMode = false
-            if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+            if let width {
+                Task { @MainActor in
+                    await waitForDrawerOpenBeforeSurfaceSwap(width: width)
+                    terminalComposerFocused = false
+                    terminalMode = false
+                    try? await Task.sleep(for: .milliseconds(120))
+                    closeHistory(width: width)
+                }
+            } else {
+                applyDrawerCloseAction(.showChat)
+                resetDrawerClosed()
+            }
         } else {
             openTerminal(closeWidth: width)
         }
@@ -4029,6 +4144,9 @@ struct VoiceChatSettingsBody: View {
     @AppStorage(VoiceChatConfig.Keys.chatFont,
                 store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var chatFont: Double = 15
+    @AppStorage(VoiceChatConfig.Keys.developerMode,
+                store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var developerMode: Bool = true
 
     var body: some View {
             Form {
@@ -4086,6 +4204,9 @@ struct VoiceChatSettingsBody: View {
                 }
 
                 Section {
+                    Toggle("Developer mode", isOn: $developerMode)
+                        .tint(.purple)
+
                     HStack(spacing: 12) {
                         Button {
                             showLogs = true

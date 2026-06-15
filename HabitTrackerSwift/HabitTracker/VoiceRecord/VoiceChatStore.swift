@@ -487,6 +487,13 @@ enum VCLog {
         return lines.joined(separator: "\n")
     }
 
+    static func lineCount() -> Int {
+        lock.lock()
+        let count = localBuffer.count
+        lock.unlock()
+        return count
+    }
+
     static func clearLocal() {
         lock.lock()
         localBuffer.removeAll()

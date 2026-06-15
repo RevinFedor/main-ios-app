@@ -107,8 +107,15 @@ private struct TerminalBackPanGesture: UIGestureRecognizerRepresentable {
             let v = pan.velocity(in: view)
             // RIGHTWARD + dominantly horizontal only. Leftward (page→Voice) and
             // vertical (list scroll) are declined so their owners win.
-            let translationRight = t.x >= 8 && t.x >= abs(t.y) * 1.2
-            let velocityRight = v.x >= 220 && v.x >= abs(v.y) * 0.9
+            let translationThreshold: CGFloat = 8
+            let velocityThreshold: CGFloat = 140
+            let translationRight = t.x >= translationThreshold && t.x >= abs(t.y) * 1.2
+            // Slow-start rightward swipes often report almost zero translation on
+            // shouldBegin, but a clear rightward velocity. The old 220pt/s gate let
+            // those fall through to the root pager (black overscroll). Lower the
+            // velocity gate, but require a stronger horizontal dominance so vertical
+            // scrolls with a little rightward drift still lose.
+            let velocityRight = v.x >= velocityThreshold && v.x >= abs(v.y) * 1.4
             let begin = translationRight || velocityRight
             VCLog.log("term-swipe", "uikit shouldBegin=\(begin ? "YES" : "no") t=(\(Int(t.x)),\(Int(t.y))) v=(\(Int(v.x)),\(Int(v.y)))")
             // DIAGNOSTIC (no behavior change): flag the "1-in-10 black overscroll"
@@ -123,9 +130,9 @@ private struct TerminalBackPanGesture: UIGestureRecognizerRepresentable {
                 let mostlyHorizontal = abs(t.x) >= abs(t.y)  // not a vertical scroll
                 if leansRight && mostlyHorizontal {
                     let reason: String
-                    if t.x < 8 && v.x < 220 { reason = "below-both (slow start)" }
-                    else if t.x < 8 { reason = "translation<8" }
-                    else { reason = "velocity<220" }
+                    if t.x < translationThreshold && v.x < velocityThreshold { reason = "below-both (slow start)" }
+                    else if t.x < translationThreshold { reason = "translation<8" }
+                    else { reason = "velocity<140/horizontal" }
                     VCLog.log("term-swipe-miss", "BACK MISS \(reason) → falls through to pager (black overscroll) t=(\(Int(t.x)),\(Int(t.y))) v=(\(Int(v.x)),\(Int(v.y)))")
                 }
             }
@@ -134,10 +141,12 @@ private struct TerminalBackPanGesture: UIGestureRecognizerRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            // Don't start a back-swipe from inside a text field / control.
+            // Don't start a back-swipe from inside editable text. Do allow it from
+            // row Buttons: Terminal back is a container gesture, and cancelsTouches
+            // must beat the row tap when the user swipes right over a project/tab.
             var current = touch.view
             while let view = current {
-                if view is UITextField || view is UITextView || view is UIControl { return false }
+                if view is UITextField || view is UITextView { return false }
                 current = view.superview
             }
             return true
@@ -225,6 +234,50 @@ private struct TerminalHeaderBar<Center: View, Trailing: View>: View {
     }
 }
 
+private struct TerminalFrozenChatHeader: View {
+    let tab: CTTabInfo
+    let uiFont: Double
+    private let store = TerminalControlStore.shared
+
+    private var tabId: String { tab.tabId ?? "" }
+    private var status: String { store.statusByTab[tabId] ?? tab.sessionStatus ?? "inactive" }
+    private var statusColor: Color {
+        switch status {
+        case "busy": return Color(hex: "d97706")
+        case "active": return CTGreen
+        case "starting": return CTAccent
+        default: return Color(white: 0.38)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(tab.name)
+                .font(.system(size: uiFont, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+            HStack(spacing: 4) {
+                Circle().fill(statusColor).frame(width: 6, height: 6)
+                Text(status)
+                    .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if tab.isClaudePTY || tab.isCodexPTY || tab.isSDK {
+                    if let pct = store.contextPctByTab[tabId] {
+                        Text("· \(pct)%")
+                            .font(.system(size: max(11, uiFont - 2), weight: .semibold).monospacedDigit())
+                            .foregroundStyle(contextPctColor(pct))
+                    } else {
+                        Text("· –")
+                            .font(.system(size: max(11, uiFont - 2), weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 220)
+    }
+}
+
 private extension View {
     // Circular Liquid Glass surface for header icon buttons — mirrors the app's
     // vcLiquidGlassCircleSurface() (private to VoiceChatUI). Sizes the content to a
@@ -242,57 +295,127 @@ private extension View {
                 .contentShape(Circle())
         }
     }
+
+    @ViewBuilder
+    func ctGlassCapsule(width: CGFloat, height: CGFloat = 38) -> some View {
+        if #available(iOS 26.0, *) {
+            self.frame(width: width, height: height)
+                .glassEffect(.regular.tint(.black.opacity(0.22)).interactive(), in: Capsule())
+                .contentShape(Capsule())
+        } else {
+            self.frame(width: width, height: height)
+                .background(.regularMaterial, in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5) }
+                .contentShape(Capsule())
+        }
+    }
 }
 
 private struct TerminalActivityBadge: View {
     let count: Int
     let streaming: Bool
-    // When false, the ring is drawn STATIC (no repeatForever). The back-preview
-    // (non-interactive, behind the sliding content) passes animated:false: an
-    // infinite rotation that fires its onAppear AS the heavy projects list mounts
-    // mid-slide competed with the back animation — the remaining project→projects
-    // jank. The live, foreground list keeps animated:true.
+    // The ring is a tiny UIKit/CALayer view, not SwiftUI repeatForever state.
+    // Project rows can keep a live-looking loader without re-entering SwiftUI
+    // body every frame or restarting animation on row re-renders.
     var animated: Bool = true
-    @State private var spin = false
-
-    private var spinning: Bool { streaming && animated }
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(Color.white.opacity(0.075))
-            Circle()
-                .stroke(Color.white.opacity(0.16), lineWidth: 1)
-            if streaming {
-                Circle()
-                    .trim(from: 0.08, to: 0.78)
-                    .stroke(CTGreen, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-            }
+            TerminalActivityRingView(streaming: streaming, animated: animated)
             Text("\(min(count, 99))")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.92))
         }
         .frame(width: 22, height: 22)
-        .onAppear {
-            guard spinning else { return }
-            withAnimation(.linear(duration: 0.95).repeatForever(autoreverses: false)) {
-                spin = true
-            }
-        }
-        .onChange(of: spinning) { _, active in
-            if active {
-                spin = false
-                withAnimation(.linear(duration: 0.95).repeatForever(autoreverses: false)) {
-                    spin = true
-                }
-            } else {
-                spin = false
-            }
-        }
         .accessibilityLabel(streaming ? "Active terminal tabs, streaming" : "Active terminal tabs")
         .accessibilityValue("\(count)")
+    }
+}
+
+private struct TerminalActivityRingView: UIViewRepresentable {
+    let streaming: Bool
+    let animated: Bool
+
+    func makeUIView(context: Context) -> TerminalActivityRingUIView {
+        TerminalActivityRingUIView()
+    }
+
+    func updateUIView(_ uiView: TerminalActivityRingUIView, context: Context) {
+        uiView.configure(streaming: streaming, animated: animated)
+    }
+}
+
+private final class TerminalActivityRingUIView: UIView {
+    private let fillLayer = CAShapeLayer()
+    private let outlineLayer = CAShapeLayer()
+    private let arcLayer = CAShapeLayer()
+    private var isStreaming = false
+    private var isAnimated = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        layer.addSublayer(fillLayer)
+        layer.addSublayer(outlineLayer)
+        layer.addSublayer(arcLayer)
+
+        fillLayer.fillColor = UIColor.white.withAlphaComponent(0.075).cgColor
+        outlineLayer.fillColor = UIColor.clear.cgColor
+        outlineLayer.strokeColor = UIColor.white.withAlphaComponent(0.16).cgColor
+        outlineLayer.lineWidth = 1
+        arcLayer.fillColor = UIColor.clear.cgColor
+        arcLayer.strokeColor = UIColor(red: 0x22 / 255, green: 0xc5 / 255, blue: 0x5e / 255, alpha: 1).cgColor
+        arcLayer.lineWidth = 1.5
+        arcLayer.lineCap = .round
+        arcLayer.strokeStart = 0.08
+        arcLayer.strokeEnd = 0.78
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(streaming: Bool, animated: Bool) {
+        let changed = streaming != isStreaming || animated != isAnimated
+        isStreaming = streaming
+        isAnimated = animated
+        arcLayer.isHidden = !streaming
+        guard changed else { return }
+
+        if streaming && animated {
+            if arcLayer.animation(forKey: "terminalActivitySpin") == nil {
+                let animation = CABasicAnimation(keyPath: "transform.rotation.z")
+                animation.fromValue = 0
+                animation.toValue = Double.pi * 2
+                animation.duration = 1.35
+                animation.repeatCount = .infinity
+                animation.timingFunction = CAMediaTimingFunction(name: .linear)
+                arcLayer.add(animation, forKey: "terminalActivitySpin")
+            }
+        } else {
+            arcLayer.removeAnimation(forKey: "terminalActivitySpin")
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            arcLayer.transform = CATransform3DIdentity
+            CATransaction.commit()
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let path = UIBezierPath(ovalIn: rect).cgPath
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fillLayer.frame = bounds
+        outlineLayer.frame = bounds
+        arcLayer.frame = bounds
+        fillLayer.path = UIBezierPath(ovalIn: bounds).cgPath
+        outlineLayer.path = path
+        arcLayer.path = path
+        CATransaction.commit()
     }
 }
 
@@ -310,11 +433,28 @@ private enum TerminalForwardDestination: Identifiable {
     }
 }
 
+private enum TerminalNavLevel: Int {
+    case projects = 0
+    case tabs = 1
+    case chat = 2
+
+    var previous: TerminalNavLevel? {
+        switch self {
+        case .projects: return nil
+        case .tabs: return .projects
+        case .chat: return .tabs
+        }
+    }
+}
+
 struct TerminalControlRootView: View {
     let onShowHistory: () -> Void
     var onComposerFocusChange: (Bool) -> Void = { _ in }
     var swipeBackEnabled = true
+    @EnvironmentObject private var router: TabRouter
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var uiFont: Double = 14
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var backDragOffset: CGFloat = 0
     @State private var forwardDestination: TerminalForwardDestination?
@@ -331,6 +471,14 @@ struct TerminalControlRootView: View {
     @State private var horizontalScrollLocked = false
     @State private var terminalSelectionSuppressed = false
     @State private var terminalSelectionSuppressionGeneration = 0
+    @State private var terminalHeavySurfaceSuspended = false
+    @State private var showBuildInstallConfirm = false
+    @State private var installAlert: TerminalInstallAlert?
+    @State private var rootRenameTab: CTTabInfo?
+    @State private var chatLogLineCount: Int = 0
+    private let chatLogCountTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @AppStorage(VoiceChatConfig.Keys.developerMode, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var developerMode: Bool = true
     // True from the instant a back-swipe begins (before the offset moves), so the
     // heavy back-preview list mounts and renders one frame EARLY instead of
     // instantiating on the same frame the drag first offsets it — that same-frame
@@ -339,88 +487,513 @@ struct TerminalControlRootView: View {
     // Immutable destination snapshot captured at back-swipe start; the preview
     // renders from this, observing no live store state during the slide.
     @State private var backPreviewSnapshot: TerminalBackPreviewSnapshot = .none
+    // Frozen SOURCE layer for any horizontal transition. Without this, the
+    // outgoing projects/tabs view stayed live while sliding, so store/AppStorage
+    // invalidations could repaint the layer that is currently moving.
+    @State private var transitionSourceSnapshot: TerminalBackPreviewSnapshot = .none
+    // Immutable source snapshot for chat→tabs back. During the slide-out we render
+    // a cheap placeholder instead of the live transcript, so late history/cell work
+    // cannot repaint the outgoing layer while it is animating away.
+    @State private var backOutgoingSnapshot: TerminalOutgoingSnapshot = .none
     // Same idea for the FORWARD push into a project's tabs: capture the tabs once
     // at push-start so the incoming layer renders static during the slide.
     @State private var forwardTabsSnapshot: TerminalBackPreviewSnapshot = .none
+    // Covers the live committed screen for a short beat after a transition. The
+    // navigation state is already committed (so gestures behave correctly), while
+    // the expensive live SwiftUI tree mounts behind this inert snapshot.
+    @State private var terminalSnapshotOverlay: TerminalBackPreviewSnapshot = .none
+    @State private var terminalBitmapTransition: TerminalBitmapTransitionState?
+    @State private var terminalBitmapOverlayView: TerminalBitmapTransitionHostView?
+    @State private var terminalSnapshotHostView: UIView?
+    @State private var cachedProjectsBitmap: UIImage?
+    @State private var cachedTabsBitmapByProject: [String: UIImage] = [:]
+    // The visible store selection is still the source of truth for network/SSE.
+    // These are only retained view inputs so projects/tabs layers stay mounted
+    // when the committed selection moves back up the stack.
+    @State private var persistentProject: CTProject?
+    @State private var persistentTab: CTTabInfo?
+    @Environment(\.bottomBarInset) private var bottomBarInset
     private var terminalInteractionsSuspended: Bool {
         terminalSelectionSuppressed || forwardDestination != nil || backDragOffset > 0
+    }
+    private var terminalRenderSuspended: Bool {
+        terminalInteractionsSuspended || terminalHeavySurfaceSuspended
+    }
+    private let snapshotOverlayHoldMs: UInt64 = 220
+    // Keep row spinners/context menus/refresh/FAB parked past FrameMonitor's
+    // settle window. 22:56 traces showed tab rows re-enabling at ~420ms into
+    // settle (`term-render row bodies=18`) and causing 80ms frames while the
+    // user was already backing out. Row buttons remain live; only heavy chrome
+    // and animated indicators are deferred.
+    private let heavySurfaceResumeDelayMs: UInt64 = 1_500
+    private let projectForwardPreRenderMs: UInt64 = 32
+    private let bitmapOverlayPreflightMs: UInt64 = 24
+    private let bitmapPushDuration: TimeInterval = 0.14
+    private let bitmapBackDuration: TimeInterval = 0.13
+    // Targeted bitmap was re-tested at 00:29 and reproduced the old visual races
+    // (missing/incorrect preview, same page flashing over itself). Keep it off
+    // unless the whole projects/tabs boundary moves to a true UIKit container.
+    private let terminalBitmapProjectTransitionsEnabled = false
+    private let terminalBitmapChatTransitionsEnabled = false
+    // Stop-loss: the project directory boundary is currently too unstable as an
+    // animated SwiftUI/bitmap hybrid. Make forward project opens instant so the
+    // outgoing projects ScrollView cannot visibly re-anchor mid-slide.
+    private let terminalAnimatedProjectPushEnabled = false
+    private var terminalSnapshotOverlayActive: Bool {
+        switch terminalSnapshotOverlay {
+        case .none: return false
+        case .projects, .tabs: return true
+        }
+    }
+    private var terminalBitmapMotionActive: Bool {
+        guard let terminalBitmapTransition else { return false }
+        return terminalBitmapTransition.mode != .hold
+    }
+    private var terminalMotionActive: Bool {
+        terminalBitmapMotionActive || forwardDestination != nil || backInteractionActive || backDragOffset > 0
+    }
+    private var terminalCommittedLevel: TerminalNavLevel {
+        if store.selectedTab != nil { return .chat }
+        if store.selectedProject != nil { return .tabs }
+        return .projects
     }
 
     var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                // Mount the back-preview as soon as the interaction BEGINS (not when
-                // the offset first moves) so its heavy list is already rendered when
-                // the drag starts shifting it — removes the first-frame stutter.
-                if backInteractionActive, store.canStepBack {
-                    terminalBackPreview
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .offset(x: terminalBackPreviewOffset(width: geo.size.width))
-                }
+            VStack(spacing: 0) {
+                terminalRootHeader
+                    .transaction { $0.animation = nil }
+                    .zIndex(10)
 
-                terminalContent(width: geo.size.width)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .overlay(alignment: .leading) {
-                        if backInteractionActive || forwardDestination != nil {
-                            terminalEdgeShade.frame(width: 18).offset(x: -18)
+                GeometryReader { contentGeo in
+                    let contentSize = contentGeo.size
+                    ZStack(alignment: .leading) {
+                        terminalPersistentLayer(.projects, size: contentSize)
+                            .frame(width: contentSize.width)
+                            .overlay(alignment: .leading) {
+                                if terminalLayerNeedsEdgeShade(.projects, width: contentSize.width) {
+                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                }
+                            }
+                            .offset(x: terminalLayerOffset(.projects, width: contentSize.width))
+                            .zIndex(terminalLayerZIndex(.projects))
+                            .allowsHitTesting(terminalLayerAllowsHitTesting(.projects))
+
+                        terminalPersistentLayer(.tabs, size: contentSize)
+                            .frame(width: contentSize.width)
+                            .overlay(alignment: .leading) {
+                                if terminalLayerNeedsEdgeShade(.tabs, width: contentSize.width) {
+                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                }
+                            }
+                            .offset(x: terminalLayerOffset(.tabs, width: contentSize.width))
+                            .zIndex(terminalLayerZIndex(.tabs))
+                            .allowsHitTesting(terminalLayerAllowsHitTesting(.tabs))
+
+                        terminalPersistentLayer(.chat, size: contentSize)
+                            .frame(width: contentSize.width)
+                            .overlay(alignment: .leading) {
+                                if terminalLayerNeedsEdgeShade(.chat, width: contentSize.width) {
+                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                }
+                            }
+                            .offset(x: terminalLayerOffset(.chat, width: contentSize.width))
+                            .zIndex(terminalLayerZIndex(.chat))
+                            .allowsHitTesting(terminalLayerAllowsHitTesting(.chat))
+
+                        TerminalBitmapTransitionOverlay(state: terminalBitmapTransition) { view in
+                            if terminalBitmapOverlayView !== view {
+                                terminalBitmapOverlayView = view
+                            }
                         }
+                            .frame(width: contentSize.width, height: contentSize.height)
+                            .allowsHitTesting(false)
+                            .zIndex(30)
                     }
-                    .offset(x: backDragOffset + terminalForwardContentOffset(width: geo.size.width))
-                    .allowsHitTesting(forwardDestination == nil && backDragOffset == 0)
-
-                if let forwardDestination {
-                    terminalForwardView(forwardDestination, width: geo.size.width)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .overlay(alignment: .leading) {
-                            terminalEdgeShade.frame(width: 18).offset(x: -18)
-                        }
-                        .offset(x: forwardOffset)
-                        .allowsHitTesting(false)
+                    .background(TerminalSnapshotHostReader { terminalSnapshotHostView = $0 })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .scrollDisabled(horizontalScrollLocked)
+                    .gesture(
+                        TerminalBackPanGesture(
+                            isEnabled: swipeBackEnabled && !interruptingForward && (forwardDestination != nil || store.canStepBack),
+                            width: contentSize.width,
+                            onBegan: { beginTerminalBackDrag(size: contentSize) },
+                            onChanged: { tx in updateTerminalBackDrag(tx, width: contentSize.width) },
+                            onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, size: contentSize) },
+                            onCancelled: { cancelTerminalBackDrag() }
+                        )
+                    )
                 }
             }
-            .clipped()
-            .scrollDisabled(horizontalScrollLocked)
             .background(CTPageBackground.ignoresSafeArea())
-            .onAppear { store.start() }
+            .onAppear {
+                store.resetNavigationToProjectsOnFirstOpen()
+                store.start()
+                chatLogLineCount = VCLog.lineCount()
+                syncPersistentTerminalSelection()
+            }
+            .onReceive(chatLogCountTimer) { _ in
+                guard developerMode else { return }
+                let count = VCLog.lineCount()
+                if count != chatLogLineCount { chatLogLineCount = count }
+            }
+            .onChange(of: store.selectedProject?.id) { _, _ in
+                syncPersistentTerminalSelection()
+            }
+            .onChange(of: store.selectedTab?.tabId) { _, _ in
+                syncPersistentTerminalSelection()
+            }
             .onDisappear {
                 if let tabId = store.selectedTab?.tabId, !tabId.isEmpty {
                     VoiceChatStore.shared.clearActiveComposerKey(VoiceChatStore.terminalComposerKey(tabId: tabId))
                 }
             }
-            // UIKit back-swipe recognizer (rightward → up one level). Mounted via
-            // .gesture; its delegate gates direction and prevents the root pager's
-            // scroll pan so rightward is deterministic (no black overscroll / race).
-            // Enabled when there's a committed level to go back to, OR a forward push
-            // is in flight (so the rightward swipe INTERRUPTS the push instead of
-            // falling through to the root pager — that fall-through was the "black
-            // area / swipe ignored until the animation finishes" bug). Disabled only
-            // while an interrupt-reverse is already animating.
-            .gesture(
-                TerminalBackPanGesture(
-                    isEnabled: swipeBackEnabled && !interruptingForward && (forwardDestination != nil || store.canStepBack),
-                    width: geo.size.width,
-                    onBegan: { beginTerminalBackDrag(width: geo.size.width) },
-                    onChanged: { tx in updateTerminalBackDrag(tx, width: geo.size.width) },
-                    onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, width: geo.size.width) },
-                    onCancelled: { cancelTerminalBackDrag() }
-                )
+        }
+        .confirmationDialog("Запустить npm run build:install?", isPresented: $showBuildInstallConfirm, titleVisibility: .visible) {
+            Button("Запустить install", role: .destructive) {
+                VCLog.log("TerminalInstallUI", "confirm accepted")
+                Task { await runBuildInstall() }
+            }
+            Button("Отмена", role: .cancel) {
+                VCLog.log("TerminalInstallUI", "confirm cancelled")
+            }
+        } message: {
+            Text("Custom Terminal станет недоступен на время переустановки. Запуск пойдёт через Voice Record, поэтому процесс не оборвётся при закрытии Terminal.")
+        }
+        .alert(item: $installAlert) { item in
+            Alert(
+                title: Text(item.title),
+                message: Text(item.message),
+                dismissButton: .default(Text("OK"))
             )
+        }
+        .sheet(item: $rootRenameTab) { tab in
+            CTRenameSheet(title: "Rename tab", label: "Tab name", initialName: tab.name) { newName in
+                store.renameTab(tab, to: newName)
+            }
+        }
+        // Keep the system NavigationStack bar out of every transient Terminal
+        // surface, including forward/back snapshots. Hiding it only inside the
+        // three committed level views left short windows where a snapshot without
+        // that modifier could let SwiftUI relayout the top chrome, seen as the
+        // custom header disappearing / height twitching during transitions.
+        .navigationBarHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private func syncPersistentTerminalSelection() {
+        if let project = store.selectedProject {
+            persistentProject = project
+        }
+        if let tab = store.selectedTab {
+            persistentTab = tab
         }
     }
 
     @ViewBuilder
-    private func terminalContent(width: CGFloat) -> some View {
-        if let tab = store.selectedTab {
-            TerminalChatDetailView(tab: tab, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange)
-        } else if let project = store.selectedProject {
-            TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended) { tab in
-                pushTab(tab, project: project, width: width)
+    private func terminalPersistentLayer(_ level: TerminalNavLevel, size: CGSize) -> some View {
+        switch level {
+        case .projects:
+            // Projects must stay as the live ScrollView while sliding both ways.
+            // A value preview cannot preserve the user's vertical offset, so it
+            // looks like an instant jump to the top on push/back.
+            TerminalProjectsView(onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended, renderSuspended: terminalRenderSuspended, showsHeader: false) { project in
+                pushProject(project, size: size)
             }
-        } else {
-            TerminalProjectsView(onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended) { project in
-                pushProject(project, width: width)
+        case .tabs:
+            ZStack {
+                if let project = terminalLayerProject {
+                    // Keep the real tabs screen mounted even while a static proxy is
+                    // moving above it. This pays ScrollView/Button/scrollPosition
+                    // construction in the pre-render mount phase instead of the
+                    // visible settle tail after `store.selectProject`.
+                    TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended, renderSuspended: terminalRenderSuspended, showsHeader: false) { tab in
+                        pushTab(tab, project: project, size: size)
+                    }
+                    .opacity(terminalTabsLiveVisible ? 1 : 0)
+                    .allowsHitTesting(terminalTabsLiveHitTesting)
+                } else {
+                    CTPageBackground.ignoresSafeArea()
+                }
+
+                if backInteractionActive,
+                   terminalCommittedLevel == .chat,
+                   case .tabs(let tabs, let marker, let name) = backPreviewSnapshot {
+                    TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+                } else if backInteractionActive,
+                          terminalCommittedLevel == .tabs,
+                          case .tabs(let tabs, let marker, let name) = transitionSourceSnapshot {
+                    TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+                } else if case .project = forwardDestination,
+                          case .tabs(let tabs, let marker, let name) = forwardTabsSnapshot {
+                    TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+                }
+            }
+        case .chat:
+            if let tab = terminalLayerTab {
+                if terminalLayerShouldShowLiveChat(tab) {
+                    TerminalChatDetailView(tab: tab, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange, showsHeader: false)
+                } else {
+                    TerminalChatForwardPlaceholder(tab: tab, showsHeader: false)
+                }
+            } else {
+                CTPageBackground.ignoresSafeArea()
             }
         }
+    }
+
+    private var terminalLayerProject: CTProject? {
+        if case .project(let project) = forwardDestination {
+            return project
+        }
+        if case .tab(_, let project) = forwardDestination {
+            return project
+        }
+        return store.selectedProject ?? persistentProject
+    }
+
+    private var terminalLayerTab: CTTabInfo? {
+        if case .tab(let tab, _) = forwardDestination {
+            return tab
+        }
+        if let tab = store.selectedTab {
+            return tab
+        }
+        if backInteractionActive, case .chat(let tab) = backOutgoingSnapshot {
+            return tab
+        }
+        return nil
+    }
+
+    private func terminalLayerShouldShowLiveChat(_ tab: CTTabInfo) -> Bool {
+        store.selectedTab?.tabId == tab.tabId && forwardDestination == nil
+    }
+
+    private var terminalTabsProxyActive: Bool {
+        if case .project = forwardDestination { return true }
+        if backInteractionActive {
+            return terminalCommittedLevel == .tabs || terminalCommittedLevel == .chat
+        }
+        return false
+    }
+
+    private var terminalTabsLiveVisible: Bool {
+        terminalCommittedLevel == .tabs && !terminalTabsProxyActive
+    }
+
+    private var terminalTabsLiveHitTesting: Bool {
+        terminalCommittedLevel == .tabs && !terminalMotionActive
+    }
+
+    private func terminalTargetLevel(for destination: TerminalForwardDestination) -> TerminalNavLevel {
+        switch destination {
+        case .project:
+            return .tabs
+        case .tab:
+            return .chat
+        }
+    }
+
+    private func terminalLayerOffset(_ level: TerminalNavLevel, width: CGFloat) -> CGFloat {
+        guard terminalBitmapTransition == nil else { return 0 }
+        guard width > 0 else { return 0 }
+
+        if let forwardDestination {
+            let source = terminalCommittedLevel
+            let target = terminalTargetLevel(for: forwardDestination)
+            if level == source {
+                return terminalForwardContentOffset(width: width)
+            }
+            if level == target {
+                return forwardOffset
+            }
+            return restingOffset(for: level, committed: source, width: width)
+        }
+
+        if backInteractionActive {
+            let source = terminalCommittedLevel
+            let target = source.previous ?? .projects
+            if level == source {
+                return backDragOffset
+            }
+            if level == target {
+                return terminalBackPreviewOffset(width: width)
+            }
+            return restingOffset(for: level, committed: source, width: width)
+        }
+
+        return restingOffset(for: level, committed: terminalCommittedLevel, width: width)
+    }
+
+    private func restingOffset(for level: TerminalNavLevel, committed: TerminalNavLevel, width: CGFloat) -> CGFloat {
+        if level == committed { return 0 }
+        if level.rawValue < committed.rawValue {
+            return -min(72, width * 0.22)
+        }
+        return width
+    }
+
+    private func terminalLayerZIndex(_ level: TerminalNavLevel) -> Double {
+        Double(level.rawValue)
+    }
+
+    private func terminalLayerAllowsHitTesting(_ level: TerminalNavLevel) -> Bool {
+        !terminalMotionActive && terminalCommittedLevel == level
+    }
+
+    private func terminalLayerNeedsEdgeShade(_ level: TerminalNavLevel, width: CGFloat) -> Bool {
+        guard level != .projects, width > 0 else { return false }
+        let x = terminalLayerOffset(level, width: width)
+        return x > -1 && x < width
+    }
+
+    @ViewBuilder
+    private func terminalContent(size: CGSize) -> some View {
+        if (backInteractionActive || forwardDestination != nil) && !transitionSourceSnapshot.isEmpty {
+            terminalSourceSnapshotView
+        } else if let tab = store.selectedTab {
+            if backInteractionActive, case .chat(let outgoingTab) = backOutgoingSnapshot {
+                TerminalChatForwardPlaceholder(tab: outgoingTab, showsHeader: false)
+            } else {
+                TerminalChatDetailView(tab: tab, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange, showsHeader: false)
+            }
+        } else if let project = store.selectedProject {
+            TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended, renderSuspended: terminalRenderSuspended, showsHeader: false) { tab in
+                pushTab(tab, project: project, size: size)
+            }
+        } else {
+            TerminalProjectsView(onShowHistory: onShowHistory, interactionsSuspended: terminalInteractionsSuspended, renderSuspended: terminalRenderSuspended, showsHeader: false) { project in
+                pushProject(project, size: size)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var terminalSourceSnapshotView: some View {
+        switch transitionSourceSnapshot {
+        case .projects(let rows):
+            TerminalProjectsBackPreview(rows: rows, showsHeader: false)
+        case .tabs(let tabs, let marker, let name):
+            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+        case .none:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var terminalRootHeader: some View {
+        if let tab = store.selectedTab {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                terminalRootChatHeader(tab)
+            } trailing: {
+                HStack(spacing: 6) {
+                    terminalDebugLogButtons
+                    Button { Task { await store.loadHistory(tabId: tab.tabId ?? "") } } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .ctGlassCircle()
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        } else if let project = store.selectedProject {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                TerminalHeaderTitle(title: project.name, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
+            } trailing: {
+                HStack(spacing: 6) {
+                    terminalDebugLogButtons
+                    Button { Task { await store.loadTabs(projectId: project.id) } } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .ctGlassCircle()
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        } else {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
+            } trailing: {
+                HStack(spacing: 6) {
+                    terminalDebugLogButtons
+                    Button {
+                        VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
+                        Task { await prepareBuildInstall() }
+                    } label: {
+                        Group {
+                            if store.terminalInstallRunning {
+                                ProgressView().controlSize(.small).tint(.white)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
+                        }
+                        .ctGlassCircle()
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.terminalInstallRunning)
+                    .accessibilityLabel("Run npm install build")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var terminalDebugLogButtons: some View {
+        if developerMode {
+            Button {
+                UIPasteboard.general.string = VCLog.readRecent(maxLines: 1_000)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                chatLogLineCount = VCLog.lineCount()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("(\(chatLogLineCount))")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .foregroundStyle(.white.opacity(0.92))
+                .ctGlassCapsule(width: 64, height: 38)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy Terminal and AI Chat log, \(chatLogLineCount) lines")
+
+            Button {
+                VCLog.clearLocal()
+                chatLogLineCount = 0
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .ctGlassCircle()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear Terminal and AI Chat log")
+        }
+    }
+
+    @ViewBuilder
+    private func terminalRootChatHeader(_ tab: CTTabInfo) -> some View {
+        TerminalFrozenChatHeader(tab: tab, uiFont: uiFont)
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button { rootRenameTab = tab } label: { Label("Rename", systemImage: "pencil") }
+                Button { UIPasteboard.general.string = tab.name } label: { Label("Copy name", systemImage: "doc.on.doc") }
+                if !tab.isCodexPTY {
+                    let tabId = tab.tabId ?? ""
+                    let thinkingOn = (store.paramsByTab[tabId]?.thinking ?? "adaptive") != "disabled"
+                    Button {
+                        Task { await store.setParams(tabId: tabId, partial: ["thinking": thinkingOn ? "disabled" : "adaptive"]) }
+                    } label: {
+                        Label(thinkingOn ? "Think: ON" : "Think: OFF", systemImage: thinkingOn ? "brain.head.profile.fill" : "brain")
+                    }
+                    .disabled(store.isTabTurnBusy(tabId))
+                }
+            }
     }
 
     @ViewBuilder
@@ -434,10 +1007,10 @@ struct TerminalControlRootView: View {
             // hitch: 63 dropped frames, term-render bodies=30, no main hang). The
             // live view mounts in terminalContent once the push commits.
             if case .tabs(let tabs, let marker, let name) = forwardTabsSnapshot, !tabs.isEmpty {
-                TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight)
+                TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
             } else {
-                TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: true) { tab in
-                    pushTab(tab, project: project, width: width)
+                TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: true, renderSuspended: true, showsHeader: false) { tab in
+                    pushTab(tab, project: project, size: CGSize(width: width, height: 0))
                 }
             }
         case .tab(let tab, _):
@@ -448,7 +1021,19 @@ struct TerminalControlRootView: View {
             // the slide animation (commit=103ms). The placeholder matches the chat
             // header geometry so nothing jumps; the live detail mounts in
             // terminalContent once the push commits.
-            TerminalChatForwardPlaceholder(tab: tab)
+            TerminalChatForwardPlaceholder(tab: tab, showsHeader: false)
+        }
+    }
+
+    @ViewBuilder
+    private var terminalSnapshotOverlayView: some View {
+        switch terminalSnapshotOverlay {
+        case .tabs(let tabs, let marker, let name):
+            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+        case .projects(let rows):
+            TerminalProjectsBackPreview(rows: rows, showsHeader: false)
+        case .none:
+            EmptyView()
         }
     }
 
@@ -470,9 +1055,9 @@ struct TerminalControlRootView: View {
         // is somehow empty (defensive).
         switch backPreviewSnapshot {
         case .tabs(let tabs, let marker, let name):
-            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name)
+            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
         case .projects(let rows):
-            TerminalProjectsBackPreview(rows: rows)
+            TerminalProjectsBackPreview(rows: rows, showsHeader: false)
         case .none:
             Color.clear
         }
@@ -493,9 +1078,30 @@ struct TerminalControlRootView: View {
         }
     }
 
+    private func captureBackOutgoingSnapshot() -> TerminalOutgoingSnapshot {
+        if let tab = store.selectedTab { return .chat(tab) }
+        return .none
+    }
+
+    private func captureTransitionSourceSnapshot() -> TerminalBackPreviewSnapshot {
+        if store.selectedTab != nil {
+            return .none
+        }
+        if let project = store.selectedProject {
+            let tabs = store.tabsByProject[project.id] ?? []
+            let marker = store.statusMarkerByProject[project.id] ?? .fallback
+            return .tabs(tabs, marker, project.name)
+        }
+        let rows = store.projects.map {
+            CTProjectRowSnapshot(project: $0, activity: store.activitySummary(projectId: $0.id))
+        }
+        return .projects(rows)
+    }
+
     // UIKit back-swipe handlers (driven by TerminalBackPanGesture). The recognizer
     // already gated direction/enable in shouldBegin, so these just track the drag.
-    private func beginTerminalBackDrag(width: CGFloat) {
+    private func beginTerminalBackDrag(size: CGSize) {
+        let width = size.width
         // INTERRUPT case: a forward push is mid-flight. The committed level under it
         // is still the SOURCE level (selection commits only at the push's completion),
         // so reversing here just abandons the push — no back-step needed. Bump the
@@ -515,6 +1121,7 @@ struct TerminalControlRootView: View {
                     forwardDestination = nil
                     forwardOffset = 0
                     forwardTabsSnapshot = .none
+                    transitionSourceSnapshot = .none
                     interruptingForward = false
                     endTerminalHorizontalInteraction()
                 }
@@ -522,7 +1129,12 @@ struct TerminalControlRootView: View {
             return
         }
         VCLog.log("term-swipe", "begin drag level=\(terminalLevelLabel)")
-        backPreviewSnapshot = captureBackPreviewSnapshot()   // freeze data before the slide
+        if beginBitmapBackDrag(size: size) {
+            return
+        }
+        backPreviewSnapshot = captureBackPreviewSnapshot()
+        transitionSourceSnapshot = captureTransitionSourceSnapshot()
+        backOutgoingSnapshot = captureBackOutgoingSnapshot()
         backInteractionActive = true   // mount the preview before the offset moves
         beginTerminalHorizontalInteraction(label: "back from=\(terminalLevelLabel)", initialPhase: "gesture")
     }
@@ -530,10 +1142,18 @@ struct TerminalControlRootView: View {
     private func updateTerminalBackDrag(_ translationX: CGFloat, width: CGFloat) {
         // An interrupt-reverse owns the animation; ignore finger tracking during it.
         guard !interruptingForward, forwardDestination == nil else { return }
+        if terminalBitmapTransition != nil {
+            terminalBitmapOverlayView?.setInteractiveOffset(
+                min(translationX, max(0, width - 18)),
+                mode: .back
+            )
+            return
+        }
         backDragOffset = min(translationX, max(0, width - 18))
     }
 
-    private func endTerminalBackDrag(_ translationX: CGFloat, predicted: CGFloat, width: CGFloat) {
+    private func endTerminalBackDrag(_ translationX: CGFloat, predicted: CGFloat, size: CGSize) {
+        let width = size.width
         // The interrupt-reverse (begun in beginTerminalBackDrag) owns its own
         // animation + teardown; the gesture's end must not commit a second step.
         if interruptingForward || forwardDestination != nil {
@@ -541,27 +1161,36 @@ struct TerminalControlRootView: View {
             return
         }
         let commit = translationX > 64 || predicted > 110
+        if terminalBitmapTransition != nil {
+            endBitmapBackDrag(commit: commit, translationX: translationX, predicted: predicted, size: size)
+            return
+        }
         guard commit else {
             VCLog.log("term-swipe", "end CANCEL tx=\(Int(translationX)) predicted=\(Int(predicted)) (below threshold)")
             withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9), completionCriteria: .logicallyComplete) {
                 backDragOffset = 0
             } completion: {
                 backInteractionActive = false
+                backOutgoingSnapshot = .none
+                transitionSourceSnapshot = .none
                 endTerminalHorizontalInteraction()
             }
             return
         }
-        VCLog.log("term-swipe", "end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(terminalLevelLabel)")
-        MainThreadWatchdog.mark("term-back-commit from=\(terminalLevelLabel)")
+        let fromLevel = terminalLevelLabel
+        VCLog.log("term-swipe", "end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(fromLevel)")
+        MainThreadWatchdog.mark("term-back-commit from=\(fromLevel)")
         FrameMonitor.shared.setPhase("animate")
         withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
             backDragOffset = width
-        } completion: {
-            FrameMonitor.shared.setPhase("swap")
-            commitWithoutTerminalAnimation {
-                store.stepBackOneLevel()
-                backDragOffset = 0
-                backInteractionActive = false
+            } completion: {
+                FrameMonitor.shared.setPhase("swap")
+                commitWithoutTerminalAnimation {
+                    store.stepBackOneLevel()
+                    backDragOffset = 0
+                    backInteractionActive = false
+                backOutgoingSnapshot = .none
+                transitionSourceSnapshot = .none
                 endTerminalHorizontalInteraction()
             }
         }
@@ -574,10 +1203,22 @@ struct TerminalControlRootView: View {
             return
         }
         VCLog.log("term-swipe", "cancel drag")
+        if terminalBitmapTransition != nil {
+            animateTerminalBitmap(to: 0, mode: .back, duration: 0.16, curve: .easeOut) {
+                commitWithoutTerminalAnimation {
+                    terminalBitmapTransition = nil
+                    backInteractionActive = false
+                    endTerminalHorizontalInteraction()
+                }
+            }
+            return
+        }
         withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9)) {
             backDragOffset = 0
         }
         backInteractionActive = false
+        backOutgoingSnapshot = .none
+        transitionSourceSnapshot = .none
         endTerminalHorizontalInteraction()
     }
 
@@ -601,17 +1242,29 @@ struct TerminalControlRootView: View {
         return -min(48, width * 0.12) * progress
     }
 
-    private func pushProject(_ project: CTProject, width: CGFloat) {
+    private func pushProject(_ project: CTProject, size: CGSize) {
+        let width = size.width
         guard !terminalInteractionsSuspended else { return }
-        guard forwardDestination == nil, width > 0, !reduceMotion else {
+        guard terminalAnimatedProjectPushEnabled,
+              forwardDestination == nil,
+              width > 0,
+              !reduceMotion
+        else {
+            VCLog.log("term-swipe", "pushProject \(project.name) — instant project boundary")
+            persistentProject = project
             store.selectProject(project)
             return
         }
         VCLog.log("term-swipe", "pushProject \(project.name) — mount@width then slide")
+        if beginBitmapPushProject(project, size: size) {
+            return
+        }
+        persistentProject = project
         backDragOffset = 0
-        // Freeze the destination tabs into a value snapshot so the incoming layer
-        // renders static during the slide (no @Observable reads → no mid-slide
-        // body churn). Empty snapshot falls back to the live view.
+        // Keep the already-scrolled Projects ScrollView live while it slides out.
+        // Replacing it with TerminalProjectsBackPreview loses the current offset,
+        // which looked like an instant jump to the top on project tap.
+        transitionSourceSnapshot = .none
         let tabs = store.tabsByProject[project.id] ?? []
         let marker = store.statusMarkerByProject[project.id] ?? .fallback
         forwardTabsSnapshot = .tabs(tabs, marker, project.name)
@@ -627,6 +1280,8 @@ struct TerminalControlRootView: View {
         let generation = forwardGeneration
         Task { @MainActor in
             await Task.yield()
+            try? await Task.sleep(for: .milliseconds(projectForwardPreRenderMs))
+            guard generation == forwardGeneration else { return }
             FrameMonitor.shared.setPhase("animate")   // commit phase = up to here
             withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
@@ -634,19 +1289,25 @@ struct TerminalControlRootView: View {
                 // A back-swipe may have interrupted and reversed this push; if so the
                 // generation bumped and we must NOT commit the navigation.
                 guard generation == forwardGeneration else { return }
+                // Commit the nav state immediately so a fast right-swipe is a real
+                // tabs→projects back gesture, not an "interrupt forward from projects".
+                // The live tabs tree stays in lightweight render mode during the
+                // quiet tail, but remains visible and scrollable.
                 FrameMonitor.shared.setPhase("swap")
                 commitWithoutTerminalAnimation {
                     store.selectProject(project)
                     forwardDestination = nil
                     forwardOffset = 0
                     forwardTabsSnapshot = .none
+                    transitionSourceSnapshot = .none
                     endTerminalHorizontalInteraction()
                 }
             }
         }
     }
 
-    private func pushTab(_ tab: CTTabInfo, project: CTProject, width: CGFloat) {
+    private func pushTab(_ tab: CTTabInfo, project: CTProject, size: CGSize) {
+        let width = size.width
         guard tab.isInteractiveAI else { return }
         guard !terminalInteractionsSuspended else { return }
         // PHASE B: navigation only SETS the selection. The actual load
@@ -655,11 +1316,19 @@ struct TerminalControlRootView: View {
         // it finishes — instead of a fire-and-forget Task that outlived the view
         // and mutated torn-down state (the back-before-load crash).
         guard forwardDestination == nil, width > 0, !reduceMotion else {
+            persistentProject = project
+            persistentTab = tab
             store.selectTabForDisplay(tab, project: project)
             return
         }
         VCLog.log("term-swipe", "pushTab \(tab.name) — mount@width then slide")
+        if beginBitmapPushTab(tab, project: project, size: size) {
+            return
+        }
+        persistentProject = project
+        persistentTab = tab
         backDragOffset = 0
+        transitionSourceSnapshot = .none
         beginTerminalHorizontalInteraction(label: "pushTab name=\(tab.name) id=\(String((tab.tabId ?? tab.id).suffix(8)))", initialPhase: "mount")
         forwardDestination = .tab(tab, project)
         forwardOffset = width
@@ -677,9 +1346,311 @@ struct TerminalControlRootView: View {
                     store.selectTabForDisplay(tab, project: project)
                     forwardDestination = nil
                     forwardOffset = 0
+                    transitionSourceSnapshot = .none
                     endTerminalHorizontalInteraction()
                 }
             }
+        }
+    }
+
+    private func beginBitmapPushProject(_ project: CTProject, size: CGSize) -> Bool {
+        guard terminalBitmapProjectTransitionsEnabled else { return false }
+        guard size.width > 1, size.height > 1 else { return false }
+        let tabs = store.tabsByProject[project.id] ?? []
+        let marker = store.statusMarkerByProject[project.id] ?? .fallback
+        let destinationSurface = TerminalBitmapSurface.tabs(tabs, marker, project.name)
+        guard let source = captureCurrentTerminalBitmap(size: size),
+              let destination = cachedTabsBitmapByProject[project.id]
+                ?? renderTerminalBitmap(surface: destinationSurface, size: size)
+        else {
+            VCLog.log("term-swipe", "bitmap pushProject unavailable → SwiftUI fallback")
+            return false
+        }
+
+        cachedProjectsBitmap = source
+        backDragOffset = 0
+        forwardGeneration += 1
+        let generation = forwardGeneration
+        beginTerminalHorizontalInteraction(label: "bitmap pushProject name=\(project.name) id=\(String(project.id.suffix(8)))", initialPhase: "snapshot")
+        let transition = TerminalBitmapTransitionState(
+            mode: .forward,
+            source: source,
+            destination: destination,
+            offset: size.width,
+            size: size
+        )
+        terminalBitmapTransition = transition
+        terminalBitmapOverlayView?.configure(transition)
+        Task { @MainActor in
+            await waitForBitmapOverlay()
+            guard generation == forwardGeneration else { return }
+            await preflightTerminalBitmapOverlay()
+            guard generation == forwardGeneration else { return }
+            FrameMonitor.shared.setPhase("animate")
+            animateTerminalBitmap(to: 0, mode: .forward, duration: bitmapPushDuration, curve: .linear) {
+                guard generation == forwardGeneration else { return }
+                FrameMonitor.shared.setPhase("live-mount")
+                commitWithoutTerminalAnimation {
+                    store.selectProject(project)
+                    endTerminalHorizontalInteraction()
+                }
+                holdBitmapDestination(destination, generation: generation)
+            }
+        }
+        return true
+    }
+
+    private func beginBitmapPushTab(_ tab: CTTabInfo, project: CTProject, size: CGSize) -> Bool {
+        guard terminalBitmapChatTransitionsEnabled else { return false }
+        guard size.width > 1, size.height > 1 else { return false }
+        let sourceSnapshot = captureTransitionSourceSnapshot()
+        let destinationSurface = TerminalBitmapSurface.chatPlaceholder(tab)
+        guard let source = captureCurrentTerminalBitmap(size: size)
+                ?? renderTerminalBitmap(surface: sourceSnapshot.bitmapSurface, size: size),
+              let destination = renderTerminalBitmap(surface: destinationSurface, size: size)
+        else {
+            VCLog.log("term-swipe", "bitmap pushTab unavailable → SwiftUI fallback")
+            return false
+        }
+
+        cachedTabsBitmapByProject[project.id] = source
+        backDragOffset = 0
+        forwardGeneration += 1
+        let generation = forwardGeneration
+        beginTerminalHorizontalInteraction(label: "bitmap pushTab name=\(tab.name) id=\(String((tab.tabId ?? tab.id).suffix(8)))", initialPhase: "snapshot")
+        let transition = TerminalBitmapTransitionState(
+            mode: .forward,
+            source: source,
+            destination: destination,
+            offset: size.width,
+            size: size
+        )
+        terminalBitmapTransition = transition
+        terminalBitmapOverlayView?.configure(transition)
+        Task { @MainActor in
+            await waitForBitmapOverlay()
+            guard generation == forwardGeneration else { return }
+            await preflightTerminalBitmapOverlay()
+            guard generation == forwardGeneration else { return }
+            FrameMonitor.shared.setPhase("animate")
+            animateTerminalBitmap(to: 0, mode: .forward, duration: bitmapPushDuration, curve: .linear) {
+                guard generation == forwardGeneration else { return }
+                FrameMonitor.shared.setPhase("swap")
+                commitWithoutTerminalAnimation {
+                    store.selectTabForDisplay(tab, project: project)
+                    endTerminalHorizontalInteraction()
+                }
+                holdBitmapDestination(destination, generation: generation)
+            }
+        }
+        return true
+    }
+
+    private func beginBitmapBackDrag(size: CGSize) -> Bool {
+        guard size.width > 1, size.height > 1 else { return false }
+        let isChatBack = store.selectedTab != nil
+        let isProjectBack = store.selectedProject != nil && store.selectedTab == nil
+        guard (isProjectBack && terminalBitmapProjectTransitionsEnabled)
+                || (isChatBack && terminalBitmapChatTransitionsEnabled)
+        else { return false }
+
+        let sourceFallback: TerminalBitmapSurface? = isChatBack ? store.selectedTab.map { .chatPlaceholder($0) } : nil
+        guard let source = captureCurrentTerminalBitmap(size: size)
+                ?? sourceFallback.flatMap({ renderTerminalBitmap(surface: $0, size: size) })
+        else {
+            VCLog.log("term-swipe", "bitmap back unavailable source → SwiftUI fallback")
+            return false
+        }
+
+        let destination: UIImage
+        if isProjectBack {
+            guard let cachedProjectsBitmap else {
+                VCLog.log("term-swipe", "bitmap back tabs unavailable (no projects bitmap) → SwiftUI fallback")
+                return false
+            }
+            destination = cachedProjectsBitmap
+            if let projectId = store.selectedProject?.id {
+                // Source is the current tabs list with its real scroll offset.
+                cachedTabsBitmapByProject[projectId] = source
+            }
+        } else {
+            let destinationSurface = captureBackPreviewSnapshot().bitmapSurface
+            guard let projectId = store.selectedProject?.id,
+                  let cached = cachedTabsBitmapByProject[projectId]
+                    ?? renderTerminalBitmap(surface: destinationSurface, size: size)
+            else {
+                VCLog.log("term-swipe", "bitmap back chat unavailable destination → SwiftUI fallback")
+                return false
+            }
+            destination = cached
+            cachedTabsBitmapByProject[projectId] = destination
+        }
+
+        transitionSourceSnapshot = .none
+        backPreviewSnapshot = .none
+        backOutgoingSnapshot = .none
+        backInteractionActive = true
+        backDragOffset = 0
+        terminalBitmapTransition = TerminalBitmapTransitionState(
+            mode: .back,
+            source: source,
+            destination: destination,
+            offset: 0,
+            size: size
+        )
+        terminalBitmapOverlayView?.configure(terminalBitmapTransition)
+        beginTerminalHorizontalInteraction(label: "bitmap back from=\(terminalLevelLabel)", initialPhase: "gesture")
+        return true
+    }
+
+    private func endBitmapBackDrag(commit: Bool, translationX: CGFloat, predicted: CGFloat, size: CGSize) {
+        guard terminalBitmapTransition != nil else { return }
+        let width = size.width
+        if !commit {
+            VCLog.log("term-swipe", "bitmap end CANCEL tx=\(Int(translationX)) predicted=\(Int(predicted)) (below threshold)")
+            animateTerminalBitmap(to: 0, mode: .back, duration: 0.16, curve: .easeOut) {
+                commitWithoutTerminalAnimation {
+                    terminalBitmapTransition = nil
+                    backInteractionActive = false
+                    endTerminalHorizontalInteraction()
+                }
+            }
+            return
+        }
+
+        let fromLevel = terminalLevelLabel
+        let destination = terminalBitmapTransition?.destination
+        VCLog.log("term-swipe", "bitmap end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(fromLevel)")
+        MainThreadWatchdog.mark("term-back-commit from=\(fromLevel)")
+        FrameMonitor.shared.setPhase("animate")
+        forwardGeneration += 1
+        let generation = forwardGeneration
+        animateTerminalBitmap(to: width, mode: .back, duration: bitmapBackDuration, curve: .linear) {
+            guard generation == forwardGeneration else { return }
+            FrameMonitor.shared.setPhase(fromLevel == "tabs" ? "live-mount" : "swap")
+            commitWithoutTerminalAnimation {
+                store.stepBackOneLevel()
+                backDragOffset = 0
+                backInteractionActive = false
+                endTerminalHorizontalInteraction()
+            }
+            if let destination {
+                holdBitmapDestination(destination, generation: generation)
+            } else {
+                terminalBitmapTransition = nil
+            }
+        }
+    }
+
+    private func waitForBitmapOverlay() async {
+        for _ in 0..<12 {
+            if let overlay = terminalBitmapOverlayView, overlay.bounds.width > 1, overlay.bounds.height > 1 {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(8))
+        }
+    }
+
+    private func preflightTerminalBitmapOverlay() async {
+        guard let overlay = terminalBitmapOverlayView,
+              let state = terminalBitmapTransition
+        else { return }
+        FrameMonitor.shared.setPhase("bitmap-preflight")
+        overlay.configure(state)
+        overlay.setNeedsLayout()
+        overlay.layoutIfNeeded()
+        try? await Task.sleep(for: .milliseconds(bitmapOverlayPreflightMs))
+    }
+
+    private func animateTerminalBitmap(
+        to targetOffset: CGFloat,
+        mode: TerminalBitmapTransitionState.Mode,
+        duration: TimeInterval,
+        curve: TerminalBitmapAnimationCurve,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        guard let overlay = terminalBitmapOverlayView,
+              let state = terminalBitmapTransition,
+              overlay.bounds.width > 1,
+              overlay.bounds.height > 1
+        else {
+            VCLog.log("term-swipe", "bitmap overlay not ready — direct commit fallback")
+            commitWithoutTerminalAnimation {
+                terminalBitmapTransition?.offset = targetOffset
+            }
+            Task { @MainActor in
+                await Task.yield()
+                completion()
+            }
+            return
+        }
+
+        overlay.configure(state)
+        overlay.animate(to: targetOffset, mode: mode, duration: duration, curve: curve) { _ in
+            Task { @MainActor in
+                commitWithoutTerminalAnimation {
+                    terminalBitmapTransition?.offset = targetOffset
+                }
+                completion()
+            }
+        }
+    }
+
+    private func holdBitmapDestination(_ image: UIImage, generation: Int) {
+        guard var current = terminalBitmapTransition else { return }
+        current.source = image
+        current.destination = image
+        current.offset = 0
+        current.mode = .hold
+        terminalBitmapTransition = current
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(snapshotOverlayHoldMs))
+            guard generation == forwardGeneration else { return }
+            commitWithoutTerminalAnimation {
+                terminalBitmapTransition = nil
+            }
+        }
+    }
+
+    private func captureCurrentTerminalBitmap(size: CGSize) -> UIImage? {
+        guard size.width > 1, size.height > 1,
+              let host = terminalSnapshotHostView,
+              let window = host.window
+        else { return nil }
+        let rect = host.convert(host.bounds, to: window).integral
+        guard rect.width > 1, rect.height > 1 else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = window.screen.scale
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
+            context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+        return image.preparingForDisplay() ?? image
+    }
+
+    private func renderTerminalBitmap(surface: TerminalBitmapSurface?, size: CGSize) -> UIImage? {
+        guard let surface, size.width > 1, size.height > 1 else { return nil }
+        let renderer = ImageRenderer(
+            content: terminalBitmapSurfaceView(surface)
+                .frame(width: size.width, height: size.height)
+                .environment(\.bottomBarInset, bottomBarInset)
+        )
+        renderer.proposedSize = ProposedViewSize(width: size.width, height: size.height)
+        renderer.scale = UIScreen.main.scale
+        guard let image = renderer.uiImage else { return nil }
+        return image.preparingForDisplay() ?? image
+    }
+
+    @ViewBuilder
+    private func terminalBitmapSurfaceView(_ surface: TerminalBitmapSurface) -> some View {
+        switch surface {
+        case .projects(let rows):
+            TerminalProjectsBackPreview(rows: rows, showsHeader: false)
+        case .tabs(let tabs, let marker, let name):
+            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight, showsHeader: false)
+        case .chatPlaceholder(let tab):
+            TerminalChatForwardPlaceholder(tab: tab, showsHeader: false)
         }
     }
 
@@ -692,6 +1663,8 @@ struct TerminalControlRootView: View {
     private func beginTerminalHorizontalInteraction(label: String, initialPhase: String = "commit") {
         horizontalScrollLocked = true
         terminalSelectionSuppressed = true
+        terminalHeavySurfaceSuspended = true
+        terminalSnapshotOverlay = .none
         terminalSelectionSuppressionGeneration += 1
         // Park background tabs-prefetch while we navigate, so its writes can't land
         // mid-slide and hitch the projects back-preview (watchdog proved this is a
@@ -711,6 +1684,74 @@ struct TerminalControlRootView: View {
             guard terminalSelectionSuppressionGeneration == generation else { return }
             terminalSelectionSuppressed = false
         }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(heavySurfaceResumeDelayMs))
+            guard terminalSelectionSuppressionGeneration == generation else { return }
+            terminalSnapshotOverlay = .none
+            terminalHeavySurfaceSuspended = false
+        }
+    }
+
+    private func prepareBuildInstall() async {
+        guard !store.terminalInstallRunning else {
+            VCLog.log("TerminalInstallUI", "prepare ignored already-running")
+            return
+        }
+        VCLog.log("TerminalInstallUI", "prepare start")
+        do {
+            let blockers = try await store.terminalBuildInstallBlockers()
+            if !blockers.isEmpty {
+                VCLog.log("TerminalInstallUI", "prepare blocked count=\(blockers.count)")
+                installAlert = TerminalInstallAlert(
+                    title: "Terminal занят",
+                    message: buildBlockerMessage(blockers)
+                )
+                return
+            }
+            VCLog.log("TerminalInstallUI", "prepare ok showConfirm")
+            showBuildInstallConfirm = true
+        } catch {
+            VCLog.log("TerminalInstallUI", "prepare failed: \(friendlyError(error))")
+            installAlert = TerminalInstallAlert(
+                title: "Не удалось проверить Terminal",
+                message: friendlyError(error)
+            )
+        }
+    }
+
+    private func runBuildInstall() async {
+        VCLog.log("TerminalInstallUI", "run start")
+        do {
+            let job = try await store.runTerminalBuildInstall()
+            let command = job?.command ?? "npm run build:install"
+            VCLog.log("TerminalInstallUI", "run success command=\(command)")
+            installAlert = TerminalInstallAlert(title: "Install завершён", message: command + " завершился.")
+            await store.refreshProjects()
+        } catch {
+            VCLog.log("TerminalInstallUI", "run failed: \(friendlyError(error))")
+            installAlert = TerminalInstallAlert(title: "Install не завершился", message: friendlyError(error))
+        }
+    }
+
+    private func buildBlockerMessage(_ blockers: [CTActiveLoader]) -> String {
+        var lines = blockers.prefix(6).map { loader in
+            var line = loader.title
+            if let status = loader.status, !status.isEmpty { line += " · " + status }
+            if let cwd = loader.cwd, !cwd.isEmpty { line += "\n" + cwd }
+            if let command = loader.command, !command.isEmpty { line += "\n" + command }
+            return line
+        }
+        if blockers.count > lines.count {
+            lines.append("ещё \(blockers.count - lines.count)")
+        }
+        return "Остановите вкладки, где сейчас идёт streaming или loader, перед install:\n\n" + lines.joined(separator: "\n\n")
+    }
+
+    private func friendlyError(_ error: Error) -> String {
+        if let localized = (error as? LocalizedError)?.errorDescription, !localized.isEmpty {
+            return localized
+        }
+        return error.localizedDescription
     }
 }
 
@@ -732,6 +1773,7 @@ struct TerminalControlRootView: View {
 // mounts in terminalContent once the push commits.
 private struct TerminalChatForwardPlaceholder: View {
     let tab: CTTabInfo
+    var showsHeader = true
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -747,23 +1789,25 @@ private struct TerminalChatForwardPlaceholder: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: {}) {
-                VStack(spacing: 1) {
-                    Text(tab.name)
-                        .font(.system(size: uiFont, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-                    HStack(spacing: 4) {
-                        Circle().fill(statusColor).frame(width: 6, height: 6)
-                        Text(status)
-                            .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
-                            .foregroundStyle(.secondary)
+            if showsHeader {
+                TerminalHeaderBar(onSettings: {}) {
+                    VStack(spacing: 1) {
+                        Text(tab.name)
+                            .font(.system(size: uiFont, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Circle().fill(statusColor).frame(width: 6, height: 6)
+                            Text(status)
+                                .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(maxWidth: 220)
+                } trailing: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
                 }
-                .frame(maxWidth: 220)
-            } trailing: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
             }
             Spacer(minLength: 0)
         }
@@ -775,6 +1819,7 @@ private struct TerminalChatForwardPlaceholder: View {
 
 private struct TerminalProjectsBackPreview: View {
     let rows: [CTProjectRowSnapshot]
+    var showsHeader = true
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -785,32 +1830,46 @@ private struct TerminalProjectsBackPreview: View {
         // commits its header back. The gear/trailing here are decorative — the
         // whole preview is allowsHitTesting(false).
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: {}) {
-                TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
-            } trailing: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
-            }
-            ScrollView {
-                VStack(spacing: 9) {
-                    ForEach(rows) { row in
-                        TerminalProjectRow(project: row.project, uiFont: uiFont, activity: row.activity, animatedBadge: false)
-                            .equatable()
-                    }
+            if showsHeader {
+                TerminalHeaderBar(onSettings: {}) {
+                    TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
+                } trailing: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
-                .padding(.bottom, 120)
             }
+            TerminalProjectsPreviewList(rows: rows, uiFont: uiFont, bottomPadding: 120)
         }
         .background(CTPageBackground)
         .allowsHitTesting(false)
     }
 }
 
+private struct TerminalProjectsPreviewList: View {
+    let rows: [CTProjectRowSnapshot]
+    let uiFont: Double
+    let bottomPadding: CGFloat
+
+    var body: some View {
+        VStack(spacing: 9) {
+            ForEach(rows) { row in
+                TerminalProjectRow(project: row.project, uiFont: uiFont, activity: row.activity, animatedBadge: false)
+                    .equatable()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, bottomPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
+    }
+}
+
 private enum TerminalTabsPreviewStyle {
     case full
     case lightweight
+    case skeleton
 }
 
 private struct TerminalTabsBackPreview: View {
@@ -820,6 +1879,7 @@ private struct TerminalTabsBackPreview: View {
     // TerminalProjectTabsView level without reading @Observable state mid-slide.
     var projectName: String = ""
     var style: TerminalTabsPreviewStyle = .full
+    var showsHeader = true
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -828,20 +1888,24 @@ private struct TerminalTabsBackPreview: View {
         // projects preview note — a headerless snapshot makes the header flicker
         // and the rows jump during the slide).
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: {}) {
-                TerminalHeaderTitle(title: projectName, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
-            } trailing: {
-                if style == .lightweight {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 38, height: 38)
-                } else {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+            if showsHeader {
+                TerminalHeaderBar(onSettings: {}) {
+                    TerminalHeaderTitle(title: projectName, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
+                } trailing: {
+                    if style == .lightweight {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 38, height: 38)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+                    }
                 }
             }
-            if style == .lightweight {
+            if style == .skeleton {
+                TerminalTabsSkeletonList(count: tabs.count, uiFont: uiFont, bottomPadding: 120)
+            } else if style == .lightweight {
                 TerminalTabsPreviewList(tabs: tabs, marker: marker, uiFont: uiFont, bottomPadding: 120)
             } else {
                 ScrollView {
@@ -859,6 +1923,77 @@ private struct TerminalTabsBackPreview: View {
         }
         .background(CTPageBackground)
         .allowsHitTesting(false)
+    }
+}
+
+private struct TerminalTabsSkeletonList: View {
+    let count: Int
+    let uiFont: Double
+    let bottomPadding: CGFloat
+
+    private var rowCount: Int {
+        min(max(count, 3), 18)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(0..<rowCount, id: \.self) { index in
+                TerminalTabSkeletonRow(uiFont: uiFont, variant: index % 4)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, bottomPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct TerminalTabSkeletonRow: View, Equatable {
+    let uiFont: Double
+    let variant: Int
+
+    nonisolated static func == (lhs: TerminalTabSkeletonRow, rhs: TerminalTabSkeletonRow) -> Bool {
+        lhs.uiFont == rhs.uiFont && lhs.variant == rhs.variant
+    }
+
+    private var titleWidth: CGFloat {
+        [154, 118, 178, 136][variant % 4]
+    }
+
+    private var pathWidth: CGFloat {
+        [230, 198, 256, 174][variant % 4]
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.white.opacity(0.11))
+                .frame(width: 26, height: 26)
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(Color.white.opacity(0.16))
+                        .frame(width: 8, height: 8)
+                    Capsule()
+                        .fill(Color.white.opacity(0.17))
+                        .frame(width: titleWidth, height: max(10, uiFont - 3))
+                }
+                Capsule()
+                    .fill(Color.white.opacity(0.10))
+                    .frame(width: pathWidth, height: max(8, uiFont - 5))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Circle()
+                .fill(Color.white.opacity(0.14))
+                .frame(width: 8, height: 8)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.white.opacity(0.055)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.white.opacity(0.055)))
     }
 }
 
@@ -905,13 +2040,7 @@ private struct TerminalTabPreviewRow: View, Equatable {
 
     var body: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle().fill(agentAccent(tab.effectiveToolType).opacity(0.16))
-                Image(systemName: tab.isCodexPTY ? "chevron.left.forwardslash.chevron.right" : "terminal")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(agentAccent(tab.effectiveToolType).opacity(0.86))
-            }
-            .frame(width: 26, height: 26)
+            AgentIconView(toolType: tab.effectiveToolType, size: 26)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
@@ -959,6 +2088,260 @@ private enum TerminalBackPreviewSnapshot {
         case .tabs(let t, _, _): return t.isEmpty
         }
     }
+
+    var bitmapSurface: TerminalBitmapSurface? {
+        switch self {
+        case .none:
+            return nil
+        case .projects(let rows):
+            return .projects(rows)
+        case .tabs(let tabs, let marker, let name):
+            return .tabs(tabs, marker, name)
+        }
+    }
+}
+
+private enum TerminalOutgoingSnapshot {
+    case none
+    case chat(CTTabInfo)
+}
+
+private enum TerminalBitmapSurface {
+    case projects([CTProjectRowSnapshot])
+    case tabs([CTTabInfo], CTStatusMarker, String)
+    case chatPlaceholder(CTTabInfo)
+}
+
+private struct TerminalBitmapTransitionState {
+    enum Mode: Equatable {
+        case forward
+        case back
+        case hold
+    }
+
+    var mode: Mode
+    var source: UIImage
+    var destination: UIImage
+    var offset: CGFloat
+    let size: CGSize
+}
+
+private enum TerminalBitmapAnimationCurve {
+    case linear
+    case easeOut
+
+    var options: UIView.AnimationOptions {
+        switch self {
+        case .linear: return .curveLinear
+        case .easeOut: return .curveEaseOut
+        }
+    }
+}
+
+private final class TerminalBitmapTransitionHostView: UIView {
+    private let destinationView = UIImageView()
+    private let sourceView = UIImageView()
+    private let edgeLayer = CAGradientLayer()
+    private var currentMode: TerminalBitmapTransitionState.Mode = .hold
+    private var currentOffset: CGFloat = 0
+    private var currentSize: CGSize = .zero
+    private var isInteractiveTracking = false
+    private(set) var isBitmapAnimating = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        clipsToBounds = true
+        isHidden = true
+        backgroundColor = UIColor(white: 0.055, alpha: 1)
+
+        [destinationView, sourceView].forEach { imageView in
+            imageView.contentMode = .scaleToFill
+            imageView.clipsToBounds = true
+            imageView.isUserInteractionEnabled = false
+            addSubview(imageView)
+        }
+
+        edgeLayer.colors = [
+            UIColor.black.withAlphaComponent(0.28).cgColor,
+            UIColor.black.withAlphaComponent(0).cgColor
+        ]
+        edgeLayer.startPoint = CGPoint(x: 1, y: 0.5)
+        edgeLayer.endPoint = CGPoint(x: 0, y: 0.5)
+        layer.addSublayer(edgeLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(_ state: TerminalBitmapTransitionState?) {
+        guard let state else {
+            isHidden = true
+            isBitmapAnimating = false
+            layer.removeAllAnimations()
+            sourceView.layer.removeAllAnimations()
+            destinationView.layer.removeAllAnimations()
+            sourceView.image = nil
+            destinationView.image = nil
+            edgeLayer.isHidden = true
+            currentOffset = 0
+            currentMode = .hold
+            isInteractiveTracking = false
+            return
+        }
+
+        isHidden = false
+        currentSize = state.size
+        let replacesImages = sourceView.image !== state.source || destinationView.image !== state.destination
+        if destinationView.image !== state.destination {
+            destinationView.image = state.destination
+        }
+        if sourceView.image !== state.source {
+            sourceView.image = state.source
+        }
+        setNeedsLayout()
+        layoutIfNeeded()
+        if replacesImages || currentMode != state.mode {
+            isInteractiveTracking = false
+        }
+        if !isBitmapAnimating {
+            if isInteractiveTracking, !replacesImages, currentMode == state.mode {
+                apply(offset: currentOffset, mode: state.mode)
+            } else {
+                apply(offset: state.offset, mode: state.mode)
+            }
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        destinationView.frame = bounds
+        sourceView.frame = bounds
+        apply(offset: currentOffset, mode: currentMode)
+    }
+
+    func animate(
+        to targetOffset: CGFloat,
+        mode: TerminalBitmapTransitionState.Mode,
+        duration: TimeInterval,
+        curve: TerminalBitmapAnimationCurve,
+        completion: @escaping (Bool) -> Void
+    ) {
+        isBitmapAnimating = true
+        isInteractiveTracking = false
+        layoutIfNeeded()
+        UIView.animate(
+            withDuration: duration,
+            delay: 0,
+            options: [curve.options, .beginFromCurrentState, .allowUserInteraction],
+            animations: {
+                self.apply(offset: targetOffset, mode: mode)
+            },
+            completion: { finished in
+                self.isBitmapAnimating = false
+                self.apply(offset: targetOffset, mode: mode)
+                completion(finished)
+            }
+        )
+    }
+
+    func setInteractiveOffset(_ offset: CGFloat, mode: TerminalBitmapTransitionState.Mode) {
+        guard !isHidden else { return }
+        isInteractiveTracking = true
+        layer.removeAllAnimations()
+        sourceView.layer.removeAllAnimations()
+        destinationView.layer.removeAllAnimations()
+        apply(offset: offset, mode: mode)
+    }
+
+    private func apply(offset: CGFloat, mode: TerminalBitmapTransitionState.Mode) {
+        currentOffset = offset
+        currentMode = mode
+        let width = max(1, bounds.width > 1 ? bounds.width : currentSize.width)
+        let progress: CGFloat
+        switch mode {
+        case .forward:
+            progress = 1 - min(1, max(0, offset / width))
+        case .back:
+            progress = min(1, max(0, offset / width))
+        case .hold:
+            progress = 1
+        }
+
+        let sourceOffset: CGFloat
+        let destinationOffset: CGFloat
+        switch mode {
+        case .forward:
+            // Push: destination slides OVER the source, while source parallax-shifts
+            // slightly behind it. If source stays on top, the user sees only the old
+            // projects page twitch and then jump to tabs at commit.
+            bringSubviewToFront(destinationView)
+            sourceOffset = -min(48, width * 0.12) * progress
+            destinationOffset = offset
+        case .back:
+            // Back: current source page follows the finger to the right, revealing
+            // the destination underneath.
+            bringSubviewToFront(sourceView)
+            sourceOffset = offset
+            destinationOffset = -min(72, width * 0.22) * (1 - progress)
+        case .hold:
+            bringSubviewToFront(sourceView)
+            sourceOffset = 0
+            destinationOffset = 0
+        }
+
+        destinationView.transform = CGAffineTransform(translationX: destinationOffset, y: 0)
+        sourceView.transform = CGAffineTransform(translationX: sourceOffset, y: 0)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edgeLayer.isHidden = mode == .hold
+        let shadowX: CGFloat
+        switch mode {
+        case .forward:
+            shadowX = destinationOffset - 18
+        case .back:
+            shadowX = sourceOffset - 18
+        case .hold:
+            shadowX = -18
+        }
+        edgeLayer.frame = CGRect(x: shadowX, y: 0, width: 18, height: bounds.height)
+        CATransaction.commit()
+    }
+}
+
+private struct TerminalBitmapTransitionOverlay: UIViewRepresentable {
+    let state: TerminalBitmapTransitionState?
+    let onResolve: (TerminalBitmapTransitionHostView) -> Void
+
+    func makeUIView(context: Context) -> TerminalBitmapTransitionHostView {
+        TerminalBitmapTransitionHostView()
+    }
+
+    func updateUIView(_ uiView: TerminalBitmapTransitionHostView, context: Context) {
+        uiView.configure(state)
+        DispatchQueue.main.async {
+            onResolve(uiView)
+        }
+    }
+}
+
+private struct TerminalSnapshotHostReader: UIViewRepresentable {
+    let onResolve: (UIView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            onResolve(uiView)
+        }
+    }
 }
 
 private struct TerminalInstallAlert: Identifiable {
@@ -970,6 +2353,8 @@ private struct TerminalInstallAlert: Identifiable {
 private struct TerminalProjectsView: View {
     let onShowHistory: () -> Void
     let interactionsSuspended: Bool
+    let renderSuspended: Bool
+    var showsHeader = true
     let onOpenProject: (CTProject) -> Void
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @EnvironmentObject private var router: TabRouter
@@ -977,42 +2362,41 @@ private struct TerminalProjectsView: View {
     @State private var showBuildInstallConfirm = false
     @State private var installAlert: TerminalInstallAlert?
     @State private var renameTarget: CTProject?
+    @State private var visibleProjectIds: [String] = []
+    @State private var userScrollActive = false
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
-    private var scrollAnchor: Binding<String?> {
-        Binding(
-            get: { store.projectsScrollAnchorId },
-            set: { store.projectsScrollAnchorId = $0 }
-        )
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: { router.openSettings() }) {
-                TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
-            } trailing: {
-                Button {
-                    VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
-                    Task { await prepareBuildInstall() }
-                } label: {
-                    Group {
-                        if store.terminalInstallRunning {
-                            ProgressView().controlSize(.small).tint(.white)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 15, weight: .semibold))
+            if showsHeader {
+                TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                    TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
+                } trailing: {
+                    Button {
+                        VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
+                        Task { await prepareBuildInstall() }
+                    } label: {
+                        Group {
+                            if store.terminalInstallRunning {
+                                ProgressView().controlSize(.small).tint(.white)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
                         }
+                        .ctGlassCircle()
                     }
-                    .ctGlassCircle()
+                    .buttonStyle(.plain)
+                    .disabled(store.terminalInstallRunning)
+                    .accessibilityLabel("Run npm install build")
                 }
-                .buttonStyle(.plain)
-                .disabled(store.terminalInstallRunning)
-                .accessibilityLabel("Run npm install build")
             }
         ZStack {
             CTPageBackground.ignoresSafeArea()
-            if store.loadingProjects && store.projects.isEmpty {
+            if store.offline && store.projects.isEmpty {
+                TerminalOfflineView(message: store.lastError, retry: { Task { await store.refreshProjects() } })
+            } else if store.loadingProjects && store.projects.isEmpty {
                 VStack(spacing: 10) {
                     ProgressView().tint(.white)
                     Text("Загрузка проектов…").font(.system(size: uiFont - 1)).foregroundStyle(.secondary)
@@ -1020,48 +2404,7 @@ private struct TerminalProjectsView: View {
             } else if store.offline {
                 TerminalOfflineView(message: store.lastError, retry: { Task { await store.refreshProjects() } })
             } else {
-                ScrollView {
-                    // Plain VStack: 9 cheap rows, no laziness needed; avoids the
-                    // lazy viewport recompute under the slide .offset (iOS 26).
-                    VStack(spacing: 9) {
-                        ForEach(store.projects) { project in
-                            Button {
-                                guard !interactionsSuspended else { return }
-                                onOpenProject(project)
-                            } label: {
-                                TerminalProjectRow(
-                                    project: project,
-                                    uiFont: uiFont,
-                                    activity: store.activitySummary(projectId: project.id)
-                                )
-                                .equatable()
-                            }
-                            .buttonStyle(.plain)
-                            .allowsHitTesting(!interactionsSuspended)
-                            // Standard long-press: native contextMenu (lift/scale +
-                            // haptic + dropdown). Rename → PATCH on Mac (custom-terminal
-                            // project:save-metadata); Copy name / path for convenience.
-                            .contextMenu {
-                                Button { renameTarget = project } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                                Button { UIPasteboard.general.string = project.name } label: {
-                                    Label("Copy name", systemImage: "doc.on.doc")
-                                }
-                                Button { UIPasteboard.general.string = project.path } label: {
-                                    Label("Copy path", systemImage: "folder")
-                                }
-                            }
-                            .id(project.id)
-                        }
-                    }
-                    .scrollTargetLayout()
-                    .padding(.horizontal, 10)
-                    .padding(.top, 10)
-                    .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
-                }
-                .scrollPosition(id: scrollAnchor)
-                .refreshable { await store.refreshProjects() }
+                terminalProjectsList(animatedBadge: !renderSuspended, fullControls: true)
             }
         }
         }
@@ -1151,6 +2494,101 @@ private struct TerminalProjectsView: View {
             return localized
         }
         return error.localizedDescription
+    }
+
+    private func terminalProjectsList(animatedBadge: Bool, fullControls: Bool) -> some View {
+        ScrollView {
+            // Plain VStack: 9 cheap rows, no laziness needed; avoids the lazy
+            // viewport recompute under the slide .offset (iOS 26). Do not bind
+            // live `.scrollPosition` here: setting it on tap/API refresh turns
+            // into a programmatic scroll command and resets the list.
+            VStack(spacing: 9) {
+                ForEach(store.projects) { project in
+                    Button {
+                        guard !interactionsSuspended else { return }
+                        onOpenProject(project)
+                    } label: {
+                        TerminalProjectRow(
+                            project: project,
+                            uiFont: uiFont,
+                            activity: store.activitySummary(projectId: project.id),
+                            animatedBadge: animatedBadge
+                        )
+                        .equatable()
+                    }
+                    .buttonStyle(.plain)
+                    .allowsHitTesting(!interactionsSuspended)
+                    .modifier(TerminalProjectContextMenuModifier(project: project, enabled: fullControls) { selected in
+                        renameTarget = selected
+                    })
+                    .id(project.id)
+                }
+            }
+            .scrollTargetLayout()
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, bottomBarInset + 70)   // clear glass bar
+        }
+        .onScrollTargetVisibilityChange(idType: String.self) { visibleIds in
+            visibleProjectIds = visibleIds
+        }
+        .onScrollPhaseChange { _, newPhase in
+            let active = newPhase == .tracking || newPhase == .interacting || newPhase == .decelerating
+            if active {
+                userScrollActive = true
+            } else if userScrollActive {
+                userScrollActive = false
+                commitProjectsScrollAnchor(reason: "idle")
+            }
+        }
+        .modifier(TerminalProjectsRefreshModifier(enabled: fullControls, store: store))
+    }
+
+    private func commitProjectsScrollAnchor(reason: String) {
+        guard !interactionsSuspended, let anchor = visibleProjectIds.first else { return }
+        if store.projectsScrollAnchorId != anchor {
+            VCLog.log("TerminalScroll", "projects anchor \(reason) id=\(String(anchor.suffix(8)))")
+            store.projectsScrollAnchorId = anchor
+        }
+    }
+}
+
+private struct TerminalProjectContextMenuModifier: ViewModifier {
+    let project: CTProject
+    let enabled: Bool
+    let onRename: (CTProject) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.contextMenu {
+                Button { onRename(project) } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button { UIPasteboard.general.string = project.name } label: {
+                    Label("Copy name", systemImage: "doc.on.doc")
+                }
+                Button { UIPasteboard.general.string = project.path } label: {
+                    Label("Copy path", systemImage: "folder")
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct TerminalProjectsRefreshModifier: ViewModifier {
+    let enabled: Bool
+    let store: TerminalControlStore
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.refreshable { await store.refreshProjects() }
+        } else {
+            content
+        }
     }
 }
 
@@ -1270,40 +2708,34 @@ private struct TerminalProjectTabsView: View {
     let project: CTProject
     let onShowHistory: () -> Void
     let interactionsSuspended: Bool
+    let renderSuspended: Bool
+    var showsHeader = true
     let onOpenTab: (CTTabInfo) -> Void
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @EnvironmentObject private var router: TabRouter
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showNewTerminal = false
     @State private var renameTarget: CTTabInfo?
+    @State private var visibleTabIds: [String] = []
+    @State private var restoredTabsProjectId: String?
+    @State private var userScrollActive = false
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
     private var tabs: [CTTabInfo] { store.tabsByProject[project.id] ?? [] }
     private var marker: CTStatusMarker { store.statusMarkerByProject[project.id] ?? .fallback }
 
-    private var scrollAnchor: Binding<String?> {
-        Binding(
-            get: { store.tabsScrollAnchorByProject[project.id] },
-            set: { value in
-                if let value {
-                    store.tabsScrollAnchorByProject[project.id] = value
-                } else {
-                    store.tabsScrollAnchorByProject.removeValue(forKey: project.id)
-                }
-            }
-        )
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: { router.openSettings() }) {
-                TerminalHeaderTitle(title: project.name, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
-            } trailing: {
-                Button { Task { await store.loadTabs(projectId: project.id) } } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+            if showsHeader {
+                TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                    TerminalHeaderTitle(title: project.name, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
+                } trailing: {
+                    Button { Task { await store.loadTabs(projectId: project.id) } } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         ZStack {
             CTPageBackground.ignoresSafeArea()
@@ -1313,47 +2745,7 @@ private struct TerminalProjectTabsView: View {
                     Text("Загрузка вкладок…").font(.system(size: uiFont - 1)).foregroundStyle(.secondary)
                 }
             } else {
-                if interactionsSuspended {
-                    TerminalTabsPreviewList(tabs: tabs, marker: marker, uiFont: uiFont, bottomPadding: bottomBarInset + 70)
-                } else {
-                    ScrollView {
-                        // Plain VStack (not Lazy): ≤~12 cheap rows. Lazy viewport/offset
-                        // estimation is exactly what an ancestor .offset slide perturbs
-                        // on iOS 26 (research June 2026) — using VStack removes that
-                        // per-frame recompute during the push/back animation.
-                        VStack(spacing: 8) {
-                            ForEach(tabs) { tab in
-                                Button {
-                                    guard tab.isInteractiveAI else { return }
-                                    onOpenTab(tab)
-                                } label: {
-                                    TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker, animated: true)
-                                        .equatable()
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!tab.isInteractiveAI)
-                                .opacity(tab.isInteractiveAI ? 1 : 0.55)
-                                // Standard long-press: native contextMenu (lift/scale +
-                                // haptic + dropdown). Rename works for ANY open tab.
-                                .contextMenu {
-                                    Button { renameTarget = tab } label: {
-                                        Label("Rename", systemImage: "pencil")
-                                    }
-                                    Button { UIPasteboard.general.string = tab.name } label: {
-                                        Label("Copy name", systemImage: "doc.on.doc")
-                                    }
-                                }
-                                .id(tab.tabId ?? tab.id)
-                            }
-                        }
-                        .scrollTargetLayout()
-                        .padding(.horizontal, 10)
-                        .padding(.top, 10)
-                        .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
-                    }
-                    .scrollPosition(id: scrollAnchor)
-                    .refreshable { await store.loadTabs(projectId: project.id) }
-                }
+                terminalTabsList(animatedRows: !renderSuspended, fullControls: true)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -1378,6 +2770,128 @@ private struct TerminalProjectTabsView: View {
             CTRenameSheet(title: "Rename tab", label: "Tab name", initialName: tab.name) { newName in
                 store.renameTab(tab, to: newName, projectId: project.id)
             }
+        }
+    }
+
+    private func terminalTabsList(animatedRows: Bool, fullControls: Bool) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                // Plain VStack (not Lazy): ≤~12 cheap rows. A live
+                // `.scrollPosition` binding is intentionally avoided: status
+                // refreshes and taps must not issue hidden scroll commands while
+                // the user is flick-scrolling or navigating.
+                VStack(spacing: 8) {
+                    ForEach(tabs) { tab in
+                        Button {
+                            guard tab.isInteractiveAI else { return }
+                            guard !interactionsSuspended else { return }
+                            onOpenTab(tab)
+                        } label: {
+                            TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker, animated: animatedRows)
+                                .equatable()
+                        }
+                        .buttonStyle(.plain)
+                        .allowsHitTesting(!interactionsSuspended)
+                        .disabled(!tab.isInteractiveAI)
+                        .opacity(tab.isInteractiveAI ? 1 : 0.55)
+                        .modifier(TerminalTabContextMenuModifier(tab: tab, enabled: fullControls) { selected in
+                            renameTarget = selected
+                        })
+                        .id(tab.tabId ?? tab.id)
+                    }
+                }
+                .scrollTargetLayout()
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
+            }
+            .onAppear {
+                restoreTabsScrollIfNeeded(proxy, projectId: project.id)
+            }
+            .onChange(of: project.id) { _, newProjectId in
+                restoredTabsProjectId = nil
+                visibleTabIds = []
+                userScrollActive = false
+                restoreTabsScrollIfNeeded(proxy, projectId: newProjectId)
+            }
+            .onScrollTargetVisibilityChange(idType: String.self) { visibleIds in
+                visibleTabIds = visibleIds
+            }
+            .onScrollPhaseChange { _, newPhase in
+                let active = newPhase == .tracking || newPhase == .interacting || newPhase == .decelerating
+                if active {
+                    userScrollActive = true
+                } else if userScrollActive {
+                    userScrollActive = false
+                    commitTabsScrollAnchor(reason: "idle")
+                }
+            }
+            .modifier(TerminalTabsRefreshModifier(enabled: fullControls, projectId: project.id, store: store))
+        }
+    }
+
+    private func commitTabsScrollAnchor(reason: String) {
+        guard !interactionsSuspended, let anchor = visibleTabIds.first else { return }
+        if store.tabsScrollAnchorByProject[project.id] != anchor {
+            VCLog.log("TerminalScroll", "tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(anchor.suffix(8)))")
+            store.tabsScrollAnchorByProject[project.id] = anchor
+        }
+    }
+
+    private func restoreTabsScrollIfNeeded(_ proxy: ScrollViewProxy, projectId: String) {
+        guard store.selectedProject?.id == projectId,
+              store.selectedTab == nil,
+              !interactionsSuspended,
+              restoredTabsProjectId != projectId
+        else { return }
+        let rowIds = tabs.map { $0.tabId ?? $0.id }
+        guard !rowIds.isEmpty else { return }
+        guard let savedAnchor = store.tabsScrollAnchorByProject[projectId],
+              rowIds.contains(savedAnchor)
+        else { return }
+        let target = savedAnchor
+        restoredTabsProjectId = projectId
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(target, anchor: .top)
+            VCLog.log("TerminalScroll", "tabs restore project=\(String(projectId.suffix(8))) tab=\(String(target.suffix(8)))")
+        }
+    }
+}
+
+private struct TerminalTabContextMenuModifier: ViewModifier {
+    let tab: CTTabInfo
+    let enabled: Bool
+    let onRename: (CTTabInfo) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.contextMenu {
+                Button { onRename(tab) } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button { UIPasteboard.general.string = tab.name } label: {
+                    Label("Copy name", systemImage: "doc.on.doc")
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct TerminalTabsRefreshModifier: ViewModifier {
+    let enabled: Bool
+    let projectId: String
+    let store: TerminalControlStore
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.refreshable { await store.loadTabs(projectId: projectId) }
+        } else {
+            content
         }
     }
 }
@@ -1635,10 +3149,36 @@ private func tabRowBackground(_ color: String?, selected: Bool, busy: Bool, isCo
     }
 }
 
+private struct TerminalScrollMetrics: Equatable {
+    static let zero = TerminalScrollMetrics(offsetY: 0, contentHeight: 0, containerHeight: 0)
+
+    let offsetY: CGFloat
+    let contentHeight: CGFloat
+    let containerHeight: CGFloat
+
+    var scrollableHeight: CGFloat {
+        max(0, contentHeight - containerHeight)
+    }
+
+    var distFromBottom: CGFloat {
+        contentHeight - containerHeight - offsetY
+    }
+
+    var bottomRatio: Double {
+        guard scrollableHeight > 1 else { return 1 }
+        return Double(offsetY / scrollableHeight)
+    }
+
+    var logSummary: String {
+        "off=\(Int(offsetY)) content=\(Int(contentHeight)) container=\(Int(containerHeight)) dist=\(Int(distFromBottom)) ratio=\(String(format: "%.2f", bottomRatio))"
+    }
+}
+
 private struct TerminalChatDetailView: View {
     let tab: CTTabInfo
     let onShowHistory: () -> Void
     var onComposerFocusChange: (Bool) -> Void = { _ in }
+    var showsHeader = true
 
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @ObservedObject private var voiceStore = VoiceChatStore.shared
@@ -1657,7 +3197,11 @@ private struct TerminalChatDetailView: View {
     @State private var localSending = false
     @State private var followBottom = true
     @State private var userTouching = false
+    @State private var userScrollIntent = false
     @State private var distFromBottom: CGFloat = 0
+    @State private var scrollMetrics: TerminalScrollMetrics = .zero
+    @State private var lastScrollLogAt = Date.distantPast
+    @State private var lastDriftPinAt = Date.distantPast
     // Auto-send arming (see ComposerSendButton). Armed → purple spinner on the
     // send button; the next dictation insert auto-submits instead of just
     // landing in the field.
@@ -1732,13 +3276,15 @@ private struct TerminalChatDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TerminalHeaderBar(onSettings: { router.openSettings() }) {
-                chatHeaderCenter
-            } trailing: {
-                Button { Task { await store.loadHistory(tabId: tabId) } } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+            if showsHeader {
+                TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                    chatHeaderCenter
+                } trailing: {
+                    Button { Task { await store.loadHistory(tabId: tabId) } } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         ZStack {
             CTPageBackground.ignoresSafeArea()
@@ -1768,18 +3314,24 @@ private struct TerminalChatDetailView: View {
                     }
                     .defaultScrollAnchor(.bottom)
                     .scrollDismissesKeyboard(.interactively)
-                    .onScrollPhaseChange { _, newPhase in
+                    .onScrollPhaseChange { oldPhase, newPhase in
+                        let userDriven = newPhase == .tracking || newPhase == .interacting || newPhase == .decelerating
                         userTouching = (newPhase == .tracking || newPhase == .interacting)
-                        if userTouching && distFromBottom > 120 { followBottom = false }
+                        userScrollIntent = userDriven
+                        if userDriven && distFromBottom > 120 { followBottom = false }
+                        logScroll(
+                            "phase \(String(describing: oldPhase))->\(String(describing: newPhase))",
+                            force: true
+                        )
                     }
-                    .onScrollGeometryChange(for: CGFloat.self) { geo in
-                        geo.contentSize.height - geo.containerSize.height - geo.contentOffset.y
-                    } action: { _, dist in
-                        distFromBottom = dist
-                        if userTouching {
-                            if dist > 120 { followBottom = false }
-                            else if dist <= 60 { followBottom = true }
-                        }
+                    .onScrollGeometryChange(for: TerminalScrollMetrics.self) { geo in
+                        TerminalScrollMetrics(
+                            offsetY: geo.contentOffset.y,
+                            contentHeight: geo.contentSize.height,
+                            containerHeight: geo.containerSize.height
+                        )
+                    } action: { oldMetrics, newMetrics in
+                        updateScrollMetrics(old: oldMetrics, new: newMetrics, proxy: proxy)
                     }
                 }
                 .overlay(alignment: .topTrailing) {
@@ -1802,15 +3354,18 @@ private struct TerminalChatDetailView: View {
                         .offset(y: -keyboardOverlap)
                         .animation(keyboardLiftAnim, value: keyboardOverlap)
                 }
-                .onChange(of: entries.count) { _, _ in pin(proxy) }
-                .onChange(of: busy) { _, _ in pin(proxy) }
+                .onChange(of: entries.count) { _, _ in pin(proxy, reason: "entries") }
+                .onChange(of: busy) { _, _ in pin(proxy, reason: "busy") }
                 // Streaming follow-bottom: the reducer grows the assistant/thinking
                 // answer by mutating the tail entry's `text` IN PLACE, so
                 // entries.count stays stable while a single answer streams. Pin on
                 // the tail entry's char count too, otherwise auto-scroll only fires
                 // when a NEW entry is appended and freezes mid-answer. pin() is gated
                 // by the followBottom intent, so a user who scrolled up is not yanked.
-                .onChange(of: entries.last?.text.count ?? 0) { _, _ in pin(proxy) }
+                .onChange(of: entries.last?.text.count ?? 0) { _, _ in pin(proxy, reason: "tail") }
+                .onChange(of: keyboardOverlap) { oldValue, newValue in
+                    logScroll("keyboard old=\(Int(oldValue)) new=\(Int(newValue))", force: true)
+                }
             }
         }
         }
@@ -1833,6 +3388,15 @@ private struct TerminalChatDetailView: View {
             guard !tabId.isEmpty else { return }
             guard store.selectedTab?.tabId == tabId else {
                 VCLog.log("TerminalSSE", "task(id:) skip activate — transient copy tab=\(tabId.suffix(6))")
+                return
+            }
+            await store.awaitTerminalActivationWindow(tabId: tabId)
+            guard !Task.isCancelled else {
+                VCLog.log("TerminalSSE", "task(id:) cancelled before activate tab=\(tabId.suffix(6))")
+                return
+            }
+            guard store.selectedTab?.tabId == tabId else {
+                VCLog.log("TerminalSSE", "task(id:) skip activate after quiet wait — tab changed tab=\(tabId.suffix(6))")
                 return
             }
             VCLog.log("TerminalSSE", "task(id:) activate begin tab=\(tabId.suffix(6))")
@@ -1944,8 +3508,83 @@ private struct TerminalChatDetailView: View {
         }
     }
 
-    private func pin(_ proxy: ScrollViewProxy) {
-        guard followBottom else { return }
+    private func updateScrollMetrics(old: TerminalScrollMetrics, new: TerminalScrollMetrics, proxy: ScrollViewProxy) {
+        let wasFollowing = followBottom
+        scrollMetrics = new
+        distFromBottom = new.distFromBottom
+        if new.scrollableHeight > 1, new.distFromBottom < -90 {
+            let now = Date()
+            if now.timeIntervalSince(lastDriftPinAt) * 1000 > 220 {
+                lastDriftPinAt = now
+                followBottom = true
+                logScroll("overscroll-clamp re-pin", force: true)
+                pin(proxy, reason: "overscroll-clamp")
+            }
+        }
+        if userTouching || userScrollIntent {
+            if new.distFromBottom > 120 { followBottom = false }
+            else if new.distFromBottom <= 60 { followBottom = true }
+        }
+        logScrollGeometryIfNeeded(old: old, new: new, followChanged: wasFollowing != followBottom)
+
+        // During streaming the user reports a blank area and the content only comes
+        // back after a manual scroll. If SwiftUI drifts away from bottom while the
+        // follow intent is still armed and the user is not touching the list, re-pin
+        // once per short window and log it. This is intentionally gated to streaming
+        // / busy periods so ordinary reading position is not fought.
+        let driftedWhileFollowing = !userTouching
+            && !userScrollIntent
+            && followBottom
+            && busy
+            && new.scrollableHeight > 1
+            && (new.distFromBottom > 140 || new.distFromBottom < -90)
+        if driftedWhileFollowing {
+            let now = Date()
+            if now.timeIntervalSince(lastDriftPinAt) * 1000 > 350 {
+                lastDriftPinAt = now
+                logScroll("geometry-drift re-pin", force: true)
+                pin(proxy, reason: "geometry-drift")
+            }
+        }
+    }
+
+    private func logScrollGeometryIfNeeded(old: TerminalScrollMetrics, new: TerminalScrollMetrics, followChanged: Bool) {
+        let distDelta = abs(new.distFromBottom - old.distFromBottom)
+        let offsetDelta = abs(new.offsetY - old.offsetY)
+        let contentDelta = abs(new.contentHeight - old.contentHeight)
+        let suspicious = new.distFromBottom < -80
+            || (!userTouching && !userScrollIntent && followBottom && new.distFromBottom > 120)
+        let shouldLog = followChanged
+            || suspicious
+            || distDelta > 90
+            || offsetDelta > 90
+            || contentDelta > 80
+        guard shouldLog else { return }
+        let now = Date()
+        guard suspicious || followChanged || now.timeIntervalSince(lastScrollLogAt) * 1000 > 450 else { return }
+        lastScrollLogAt = now
+        VCLog.log(
+            "TerminalScroll",
+            "geom tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) dOff=\(Int(new.offsetY - old.offsetY)) dContent=\(Int(new.contentHeight - old.contentHeight)) old[\(old.logSummary)] new[\(new.logSummary)]"
+        )
+    }
+
+    private func logScroll(_ message: String, force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastScrollLogAt) * 1000 > 650 else { return }
+        lastScrollLogAt = now
+        VCLog.log(
+            "TerminalScroll",
+            "\(message) tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) \(scrollMetrics.logSummary)"
+        )
+    }
+
+    private func pin(_ proxy: ScrollViewProxy, reason: String) {
+        guard followBottom else {
+            logScroll("pin skip reason=\(reason)", force: reason != "tail")
+            return
+        }
+        logScroll("pin reason=\(reason)")
         // Pin now + once more after a yield: a row appended in this update isn't
         // measured yet, so the first scrollTo can resolve against stale geometry.
         // The deferred re-pin lands against the materialized row. Both instant
@@ -1953,13 +3592,18 @@ private struct TerminalChatDetailView: View {
         proxy.scrollTo("BOTTOM", anchor: .bottom)
         Task { @MainActor in
             await Task.yield()
-            guard followBottom else { return }
+            guard followBottom else {
+                logScroll("pin skip-after-yield reason=\(reason)", force: reason != "tail")
+                return
+            }
             proxy.scrollTo("BOTTOM", anchor: .bottom)
+            logScroll("pin after-yield reason=\(reason)")
         }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         followBottom = true
+        logScroll("manual-bottom", force: true)
         withAnimation(.easeOut(duration: 0.18)) {
             proxy.scrollTo("BOTTOM", anchor: .bottom)
         }

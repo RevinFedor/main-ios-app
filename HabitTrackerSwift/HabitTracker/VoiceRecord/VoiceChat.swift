@@ -44,6 +44,7 @@ enum VoiceChatConfig {
         static let preset1Think = "voicechat.mobilePreset.1.think"
         static let preset2Model = "voicechat.mobilePreset.2.model"
         static let preset2Think = "voicechat.mobilePreset.2.think"
+        static let developerMode = "voicechat.developerMode"
     }
 
     private static var defaults: UserDefaults? { UserDefaults(suiteName: VoiceRecordConfig.appGroup) }
@@ -100,6 +101,9 @@ enum VoiceChatConfig {
             defaults.set(slot, forKey: Keys.activePreset)
             defaults.set(storedPresetModel(slot), forKey: Keys.model)
             defaults.set(storedPresetThink(slot), forKey: Keys.think)
+        }
+        if defaults.object(forKey: Keys.developerMode) == nil {
+            defaults.set(true, forKey: Keys.developerMode)
         }
         defaults.synchronize()
     }

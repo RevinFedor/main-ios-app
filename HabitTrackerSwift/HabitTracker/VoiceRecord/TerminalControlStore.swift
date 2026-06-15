@@ -61,10 +61,25 @@ struct CTTabInfo: Identifiable, Decodable, Equatable {
     var contextPct: Double?   // last-known context fill %, seed for the header pill
 
     var id: String { tabId ?? name + cwd }
+    static func normalizedAgentType(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let v = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !v.isEmpty else { return nil }
+        if v.contains("codex") { return "codex" }
+        if v.contains("gemini") { return "gemini" }
+        if v.contains("claude") || v.contains("anthropic") { return "claude" }
+        return nil
+    }
+
     var effectiveToolType: String? {
-        if toolType == "codex" || commandType == "codex" || codexSessionId != nil { return "codex" }
-        if toolType == "gemini" || commandType == "gemini" || geminiSessionId != nil { return "gemini" }
-        if toolType == "claude" || commandType == "claude" || claudeSessionId != nil || tabType == "claude-sdk" { return "claude" }
+        if let normalized = Self.normalizedAgentType(toolType) { return normalized }
+        if let normalized = Self.normalizedAgentType(commandType) { return normalized }
+        if let normalized = Self.normalizedAgentType(color) { return normalized }
+        if tabType == "claude-sdk" { return "claude" }
+        if codexSessionId != nil { return "codex" }
+        if geminiSessionId != nil { return "gemini" }
+        if claudeSessionId != nil { return "claude" }
+        if let normalized = Self.normalizedAgentType(name) { return normalized }
         return nil
     }
     var isClaudePTY: Bool { effectiveToolType == "claude" && tabType != "claude-sdk" }
@@ -1140,12 +1155,12 @@ final class TerminalControlStore {
     var tabsScrollAnchorByProject: [String: String] = [:]
     var loadingProjects = false
     var loadingTabs: Set<String> = []
-    // Projects with a /tabs GET in flight. selectProject's deferred reload AND
-    // backToTabs both fire loadTabs for the same project during a rapid burst;
-    // both pass the freshness check before either stamps tabsRefreshedAt, then both
-    // publish when the prefetch window opens → the dual ms=1701/ms=736 publish that
-    // spiked one commit frame. This dedups concurrent loads per project.
+    // Projects with a /tabs GET in flight. Deferred freshness checks can overlap
+    // during rapid navigation; this dedups identical loads so one publish refreshes
+    // the shared cache for everyone.
     @ObservationIgnored private var tabsLoadInFlight: Set<String> = []
+    @ObservationIgnored private var deferredTabsReloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var deferredTabsReloadTokens: [String: UUID] = [:]
     var historyLoading: Set<String> = []
     var offline = false
     var sseConnected = false
@@ -1167,6 +1182,7 @@ final class TerminalControlStore {
     @ObservationIgnored private var activeSSETabId: String?
     @ObservationIgnored private var sseAttemptByTab: [String: Int] = [:]
     @ObservationIgnored private var sseEventSeqByTab: [String: Int] = [:]
+    @ObservationIgnored private var didResetNavigationForCurrentAppLaunch = false
     @ObservationIgnored private var lastProjectsRefreshAt: Date?
     // Per-project freshness stamp for the tabs cache, so selectProject can skip a
     // redundant /tabs reload on a rapid re-visit (the churn that hitched the slide).
@@ -1192,15 +1208,29 @@ final class TerminalControlStore {
     // pure coordination, never read in a view body. Set by the UK gesture layer.
     @ObservationIgnored private(set) var interactionActive = false
     @ObservationIgnored private var interactionEndedAt = Date.distantPast
+    @ObservationIgnored private var interactionSources: Set<String> = []
 
-    func setInteractionActive(_ active: Bool) {
-        interactionActive = active
-        if !active { interactionEndedAt = Date() }
+    func setInteractionActive(_ active: Bool, source: String = "term-nav") {
+        let wasActive = interactionActive
+        if active {
+            interactionSources.insert(source)
+        } else {
+            interactionSources.remove(source)
+        }
+        interactionActive = !interactionSources.isEmpty
+        if wasActive && !interactionActive {
+            interactionEndedAt = Date()
+        }
     }
 
-    // Prefetch waits until interaction has been idle for this long before each
-    // network fetch, so a write never lands on the tail of a settling animation.
-    @ObservationIgnored private let prefetchIdleGraceMs: Double = 250
+    // Prefetch / optional tab refresh waits through the visible settle tail. 250ms
+    // was enough to miss the slide, but logs still showed changed=false /tabs GETs
+    // starting at phaseAge≈250ms inside FrameMonitor's settle window.
+    @ObservationIgnored private let prefetchIdleGraceMs: Double = 1_250
+    // History publish is a much heavier visible write than a cached prefetch:
+    // assigning 100-250 transcript rows can trigger Text layout in the same settle
+    // window as the push animation. Keep it past FrameMonitor's ~1.2s nav window.
+    @ObservationIgnored private let historyPublishIdleGraceMs: Double = 1_250
 
     var canStepBack: Bool {
         selectedTab != nil || selectedProject != nil
@@ -1222,6 +1252,16 @@ final class TerminalControlStore {
         } else if selectedProject != nil {
             backToProjects()
         }
+    }
+
+    func resetNavigationToProjectsOnFirstOpen() {
+        guard !didResetNavigationForCurrentAppLaunch else { return }
+        didResetNavigationForCurrentAppLaunch = true
+        guard selectedProject != nil || selectedTab != nil else { return }
+        VCLog.log("TerminalNav", "reset to projects on first open")
+        selectedProject = nil
+        selectedTab = nil
+        stopLiveChannel()
     }
 
     func consumeRestoredInput(tabId: String) {
@@ -1314,9 +1354,14 @@ final class TerminalControlStore {
         }
         VCLog.log("TerminalCache", "start warm cache cold=\(cold) projects=\(projects.count) host=\(TerminalControlConfig.displayHost()) prefetchTabs=true")
         warmCacheTask = Task { [weak self] in
-            await self?.refreshProjects(showLoader: cold, prefetchTabs: true)
-            await self?.refreshModelCatalog()
-            await MainActor.run { self?.warmCacheTask = nil }
+            guard let self else { return }
+            await self.refreshProjects(showLoader: cold, prefetchTabs: true)
+            if !self.offline {
+                await self.refreshModelCatalog()
+            } else {
+                VCLog.log("TerminalCache", "model catalog skip offline")
+            }
+            await MainActor.run { self.warmCacheTask = nil }
         }
     }
 
@@ -1496,26 +1541,14 @@ final class TerminalControlStore {
                 VCLog.log("TerminalNav", "skip tabs reload (cache fresh) project=\(shortID(project.id)) nav=\(TerminalPerfContext.shared.snapshot())")
                 return
             }
-            // Cached but stale: DEFER the network refresh until the user genuinely
-            // PAUSES navigating, not just a fixed 360ms. During rapid project-to-
-            // project tapping each visit fired a /tabs GET whose ~400ms response
-            // landed in the gap between two slides (interactionActive already false,
-            // next push not yet begun) → it dirtied tabsByProject right as the next
-            // slide's first frame rendered (the `animate=52/50ms` dirtiness). Awaiting
-            // the prefetch window coalesces: the reload fires once, after the burst
-            // settles. The publish is interaction-gated in loadTabs as a second guard.
-            Task {
-                await awaitPrefetchWindow()
-                guard selectedProject?.id == project.id else { return }
-                // Re-check freshness: an earlier deferred reload (or prefetch) for
-                // this project during the burst may have already refreshed it.
-                let stillStale = (tabsRefreshedAt[project.id]).map { Date().timeIntervalSince($0) >= 15 } ?? true
-                guard stillStale else {
-                    VCLog.log("TerminalNav", "deferred reload skip (refreshed during burst) project=\(shortID(project.id))")
-                    return
-                }
-                await loadTabs(projectId: project.id, showLoader: false, updateSelectedProject: true)
-            }
+            // Cached but stale: this is a BACKGROUND freshness check, not something
+            // the transition should pay for. The first pass fixed mid-slide writes,
+            // but logs still showed stale cached projects starting `/tabs` in
+            // `settle` ~500ms after the click (`changed=false`), which the user
+            // felt as "the second project opens with a small delay". Wait for a
+            // longer quiet window; if the user keeps browsing projects, the selected
+            // project / selectedTab guards below cancel this stale refresh.
+            scheduleDeferredTabsReload(projectId: project.id, reason: "selectProject")
         } else {
             Task { await loadTabs(projectId: project.id, showLoader: true, updateSelectedProject: true) }
         }
@@ -1565,7 +1598,7 @@ final class TerminalControlStore {
             let changed: Bool = {
                 guard let existing = tabsByProject[projectId] else { return true }
                 if isVisibleProject {
-                    return existing.map(\.tabId) != r.tabs.map(\.tabId)   // structural only
+                    return existing.map(\.id) != r.tabs.map(\.id)   // structural only, matching row identity
                 }
                 return existing != r.tabs
             }()
@@ -1714,9 +1747,48 @@ final class TerminalControlStore {
     func backToTabs() {
         selectedTab = nil
         stopLiveChannel()
-        if let id = selectedProject?.id {
-            let hasCachedTabs = !(tabsByProject[id]?.isEmpty ?? true)
-            Task { await loadTabs(projectId: id, showLoader: !hasCachedTabs, updateSelectedProject: true) }
+        guard let id = selectedProject?.id else { return }
+        let hasCachedTabs = !(tabsByProject[id]?.isEmpty ?? true)
+        guard hasCachedTabs else {
+            Task { await loadTabs(projectId: id, showLoader: true, updateSelectedProject: true) }
+            return
+        }
+
+        let fresh = (tabsRefreshedAt[id]).map { Date().timeIntervalSince($0) < 15 } ?? false
+        if fresh {
+            VCLog.log("TerminalNav", "backToTabs skip tabs reload (cache fresh) project=\(shortID(id)) nav=\(TerminalPerfContext.shared.snapshot())")
+            return
+        }
+
+        scheduleDeferredTabsReload(projectId: id, reason: "backToTabs")
+    }
+
+    private func scheduleDeferredTabsReload(projectId: String, reason: String) {
+        deferredTabsReloadTasks[projectId]?.cancel()
+        let token = UUID()
+        deferredTabsReloadTokens[projectId] = token
+        deferredTabsReloadTasks[projectId] = Task { [weak self] in
+            guard let self else { return }
+            VCLog.log("TerminalCache", "deferred tabs reload schedule project=\(self.shortID(projectId)) reason=\(reason)")
+            await self.awaitStaleTabsReloadWindow()
+            guard !Task.isCancelled else { return }
+            guard self.deferredTabsReloadTokens[projectId] == token else { return }
+            defer {
+                if self.deferredTabsReloadTokens[projectId] == token {
+                    self.deferredTabsReloadTasks.removeValue(forKey: projectId)
+                    self.deferredTabsReloadTokens.removeValue(forKey: projectId)
+                }
+            }
+            guard self.selectedProject?.id == projectId, self.selectedTab == nil else {
+                VCLog.log("TerminalNav", "deferred reload skip (left tabs level) project=\(self.shortID(projectId))")
+                return
+            }
+            let stillStale = (self.tabsRefreshedAt[projectId]).map { Date().timeIntervalSince($0) >= 15 } ?? true
+            guard stillStale else {
+                VCLog.log("TerminalNav", "deferred reload skip (refreshed during quiet) project=\(self.shortID(projectId))")
+                return
+            }
+            await self.loadTabs(projectId: projectId, showLoader: false, updateSelectedProject: true)
         }
     }
 
@@ -1771,9 +1843,9 @@ final class TerminalControlStore {
             // Even when still selected, if a slide is in flight hold the publish
             // until it settles, so the entries array write doesn't land on the
             // animation (same reason loadTabs defers its publish).
-            if interactionActive || Date().timeIntervalSince(interactionEndedAt) * 1000 < prefetchIdleGraceMs {
+            if interactionActive || Date().timeIntervalSince(interactionEndedAt) * 1000 < historyPublishIdleGraceMs {
                 VCLog.log("TerminalSSE", "history publish WAIT interaction tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs) built=\(built.count) nav=\(TerminalPerfContext.shared.snapshot())")
-                await awaitPrefetchWindow()
+                await awaitHistoryPublishWindow()
                 guard selectedTab?.tabId == tabId else {
                     VCLog.log("TerminalSSE", "history publish DROP after wait (tab no longer selected) tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs) built=\(built.count) nav=\(TerminalPerfContext.shared.snapshot())")
                     historyLoading.remove(tabId)
@@ -1826,12 +1898,15 @@ final class TerminalControlStore {
                 if oldRunning { runningTabs.remove(tabId) }
                 if turnStartedAt[tabId] != nil { turnStartedAt[tabId] = nil }
             }
-            let statusTool = s.toolType ?? s.commandType
+            let statusTool = CTTabInfo.normalizedAgentType(s.toolType ?? s.commandType)
             if let sid = s.sessionId, var tab = selectedTab, tab.tabId == tabId {
                 tab.commandType = s.commandType ?? tab.commandType
                 tab.toolType = s.toolType ?? tab.toolType
-                if statusTool == "codex" {
+                let resolvedTool = statusTool ?? tab.effectiveToolType
+                if resolvedTool == "codex" {
                     tab.codexSessionId = sid
+                } else if resolvedTool == "gemini" {
+                    tab.geminiSessionId = sid
                 } else {
                     tab.claudeSessionId = sid
                 }
@@ -1839,8 +1914,11 @@ final class TerminalControlStore {
                 updateTabInfo(tabId: tabId) { current in
                     current.commandType = s.commandType ?? current.commandType
                     current.toolType = s.toolType ?? current.toolType
-                    if statusTool == "codex" {
+                    let currentTool = statusTool ?? current.effectiveToolType
+                    if currentTool == "codex" {
                         current.codexSessionId = sid
+                    } else if currentTool == "gemini" {
+                        current.geminiSessionId = sid
                     } else {
                         current.claudeSessionId = sid
                     }
@@ -2252,12 +2330,15 @@ final class TerminalControlStore {
                 if oldStatus != "busy" { statusByTab[tabId] = "busy" }
                 if !oldRunning { runningTabs.insert(tabId) }
             }
-            let eventTool = event.toolType ?? event.commandType
+            let eventTool = CTTabInfo.normalizedAgentType(event.toolType ?? event.commandType)
             if let sid = event.sessionId, var tab = selectedTab, tab.tabId == tabId {
                 tab.commandType = event.commandType ?? tab.commandType
                 tab.toolType = event.toolType ?? tab.toolType
-                if eventTool == "codex" {
+                let resolvedTool = eventTool ?? tab.effectiveToolType
+                if resolvedTool == "codex" {
                     tab.codexSessionId = sid
+                } else if resolvedTool == "gemini" {
+                    tab.geminiSessionId = sid
                 } else {
                     tab.claudeSessionId = sid
                 }
@@ -2265,8 +2346,11 @@ final class TerminalControlStore {
                 updateTabInfo(tabId: tabId) { current in
                     current.commandType = event.commandType ?? current.commandType
                     current.toolType = event.toolType ?? current.toolType
-                    if eventTool == "codex" {
+                    let currentTool = eventTool ?? current.effectiveToolType
+                    if currentTool == "codex" {
                         current.codexSessionId = sid
+                    } else if currentTool == "gemini" {
+                        current.geminiSessionId = sid
                     } else {
                         current.claudeSessionId = sid
                     }
@@ -2483,22 +2567,57 @@ final class TerminalControlStore {
     // Suspend the calling prefetch step until the user is NOT interacting and a
     // grace window has passed since the last interaction ended. Polls cheaply
     // (50ms) — this runs on the prefetch task, not main; it only awaits, never
-    // blocks main. Bounded by a max wait so a stuck flag can't stall prefetch
-    // forever.
+    // blocks main. Do NOT timeout into publishing: the 23:53 trace showed a
+    // long-running invisible prefetch hitting the old 4s cap and publishing in
+    // `back from=tabs` settle, recreating the exact hitch this gate exists to
+    // prevent.
     private func awaitPrefetchWindow() async {
-        let maxWaits = 80   // 80 * 50ms = 4s hard cap
         var waits = 0
-        while waits < maxWaits {
+        while true {
+            if Task.isCancelled { return }
             let blocked = interactionActive
                 || Date().timeIntervalSince(interactionEndedAt) * 1000 < prefetchIdleGraceMs
             if !blocked { return }
             if waits == 0 {
                 VCLog.log("TerminalCache", "prefetch park (interaction active)")
+            } else if waits % 80 == 0 {
+                VCLog.log("TerminalCache", "prefetch still parked waits=\(waits)")
             }
             try? await Task.sleep(for: .milliseconds(50))
             waits += 1
         }
-        VCLog.log("TerminalCache", "prefetch park timeout — proceeding")
+    }
+
+    private func awaitHistoryPublishWindow() async {
+        var waits = 0
+        while true {
+            if Task.isCancelled { return }
+            let blocked = interactionActive
+                || Date().timeIntervalSince(interactionEndedAt) * 1000 < historyPublishIdleGraceMs
+            if !blocked { return }
+            if waits == 0 {
+                VCLog.log("TerminalSSE", "history publish park (nav tail)")
+            } else if waits % 80 == 0 {
+                VCLog.log("TerminalSSE", "history publish still parked waits=\(waits)")
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+            waits += 1
+        }
+    }
+
+    func awaitTerminalActivationWindow(tabId: String) async {
+        let blockedNow = interactionActive
+            || Date().timeIntervalSince(interactionEndedAt) * 1000 < historyPublishIdleGraceMs
+        guard blockedNow else { return }
+        VCLog.log("TerminalSSE", "activation wait quiet tab=\(shortID(tabId)) nav=\(TerminalPerfContext.shared.snapshot())")
+        await awaitHistoryPublishWindow()
+        guard !Task.isCancelled else { return }
+        VCLog.log("TerminalSSE", "activation quiet tab=\(shortID(tabId)) nav=\(TerminalPerfContext.shared.snapshot())")
+    }
+
+    private func awaitStaleTabsReloadWindow() async {
+        VCLog.log("TerminalCache", "stale tabs reload wait quiet")
+        await awaitPrefetchWindow()
     }
 
     private func scheduleTabsPrefetch(for loadedProjects: [CTProject]) {
