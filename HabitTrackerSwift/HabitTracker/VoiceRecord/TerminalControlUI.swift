@@ -2498,6 +2498,7 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
         projectsController.apply(
             projects: store.projects,
             activities: Dictionary(uniqueKeysWithValues: store.projects.map { ($0.id, store.activitySummary(projectId: $0.id)) }),
+            loading: store.loadingProjects,
             savedAnchorId: store.projectsScrollAnchorId,
             force: force
         )
@@ -2773,10 +2774,9 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
             VCLog.log("term-swipe", "begin drag level=\(levelLabel(from))")
             beginUIKitNavigation(label: "uikit back from=\(levelLabel(from))", phase: "gesture")
             prepareBackTransition(from: from, to: to)
-            updateBackTransition(translationX: max(translationX, initialBackPreviewOffset(width: width)), width: width)
+            updateBackTransition(translationX: translationX, width: width)
         case .changed:
-            let velocityX = max(0, recognizer.velocity(in: view).x)
-            updateBackTransition(translationX: visualBackTranslation(raw: translationX, velocityX: velocityX, width: width), width: width)
+            updateBackTransition(translationX: translationX, width: width)
         case .ended:
             let velocityX = recognizer.velocity(in: view).x
             let predicted = translationX + max(0, velocityX) * 0.18
@@ -2787,15 +2787,6 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
         default:
             break
         }
-    }
-
-    private func initialBackPreviewOffset(width: CGFloat) -> CGFloat {
-        min(36, width * 0.10)
-    }
-
-    private func visualBackTranslation(raw: CGFloat, velocityX: CGFloat, width: CGFloat) -> CGFloat {
-        let velocityLead = min(width * 0.22, velocityX * 0.06)
-        return min(width, max(raw, raw + velocityLead, initialBackPreviewOffset(width: width)))
     }
 
     private func prepareBackTransition(from: TerminalNavLevel, to: TerminalNavLevel) {
@@ -2944,6 +2935,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
     }
     private var projects: [CTProject] = []
     private var activities: [String: CTActivitySummary] = [:]
+    private var loading = false
     private var snapshotKey = ""
     private var restoredSavedAnchor = false
 
@@ -2957,6 +2949,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
         tableView.contentInsetAdjustmentBehavior = .never
         tableView.estimatedRowHeight = 0
         tableView.register(TerminalUIKitProjectCell.self, forCellReuseIdentifier: TerminalUIKitProjectCell.reuseID)
+        tableView.register(TerminalUIKitProjectSkeletonCell.self, forCellReuseIdentifier: TerminalUIKitProjectSkeletonCell.reuseID)
         tableView.dataSource = self
         tableView.delegate = self
         view.addSubview(tableView)
@@ -2970,7 +2963,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
         updateInsets()
     }
 
-    func apply(projects: [CTProject], activities: [String: CTActivitySummary], savedAnchorId: String?, force: Bool) {
+    func apply(projects: [CTProject], activities: [String: CTActivitySummary], loading: Bool, savedAnchorId: String?, force: Bool) {
         let key = projects.map { project in
             let activity = activities[project.id] ?? CTActivitySummary(count: 0, streaming: false)
             return [
@@ -2981,11 +2974,12 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
                 String(project.hasAwaiting == true),
                 "\(activity.count):\(activity.streaming)"
             ].joined(separator: "|")
-        }.joined(separator: "\n")
+        }.joined(separator: "\n") + "|loading=\(loading)"
         guard force || key != snapshotKey else { return }
         let offset = tableView.contentOffset
         self.projects = projects
         self.activities = activities
+        self.loading = loading
         snapshotKey = key
         tableView.reloadData()
         tableView.layoutIfNeeded()
@@ -2999,7 +2993,8 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        projects.count
+        if loading && projects.isEmpty { return 6 }
+        return projects.count
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
@@ -3007,6 +3002,9 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        if loading && projects.isEmpty {
+            return tableView.dequeueReusableCell(withIdentifier: TerminalUIKitProjectSkeletonCell.reuseID, for: indexPath)
+        }
         let cell = tableView.dequeueReusableCell(withIdentifier: TerminalUIKitProjectCell.reuseID, for: indexPath) as! TerminalUIKitProjectCell
         let project = projects[indexPath.row]
         cell.configure(project: project, activity: activities[project.id] ?? CTActivitySummary(count: 0, streaming: false))
@@ -3091,6 +3089,7 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
         tableView.contentInsetAdjustmentBehavior = .never
         tableView.estimatedRowHeight = 0
         tableView.register(TerminalUIKitTabCell.self, forCellReuseIdentifier: TerminalUIKitTabCell.reuseID)
+        tableView.register(TerminalUIKitTabSkeletonCell.self, forCellReuseIdentifier: TerminalUIKitTabSkeletonCell.reuseID)
         tableView.dataSource = self
         tableView.delegate = self
         let refresh = UIRefreshControl()
@@ -3211,7 +3210,8 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        tabs.count
+        if loading && tabs.isEmpty { return skeletonRowCount }
+        return tabs.count
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
@@ -3219,6 +3219,9 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        if loading && tabs.isEmpty {
+            return tableView.dequeueReusableCell(withIdentifier: TerminalUIKitTabSkeletonCell.reuseID, for: indexPath)
+        }
         let cell = tableView.dequeueReusableCell(withIdentifier: TerminalUIKitTabCell.reuseID, for: indexPath) as! TerminalUIKitTabCell
         let tab = tabs[indexPath.row]
         cell.configure(tab: tab, marker: marker, runtime: runtimeStatus(for: tab), running: isRunning(tab))
@@ -3289,6 +3292,11 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
         newButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -(bottomBarInset + 12)).isActive = true
     }
 
+    private var skeletonRowCount: Int {
+        guard let count = project?.tabCount, count > 0 else { return 6 }
+        return min(max(count, 3), 8)
+    }
+
     @objc private func refreshPulled() {
         guard let project else {
             endRefreshing()
@@ -3310,6 +3318,7 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
     private let titleLabel = UILabel()
     private let pathLabel = UILabel()
     private let metaLabel = UILabel()
+    private let activityRingView = TerminalActivityRingUIView()
     private let activityLabel = UILabel()
     private let awaitingDot = UIView()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
@@ -3332,11 +3341,14 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
         metaLabel.text = meta.joined(separator: "  ")
         awaitingDot.isHidden = project.hasAwaiting != true
         if activity.count > 0 {
+            activityRingView.isHidden = false
+            activityRingView.configure(streaming: activity.streaming, animated: true)
             activityLabel.isHidden = false
-            activityLabel.text = "\(activity.count)"
-            activityLabel.backgroundColor = activity.streaming ? ctUIKitColor(hex: "22c55e", alpha: 0.24) : UIColor.white.withAlphaComponent(0.14)
-            activityLabel.textColor = activity.streaming ? ctUIKitColor(hex: "86efac") : .white
+            activityLabel.text = "\(min(activity.count, 99))"
+            activityLabel.textColor = .white.withAlphaComponent(0.92)
         } else {
+            activityRingView.isHidden = true
+            activityRingView.configure(streaming: false, animated: false)
             activityLabel.isHidden = true
         }
         if let image = ctImageFromDataURL(project.icon) {
@@ -3374,16 +3386,16 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
         pathLabel.lineBreakMode = .byTruncatingMiddle
         metaLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         metaLabel.textColor = UIColor.secondaryLabel.withAlphaComponent(0.75)
-        activityLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        activityRingView.isHidden = true
+        activityLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .bold)
         activityLabel.textAlignment = .center
-        activityLabel.layer.cornerRadius = 8
-        activityLabel.layer.cornerCurve = .continuous
-        activityLabel.clipsToBounds = true
+        activityLabel.backgroundColor = .clear
+        activityLabel.isHidden = true
         awaitingDot.backgroundColor = ctUIKitColor(hex: "a78bfa")
         awaitingDot.layer.cornerRadius = 3.5
         chevron.tintColor = UIColor.secondaryLabel
 
-        [cardView, iconView, titleLabel, pathLabel, metaLabel, activityLabel, awaitingDot, chevron].forEach {
+        [cardView, iconView, titleLabel, pathLabel, metaLabel, activityRingView, activityLabel, awaitingDot, chevron].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
         contentView.addSubview(cardView)
@@ -3391,6 +3403,7 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
         cardView.addSubview(titleLabel)
         cardView.addSubview(pathLabel)
         cardView.addSubview(metaLabel)
+        cardView.addSubview(activityRingView)
         cardView.addSubview(activityLabel)
         cardView.addSubview(awaitingDot)
         cardView.addSubview(chevron)
@@ -3408,12 +3421,16 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
             chevron.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: 12),
             chevron.heightAnchor.constraint(equalToConstant: 16),
-            activityLabel.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -10),
-            activityLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            activityLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 22),
-            activityLabel.heightAnchor.constraint(equalToConstant: 18),
+            activityRingView.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -10),
+            activityRingView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            activityRingView.widthAnchor.constraint(equalToConstant: 22),
+            activityRingView.heightAnchor.constraint(equalToConstant: 22),
+            activityLabel.centerXAnchor.constraint(equalTo: activityRingView.centerXAnchor),
+            activityLabel.centerYAnchor.constraint(equalTo: activityRingView.centerYAnchor),
+            activityLabel.widthAnchor.constraint(equalTo: activityRingView.widthAnchor),
+            activityLabel.heightAnchor.constraint(equalTo: activityRingView.heightAnchor),
             titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 11),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: activityLabel.leadingAnchor, constant: -8),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: activityRingView.leadingAnchor, constant: -8),
             titleLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 11),
             awaitingDot.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
             awaitingDot.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
@@ -3425,6 +3442,88 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
             metaLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             metaLabel.trailingAnchor.constraint(equalTo: pathLabel.trailingAnchor),
             metaLabel.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 5)
+        ])
+    }
+}
+
+private final class TerminalUIKitProjectSkeletonCell: UITableViewCell {
+    static let reuseID = "TerminalUIKitProjectSkeletonCell"
+    private let cardView = UIView()
+    private let iconView = UIView()
+    private let titleBar = UIView()
+    private let pathBar = UIView()
+    private let metaBar = UIView()
+    private let chevronBar = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        build()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func build() {
+        backgroundColor = .clear
+        selectionStyle = .none
+        contentView.backgroundColor = .clear
+
+        cardView.backgroundColor = UIColor.white.withAlphaComponent(0.045)
+        cardView.layer.cornerRadius = 12
+        cardView.layer.cornerCurve = .continuous
+        cardView.layer.borderWidth = 1 / UIScreen.main.scale
+        cardView.layer.borderColor = UIColor.white.withAlphaComponent(0.055).cgColor
+
+        iconView.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+        iconView.layer.cornerRadius = 9
+        iconView.layer.cornerCurve = .continuous
+
+        for bar in [titleBar, pathBar, metaBar, chevronBar] {
+            bar.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+            bar.layer.cornerRadius = 3.5
+            bar.layer.cornerCurve = .continuous
+        }
+        titleBar.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        metaBar.backgroundColor = UIColor.white.withAlphaComponent(0.07)
+
+        [cardView, iconView, titleBar, pathBar, metaBar, chevronBar].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        contentView.addSubview(cardView)
+        cardView.addSubview(iconView)
+        cardView.addSubview(titleBar)
+        cardView.addSubview(pathBar)
+        cardView.addSubview(metaBar)
+        cardView.addSubview(chevronBar)
+
+        NSLayoutConstraint.activate([
+            cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
+            cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
+            cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            iconView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+            iconView.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 38),
+            iconView.heightAnchor.constraint(equalToConstant: 38),
+            chevronBar.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -15),
+            chevronBar.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            chevronBar.widthAnchor.constraint(equalToConstant: 7),
+            chevronBar.heightAnchor.constraint(equalToConstant: 18),
+            titleBar.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 11),
+            titleBar.trailingAnchor.constraint(lessThanOrEqualTo: chevronBar.leadingAnchor, constant: -18),
+            titleBar.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 14),
+            titleBar.widthAnchor.constraint(equalToConstant: 155),
+            titleBar.heightAnchor.constraint(equalToConstant: 10),
+            pathBar.leadingAnchor.constraint(equalTo: titleBar.leadingAnchor),
+            pathBar.trailingAnchor.constraint(lessThanOrEqualTo: chevronBar.leadingAnchor, constant: -18),
+            pathBar.topAnchor.constraint(equalTo: titleBar.bottomAnchor, constant: 8),
+            pathBar.widthAnchor.constraint(equalToConstant: 215),
+            pathBar.heightAnchor.constraint(equalToConstant: 7),
+            metaBar.leadingAnchor.constraint(equalTo: titleBar.leadingAnchor),
+            metaBar.topAnchor.constraint(equalTo: pathBar.bottomAnchor, constant: 9),
+            metaBar.widthAnchor.constraint(equalToConstant: 105),
+            metaBar.heightAnchor.constraint(equalToConstant: 7)
         ])
     }
 }
@@ -3529,6 +3628,84 @@ private final class TerminalUIKitTabCell: UITableViewCell {
             statusDot.heightAnchor.constraint(equalToConstant: 8),
             spinner.centerXAnchor.constraint(equalTo: statusDot.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: statusDot.centerYAnchor)
+        ])
+    }
+}
+
+private final class TerminalUIKitTabSkeletonCell: UITableViewCell {
+    static let reuseID = "TerminalUIKitTabSkeletonCell"
+    private let cardView = UIView()
+    private let iconView = UIView()
+    private let titleBar = UIView()
+    private let pathBar = UIView()
+    private let statusDot = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        build()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func build() {
+        backgroundColor = .clear
+        selectionStyle = .none
+        contentView.backgroundColor = .clear
+
+        cardView.backgroundColor = UIColor.white.withAlphaComponent(0.045)
+        cardView.layer.cornerRadius = 12
+        cardView.layer.cornerCurve = .continuous
+        cardView.layer.borderWidth = 1 / UIScreen.main.scale
+        cardView.layer.borderColor = UIColor.white.withAlphaComponent(0.055).cgColor
+
+        iconView.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+        iconView.layer.cornerRadius = 9
+        iconView.layer.cornerCurve = .continuous
+
+        titleBar.backgroundColor = UIColor.white.withAlphaComponent(0.13)
+        titleBar.layer.cornerRadius = 4
+        titleBar.layer.cornerCurve = .continuous
+
+        pathBar.backgroundColor = UIColor.white.withAlphaComponent(0.075)
+        pathBar.layer.cornerRadius = 3
+        pathBar.layer.cornerCurve = .continuous
+
+        statusDot.backgroundColor = UIColor.white.withAlphaComponent(0.11)
+        statusDot.layer.cornerRadius = 4
+
+        [cardView, iconView, titleBar, pathBar, statusDot].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        contentView.addSubview(cardView)
+        cardView.addSubview(iconView)
+        cardView.addSubview(titleBar)
+        cardView.addSubview(pathBar)
+        cardView.addSubview(statusDot)
+
+        NSLayoutConstraint.activate([
+            cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
+            cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
+            cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            iconView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+            iconView.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 34),
+            iconView.heightAnchor.constraint(equalToConstant: 34),
+            statusDot.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -18),
+            statusDot.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            statusDot.widthAnchor.constraint(equalToConstant: 8),
+            statusDot.heightAnchor.constraint(equalToConstant: 8),
+            titleBar.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+            titleBar.trailingAnchor.constraint(lessThanOrEqualTo: statusDot.leadingAnchor, constant: -16),
+            titleBar.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 17),
+            titleBar.widthAnchor.constraint(equalToConstant: 150),
+            titleBar.heightAnchor.constraint(equalToConstant: 10),
+            pathBar.leadingAnchor.constraint(equalTo: titleBar.leadingAnchor),
+            pathBar.topAnchor.constraint(equalTo: titleBar.bottomAnchor, constant: 10),
+            pathBar.widthAnchor.constraint(equalToConstant: 215),
+            pathBar.heightAnchor.constraint(equalToConstant: 7)
         ])
     }
 }

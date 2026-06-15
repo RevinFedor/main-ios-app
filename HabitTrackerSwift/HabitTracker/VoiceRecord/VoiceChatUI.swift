@@ -436,16 +436,12 @@ struct VoiceChatTabView: View {
         chatComposerFocused || terminalComposerFocused || allChatsSearchActive
     }
 
-    // Coarse lock for the root pager: while the user types, the history drawer is
-    // active, or Terminal is inside its own nested stack. The Terminal recognizer
-    // still owns the rightward back-swipe, but device logs showed occasional
-    // `[pager-leak]` with no adjacent `term-swipe-miss`, meaning the root pager
-    // could still rubber-band into the black leading area. On nested Terminal
-    // levels, root paging is therefore disabled; return to Terminal root first,
-    // then page to Voice. The bitmap transition below removed the old relayout
-    // penalty from toggling this at the projects boundary.
+    // Coarse lock for the root pager: typing and the history drawer always own
+    // horizontal motion. Terminal tabs now sit in the UIKit nav container, so the
+    // project-tabs level can page back to Voice; only the chat level keeps the
+    // root pager locked because right-to-left motion there belongs to timeline.
     private var pagingShouldLock: Bool {
-        textInputActive || drawerPhase != .closed || (terminalMode && terminal.canStepBack)
+        textInputActive || drawerPhase != .closed || (terminalMode && terminal.selectedTab != nil)
     }
 
     var body: some View {
@@ -468,7 +464,7 @@ struct VoiceChatTabView: View {
         // this surface, so the page-swipe must yield while any is active.
         .onChange(of: pagingShouldLock) { _, lock in
             router.pagingLocked = lock
-            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed) terminalBack=\(terminalMode && terminal.canStepBack)]")
+            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed) terminalChat=\(terminalMode && terminal.selectedTab != nil)]")
         }
         // Focus-driven bar hide: the moment the composer/search is focused, tell
         // the root shell to slide its glass bar away (and back on blur). Synchronous
