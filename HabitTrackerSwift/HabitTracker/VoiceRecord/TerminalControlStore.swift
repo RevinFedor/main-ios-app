@@ -237,7 +237,7 @@ struct CTPromptsResponse: Decodable {
     var prompts: [CTPrompt]?
 }
 
-struct CTCompactMetrics: Decodable, Equatable {
+struct CTCompactMetrics: Decodable, Equatable, Sendable {
     var preTokens: Int?
     var postTokens: Int?
     var durationMs: Int?
@@ -280,7 +280,7 @@ struct CTRawMessage: Decodable {
     var __wasQueued: Bool?
 }
 
-struct CTHistoryResponse: Decodable {
+struct CTHistoryResponse: Decodable, Sendable {
     var messages: [CTRawMessage]?
     var entries: [CTHistoryEntry]?
     var total: Int?
@@ -293,7 +293,7 @@ struct CTHistoryResponse: Decodable {
     var lastUuid: String?
 }
 
-struct CTHistoryEntry: Decodable {
+struct CTHistoryEntry: Decodable, Sendable {
     var uuid: String?
     var role: String?
     var timestamp: String?
@@ -326,11 +326,13 @@ struct CTSSEPayload: Decodable {
     var contextPct: Double?
 }
 
-enum CTEntryKind: String, Equatable {
+enum CTEntryKind: String, Equatable, Sendable {
     case user, assistant, thinking, tool, slash, compactSummary, error
 }
 
-struct CTEntry: Identifiable {
+// Sendable so a finished [CTEntry] can be built off the main actor (heavy decode
+// + normalize of 1000+ msg histories) and handed back to @MainActor for publish.
+struct CTEntry: Identifiable, Sendable {
     var id: String
     var kind: CTEntryKind
     var text: String = ""
@@ -1025,52 +1027,68 @@ struct CTResumeResponse: Decodable {
     var alreadyRunning: Bool?
 }
 
+// PHASE C: migrated from `ObservableObject + @Published` to the iOS 17+
+// Observation framework (`@Observable`). Why: with ObservableObject every
+// @Published write fires the single object-wide objectWillChange, so ANY view
+// holding the store re-rendered on ANY field change — the projects list redrew
+// when statusByTab/history/queue mutated, which (over a remote tunnel + during
+// the 9-project prefetch) dropped frames. @Observable tracks the EXACT stored
+// properties each view reads in its body, so a view only re-renders when a
+// property it actually displays changes. Migration is mechanical: drop
+// ObservableObject + @Published, add @Observable, and mark non-UI internals
+// @ObservationIgnored. Observers updated: @ObservedObject→let, @StateObject→
+// @State. Validated June 2026 (WWDC23 Discover Observation; SE-0395; +2 research
+// agents, 48+50 sources). The change-equality guards added earlier stay — they
+// still cut redundant writes before observation even sees them.
 @MainActor
-final class TerminalControlStore: ObservableObject {
+@Observable
+final class TerminalControlStore {
     static let shared = TerminalControlStore()
 
-    @Published var projects: [CTProject] = []
-    @Published var tabsByProject: [String: [CTTabInfo]] = [:]
-    @Published var statusMarkerByProject: [String: CTStatusMarker] = [:]
-    @Published var selectedProject: CTProject?
-    @Published var selectedTab: CTTabInfo?
-    @Published var entriesByTab: [String: [CTEntry]] = [:]
-    @Published var statusByTab: [String: String] = [:]
-    @Published var runningTabs: Set<String> = []
-    @Published var turnStartedAt: [String: Date] = [:]
-    @Published var paramsByTab: [String: CTParams] = [:]
-    @Published var queueByTab: [String: CTQueueCore] = [:]
-    @Published var timelineByTab: [String: [CTTimelineEntry]] = [:]
-    @Published var timelineLoading: Set<String> = []
-    @Published var timelineErrorByTab: [String: String] = [:]
-    @Published var pendingQuestionByTab: [String: CTPendingQuestion] = [:]
-    @Published var questionAnsweringTabs: Set<String> = []
-    @Published var projectsScrollAnchorId: String?
-    @Published var tabsScrollAnchorByProject: [String: String] = [:]
-    @Published var loadingProjects = false
-    @Published var loadingTabs: Set<String> = []
-    @Published var historyLoading: Set<String> = []
-    @Published var offline = false
-    @Published var sseConnected = false
-    @Published var lastError: String?
-    @Published var terminalInstallRunning = false
-    @Published var terminalInstallJob: CTBuildInstallJob?
-    @Published var restoredInputByTab: [String: String] = [:]
-    @Published var draftNoticeByTab: [String: String] = [:]
-    @Published var interruptAwaitingTabs: Set<String> = []
+    var projects: [CTProject] = []
+    var tabsByProject: [String: [CTTabInfo]] = [:]
+    var statusMarkerByProject: [String: CTStatusMarker] = [:]
+    var selectedProject: CTProject?
+    var selectedTab: CTTabInfo?
+    var entriesByTab: [String: [CTEntry]] = [:]
+    var statusByTab: [String: String] = [:]
+    var runningTabs: Set<String> = []
+    var turnStartedAt: [String: Date] = [:]
+    var paramsByTab: [String: CTParams] = [:]
+    var queueByTab: [String: CTQueueCore] = [:]
+    var timelineByTab: [String: [CTTimelineEntry]] = [:]
+    var timelineLoading: Set<String> = []
+    var timelineErrorByTab: [String: String] = [:]
+    var pendingQuestionByTab: [String: CTPendingQuestion] = [:]
+    var questionAnsweringTabs: Set<String> = []
+    var projectsScrollAnchorId: String?
+    var tabsScrollAnchorByProject: [String: String] = [:]
+    var loadingProjects = false
+    var loadingTabs: Set<String> = []
+    var historyLoading: Set<String> = []
+    var offline = false
+    var sseConnected = false
+    var lastError: String?
+    var terminalInstallRunning = false
+    var terminalInstallJob: CTBuildInstallJob?
+    var restoredInputByTab: [String: String] = [:]
+    var draftNoticeByTab: [String: String] = [:]
+    var interruptAwaitingTabs: Set<String> = []
 
-    private var reducers: [String: CTMessageReducer] = [:]
-    private var sseTask: Task<Void, Never>?
-    private var statusTask: Task<Void, Never>?
-    private var historyReloadTasks: [String: Task<Void, Never>] = [:]
-    private var warmCacheTask: Task<Void, Never>?
-    private var tabsPrefetchTask: Task<Void, Never>?
-    private var activeSSETabId: String?
-    private var sseAttemptByTab: [String: Int] = [:]
-    private var sseEventSeqByTab: [String: Int] = [:]
-    private var lastProjectsRefreshAt: Date?
-    private var pendingPromptRecoveryByTab: [String: Date] = [:]
-    private var draftRecoveryTasks: [String: Task<Void, Never>] = [:]
+    // Non-UI internals: @ObservationIgnored so they don't register as view
+    // dependencies (reducers, task handles, bookkeeping — never read in a body).
+    @ObservationIgnored private var reducers: [String: CTMessageReducer] = [:]
+    @ObservationIgnored private var sseTask: Task<Void, Never>?
+    @ObservationIgnored private var statusTask: Task<Void, Never>?
+    @ObservationIgnored private var historyReloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var warmCacheTask: Task<Void, Never>?
+    @ObservationIgnored private var tabsPrefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var activeSSETabId: String?
+    @ObservationIgnored private var sseAttemptByTab: [String: Int] = [:]
+    @ObservationIgnored private var sseEventSeqByTab: [String: Int] = [:]
+    @ObservationIgnored private var lastProjectsRefreshAt: Date?
+    @ObservationIgnored private var pendingPromptRecoveryByTab: [String: Date] = [:]
+    @ObservationIgnored private var draftRecoveryTasks: [String: Task<Void, Never>] = [:]
 
     var canStepBack: Bool {
         selectedTab != nil || selectedProject != nil
@@ -1487,27 +1505,57 @@ final class TerminalControlStore: ObservableObject {
         historyLoading.insert(tabId)
         VCLog.log("TerminalSSE", "history load start tab=\(shortID(tabId))")
         do {
+            // Network on the shared session (the GET itself isn't main-bound).
+            let netStarted = Date()
             let r = try await TerminalAPI.history(tabId: tabId)
-            if let entries = r.entries {
-                entriesByTab[tabId] = CTHistoryEntryNormalizer.normalize(entries)
+            let netMs = elapsedMs(since: netStarted)
+
+            // PHASE A: build the normalized [CTEntry] OFF the main actor. For a
+            // 1183-msg / 470KB history the normalize/reduce loop is the work that
+            // used to freeze the UI when it ran inline on @MainActor (our own
+            // fix-ios-stability.md §6 pattern). Task.detached runs it on a bg
+            // thread; CTEntry is Sendable so the finished array crosses back
+            // cleanly. We publish only the result on MainActor below.
+            let normStarted = Date()
+            let mode = r.entries != nil ? "entries" : "messages"
+            let built: [CTEntry] = await Task.detached(priority: .userInitiated) {
+                if let entries = r.entries {
+                    return CTHistoryEntryNormalizer.normalize(entries)
+                } else {
+                    let reducer = CTMessageReducer()
+                    reducer.reset()
+                    for msg in r.messages ?? [] { reducer.apply(msg) }
+                    return reducer.snapshot()
+                }
+            }.value
+            let normMs = elapsedMs(since: normStarted)
+
+            // Identity guard: the user may have navigated away during the bg work
+            // (Phase B owns view-side cancellation; this guards the store too).
+            guard selectedTab?.tabId == tabId || entriesByTab[tabId] != nil || historyLoading.contains(tabId) else {
+                VCLog.log("TerminalSSE", "history load DROP (navigated away) tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs)")
+                historyLoading.remove(tabId)
+                return
+            }
+
+            // Reducer must live on the actor for subsequent SSE deltas. For the
+            // "messages" path rebuild it here (cheap vs the parse) so streaming
+            // continues from the same snapshot the bg task produced.
+            if r.entries != nil {
                 reducers.removeValue(forKey: tabId)
-                VCLog.log(
-                    "TerminalSSE",
-                    "history load done tab=\(shortID(tabId)) mode=entries returned=\(entries.count) total=\(r.total ?? entries.count) session=\(shortID(r.sessionId)) ms=\(elapsedMs(since: started))"
-                )
             } else {
                 let reducer = CTMessageReducer()
                 reducer.reset()
-                for msg in r.messages ?? [] { reducer.apply(msg) }
+                reducer.seed(built)
                 reducers[tabId] = reducer
-                entriesByTab[tabId] = reducer.snapshot()
-                VCLog.log(
-                    "TerminalSSE",
-                    "history load done tab=\(shortID(tabId)) mode=messages returned=\((r.messages ?? []).count) total=\(r.total ?? (r.messages ?? []).count) session=\(shortID(r.sessionId)) entries=\(entriesByTab[tabId]?.count ?? 0) ms=\(elapsedMs(since: started))"
-                )
             }
+            entriesByTab[tabId] = built
             offline = false
             lastError = nil
+            VCLog.log(
+                "TerminalSSE",
+                "history load done tab=\(shortID(tabId)) mode=\(mode) entries=\(built.count) total=\(r.total ?? built.count) session=\(shortID(r.sessionId)) netMs=\(netMs) normMs=\(normMs) totalMs=\(elapsedMs(since: started)) [normalize off-main]"
+            )
         } catch {
             VCLog.log("TerminalSSE", "history load failed tab=\(shortID(tabId)) ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
             mark(error)

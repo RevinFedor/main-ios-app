@@ -225,7 +225,7 @@ struct TerminalControlRootView: View {
     var onComposerFocusChange: (Bool) -> Void = { _ in }
     var swipeBackEnabled = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var backDragOffset: CGFloat = 0
     @State private var forwardDestination: TerminalForwardDestination?
     @State private var forwardOffset: CGFloat = 0
@@ -439,8 +439,13 @@ struct TerminalControlRootView: View {
     private func pushTab(_ tab: CTTabInfo, project: CTProject, width: CGFloat) {
         guard tab.isInteractiveAI else { return }
         guard !terminalInteractionsSuspended else { return }
+        // PHASE B: navigation only SETS the selection. The actual load
+        // (activateSelectedTab) is owned by TerminalChatDetailView's
+        // `.task(id: tabId)`, so it auto-cancels if the user swipes back before
+        // it finishes — instead of a fire-and-forget Task that outlived the view
+        // and mutated torn-down state (the back-before-load crash).
         guard forwardDestination == nil, width > 0, !reduceMotion else {
-            Task { await store.openTab(tab, project: project) }
+            store.selectTabForDisplay(tab, project: project)
             return
         }
         VCLog.log("term-swipe", "pushTab \(tab.name) — mount@width then slide")
@@ -453,15 +458,11 @@ struct TerminalControlRootView: View {
             withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
             } completion: {
-                let tabId = commitWithoutTerminalAnimation {
-                    let tabId = store.selectTabForDisplay(tab, project: project)
+                commitWithoutTerminalAnimation {
+                    store.selectTabForDisplay(tab, project: project)
                     forwardDestination = nil
                     forwardOffset = 0
                     endTerminalHorizontalInteraction()
-                    return tabId
-                }
-                if let tabId {
-                    Task { await store.activateSelectedTab(tabId: tabId) }
                 }
             }
         }
@@ -490,7 +491,7 @@ struct TerminalControlRootView: View {
 }
 
 private struct TerminalProjectsBackPreview: View {
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -512,7 +513,7 @@ private struct TerminalProjectsBackPreview: View {
 
 private struct TerminalTabsBackPreview: View {
     let project: CTProject
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -545,7 +546,7 @@ private struct TerminalProjectsView: View {
     let onShowHistory: () -> Void
     let interactionsSuspended: Bool
     let onOpenProject: (CTProject) -> Void
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showBuildInstallConfirm = false
     @State private var installAlert: TerminalInstallAlert?
@@ -825,7 +826,7 @@ private struct TerminalProjectTabsView: View {
     let onShowHistory: () -> Void
     let interactionsSuspended: Bool
     let onOpenTab: (CTTabInfo) -> Void
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showNewTerminal = false
     @State private var renameTarget: CTTabInfo?
@@ -964,7 +965,7 @@ private struct TerminalFloatingNewButton: View {
 
 private struct TerminalNewTerminalSheet: View {
     let project: CTProject
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1169,7 +1170,7 @@ private struct TerminalChatDetailView: View {
     let onShowHistory: () -> Void
     var onComposerFocusChange: (Bool) -> Void = { _ in }
 
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @ObservedObject private var voiceStore = VoiceChatStore.shared
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var input = ""
@@ -1337,12 +1338,30 @@ private struct TerminalChatDetailView: View {
                 voiceStore.setActiveComposerKey(voiceComposerKey)
                 consumePendingDictationInsert()
             }
-            Task {
-                await store.refreshStatus(tabId: tabId)
-                await store.refreshParams(tabId: tabId)
-                await store.refreshQueue(tabId: tabId)
-                await store.refreshPendingQuestion(tabId: tabId)
+        }
+        // PHASE B: view-owned activation. `.task(id: tabId)` runs when this detail
+        // appears for a tabId and is AUTOMATICALLY cancelled by SwiftUI when the
+        // view disappears or the id changes — so swiping back mid-load cancels the
+        // load instead of leaving an orphan Task to mutate torn-down state. Heavy
+        // history parse is off-main (Phase A); the store's identity guards are the
+        // belt to this suspenders. Only the committed copy (store.selectedTab ==
+        // this tab) activates — the transient forward-push copy skips, avoiding a
+        // double load. The supplementary refreshes ride the same cancellable task.
+        .task(id: tabId) {
+            guard !tabId.isEmpty else { return }
+            guard store.selectedTab?.tabId == tabId else {
+                VCLog.log("TerminalSSE", "task(id:) skip activate — transient copy tab=\(tabId.suffix(6))")
+                return
             }
+            VCLog.log("TerminalSSE", "task(id:) activate begin tab=\(tabId.suffix(6))")
+            await store.activateSelectedTab(tabId: tabId)
+            if Task.isCancelled {
+                VCLog.log("TerminalSSE", "task(id:) cancelled after activate tab=\(tabId.suffix(6))")
+                return
+            }
+            await store.refreshQueue(tabId: tabId)
+            await store.refreshPendingQuestion(tabId: tabId)
+            VCLog.log("TerminalSSE", "task(id:) activate done tab=\(tabId.suffix(6))")
         }
         .onDisappear {
             // Only release dictation ownership when we are TRULY leaving this tab.
@@ -1897,7 +1916,7 @@ private struct TerminalQuestionCard: View {
 private struct TerminalModelMenuChip: View {
     let tabId: String
     let isCodex: Bool
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var applying: String?
 
     private var params: CTParams {
@@ -1940,7 +1959,7 @@ private struct TerminalModelMenuChip: View {
 private struct TerminalEffortMenuChip: View {
     let tabId: String
     let isCodex: Bool
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var applying: String?
 
     private var params: CTParams {
@@ -1976,7 +1995,7 @@ private struct TerminalEffortMenuChip: View {
 
 private struct TerminalThinkingMenuChip: View {
     let tabId: String
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var applying: String?
 
     private var params: CTParams {
@@ -2302,7 +2321,7 @@ private struct TerminalParamsChip: View {
 
 private struct TerminalParamsSheet: View {
     let tabId: String
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @Environment(\.dismiss) private var dismiss
     @State private var busyKey: String?
 
@@ -2404,7 +2423,7 @@ private struct FlowLikeRow<Content: View>: View {
 
 private struct TerminalQueueSheet: View {
     let tabId: String
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @State private var newPrompt = ""
 
     private var queue: CTQueueCore? { store.queueByTab[tabId] }
@@ -2516,7 +2535,7 @@ private struct TerminalQueueSheet: View {
 
 private struct TerminalTimelineSheet: View {
     let tabId: String
-    @ObservedObject private var store = TerminalControlStore.shared
+    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
 
     private var entries: [CTTimelineEntry]? { store.timelineByTab[tabId] }
     private var loading: Bool { store.timelineLoading.contains(tabId) }

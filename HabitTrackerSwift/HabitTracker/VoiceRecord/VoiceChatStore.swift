@@ -15,7 +15,7 @@ import SwiftUI
 
 // MARK: - Loose JSON (tool args/results are arbitrary shapes)
 
-enum VCJSON: Decodable {
+enum VCJSON: Decodable, Sendable {
     case string(String), number(Double), bool(Bool), null
     case array([VCJSON]), object([String: VCJSON])
 

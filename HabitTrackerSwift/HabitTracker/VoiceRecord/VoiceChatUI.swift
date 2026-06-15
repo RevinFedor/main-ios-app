@@ -389,7 +389,7 @@ private struct HistoryDrawerPanGesture: UIGestureRecognizerRepresentable {
 struct VoiceChatTabView: View {
     @EnvironmentObject var router: TabRouter
     @ObservedObject private var store = VoiceChatStore.shared
-    @ObservedObject private var terminal = TerminalControlStore.shared
+    private let terminal = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
