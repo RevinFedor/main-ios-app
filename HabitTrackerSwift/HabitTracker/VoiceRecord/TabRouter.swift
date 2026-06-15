@@ -1,5 +1,7 @@
 import Combine
 import Foundation
+import SwiftUI
+import UIKit
 
 // Drives the root TabView selection. Updated by deep-link handlers (widget
 // taps via URL scheme) and by intents that set the wantsVoiceTab flag in
@@ -12,9 +14,33 @@ import Foundation
 
 @MainActor
 final class TabRouter: ObservableObject {
-    enum Tab: String { case chat, voice, habits }
+    enum Tab: String, CaseIterable { case chat, voice, habits }
 
     @Published var selected: Tab = .voice
+
+    // Custom horizontal pager (RootTabView): the visual order is `Tab.allCases`
+    // (chat · voice · habits). The pager binds its `scrollPosition(id:)` to this
+    // index; a bar tap / deep-link sets `selected` and the pager animates to it.
+    var selectedIndex: Int { Tab.allCases.firstIndex(of: selected) ?? 0 }
+    static func tab(atIndex i: Int) -> Tab? {
+        guard i >= 0, i < Tab.allCases.count else { return nil }
+        return Tab.allCases[i]
+    }
+
+    // Coarse paging lock. RootTabView's horizontal pager reads this to disable
+    // swipe-paging while the AI Chat surface owns horizontal motion (history
+    // drawer open/dragging, composer/search focused, Terminal back-swipe) or the
+    // Habits surface is mid-reorder. Only the user swipe is gated; a bar tap /
+    // deep-link still pages programmatically.
+    @Published var pagingLocked: Bool = false
+
+    // The AI Chat surface raised its keyboard (composer or search focused). The
+    // root shell reads this to slide the floating glass bar away so it doesn't
+    // stack on the keyboard-lifted composer. Driven by FOCUS, not by keyboard
+    // notifications: focus is app-synchronous, so the bar slides in the SAME
+    // frame the composer collapses — the keyboard-notification path lagged and
+    // produced the "composer drops, THEN the bar reappears" two-step the user saw.
+    @Published var chatKeyboardUp: Bool = false
 
     // AI Chat navigation request — a UUID-stamped token so the chat tab can tell
     // "load this conversation" from "no request" even when chatId is nil (open the

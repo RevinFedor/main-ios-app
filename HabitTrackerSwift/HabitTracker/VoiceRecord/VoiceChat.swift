@@ -251,6 +251,116 @@ struct VCGTGlyph: View {
     }
 }
 
+// MARK: - Composer send button with "auto-send arming"
+//
+// Shared by the Voice (Gemini) chat composer and the Terminal composer. One
+// circular trailing button drives a small state machine:
+//   • has draft  · tap       → normal send
+//   • armed      · tap       → CANCEL arming (NEVER sends — guarded explicitly)
+//   • empty      · tap       → nothing (arming is long-press only, by request)
+//   • long-press (any state) → haptic buzz + small anchored popover above the
+//                              button with one row «Активировать авто-отправку»
+//                              → ARM (purple indeterminate loader spins). This is
+//                              the ONLY arm path, so it works even with text typed
+//                              (a plain tap there would send).
+//
+// While armed, an incoming dictation insert (Toggle Voice Record stop) is
+// auto-submitted by the owner view instead of just landing in the field.
+//
+// Gesture model (validated June 2026 via ChatGPT-5.5 web research + Claude
+// Opus 4.8): a plain tappable shape with SEPARATE `.onTapGesture` +
+// `.onLongPressGesture` — the long-press duration gate makes them mutually
+// exclusive (quick lift = tap, hold = long-press), avoiding the iOS-26
+// `.simultaneousGesture` "both fire" trap. NOT a `Button` (we want full control
+// of the empty-tap, no `.disabled`). The button is a sibling of the chat
+// ScrollView (composer-dock overlay), so the gesture never arbitrates against
+// scroll. `suppressTap` mirrors the proven local pattern in `VoiceChatGTFileRow`.
+struct ComposerSendButton: View {
+    let hasDraft: Bool
+    let armed: Bool
+    var accent: Color = Color(hex: "7c3aed")
+    let onSend: () -> Void
+    let onArm: () -> Void
+    let onCancelArm: () -> Void
+
+    @State private var showAutoEnterMenu = false
+    @State private var suppressTap = false
+    @State private var haptic = UIImpactFeedbackGenerator(style: .medium)
+
+    var body: some View {
+        ZStack {
+            // Dark circle while armed (so the purple spinner reads clearly) or
+            // empty; filled accent only when there is a draft ready to send.
+            Circle().fill(!armed && hasDraft ? accent : Color(white: 0.18))
+            if armed {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(accent)
+                    .allowsHitTesting(false)
+            } else {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: 38, height: 38)
+        // Fast arrow↔loader swap (0.15s) — arming should feel instant.
+        .animation(.easeInOut(duration: 0.15), value: armed)
+        // Whole circle is the hit area — the spinner's transparent gaps must not
+        // create dead spots, otherwise tap-to-cancel could miss.
+        .contentShape(Circle())
+        .onTapGesture {
+            if suppressTap { suppressTap = false; return }
+            if armed {
+                onCancelArm()           // armed → cancel, never falls through to send
+            } else if hasDraft {
+                onSend()
+            }
+            // empty + not armed → no-op (arming is long-press only, by request)
+        }
+        .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 16) {
+            suppressTap = true
+            haptic.impactOccurred()
+            haptic.prepare()
+            showAutoEnterMenu = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { suppressTap = false }
+        } onPressingChanged: { pressing in
+            if pressing { haptic.prepare() }
+        }
+        .popover(isPresented: $showAutoEnterMenu, attachmentAnchor: .point(.top), arrowEdge: .bottom) {
+            autoEnterMenu
+        }
+    }
+
+    private var autoEnterMenu: some View {
+        Button {
+            showAutoEnterMenu = false
+            onArm()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(accent)
+                Text("Активировать авто-отправку")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .frame(width: 252, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // Keep it a small floating bubble on compact iPhone instead of adapting
+        // to a sheet (iOS 16.4+). arrowEdge is ignored on iOS — the button sits
+        // at the bottom, so the system places the popover above it pointing down.
+        .presentationCompactAdaptation(.popover)
+        .preferredColorScheme(.dark)
+    }
+}
+
 // MARK: - API
 
 enum VoiceChatError: LocalizedError {

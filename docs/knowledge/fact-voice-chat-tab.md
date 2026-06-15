@@ -339,6 +339,32 @@ Follow-bottom — intent, не дистанция (шрам custom-terminal пе
 `proxy.scrollTo(anchor: .bottom)`, не анимированный (анимированные недолетают — тот же
 шрам, что `align:'end'` в вебе).
 
+**Прыжок скролла при отправке — keyboard-dismiss в том же runloop, что append
+(FB20979569, iOS-26-only).** Симптом юзера: жму отправить → лента уезжает вверх почти на
+целый экран (последние сообщения уходят за верх), приходится скроллить вниз руками, потом
+новое появляется сверху. Магнитуда прыжка = высота клавиатуры, не высота строки — это и есть
+отпечаток причины. Корень (подтверждён ресёрчем июнь 2026: ChatGPT-5.5 33 источника + Opus
+4.8, оба сошлись): `send()` делал `dismissKeyboard()` (схлопывание bottom safe-area на экран)
+**в том же transaction**, что optimistic-append, а тот синхронно дёргал `pin()` →
+`scrollTo(.bottom)`; `.defaultScrollAnchor(.bottom)` при этом ре-анкорится на смену
+contentSize. Над variable-height строками на iOS 26 это ровно FB20979569 — регрессия,
+которой нет на iOS 18 (Apple DTS thread с repro: «jumps when in Dynamic size … only on iOS
+26»). Наш стек совпадает с repro дословно: `ScrollView` + `LazyVStack` + `.defaultScrollAnchor(.bottom)`
++ `.scrollDismissesKeyboard(.interactively)` + строки переменной высоты.
+
+Фикс (оба composer'а, Gemini и Terminal) — **развязать keyboard-dismiss и append**: армим
+follow-bottom + append'им первыми, а `dismissKeyboard()` (и `resignFirstResponder` в Terminal)
+откладываем на следующий runloop через `Task { await Task.yield(); … }` — пин ложится против
+стабильной (клавиатура-вверх) геометрии, схлопывание клавиатуры идёт уже без совпадающего
+`scrollTo`. Плюс `pin()` теперь пинит дважды: сразу + после `Task.yield()` — строка,
+добавленная в этом же апдейте, ещё не измерена (DTS: «can't scroll to an item added in the
+same update»), второй пин ложится против материализованной строки; `followBottom`
+перечитывается после yield, чтобы юзера, схватившего скролл, не дёрнуло вниз. **НЕ** переехали
+на `safeAreaInset` (ChatGPT/Opus оба советовали) — overlay-composer это документированная
+keyboard-модель (`::Composer keyboard`), inset сломал бы её. Условие пересмотра — если
+истории дорастут до тяжёлого токен-стриминга, durable-фикс по обоим ресёрчам — UICollectionView-обёртка
+(тот же порог эскалации, что выше).
+
 Markdown рендерится один раз на message.id (кэш `VCMarkdownCache`, ключ id+fontSize) —
 не парсить в body при каждом скролле. Из ресёрча: MarkdownUI ушёл в maintenance mode
 (преемник — Textual), поэтому свой лёгкий рендер (заголовки/списки/inline через
@@ -485,13 +511,85 @@ assistant-message со `stopped:true`, iOS показывает сворачив
 Thinking рендерится отдельной карточкой перед tool cards, а не как markdown content. Иначе
 stopped-after-artifacts turn выглядел бы как пустое сообщение с исчезнувшим прогрессом.
 
-## Rename чатов — PATCH, не локальный заголовок
+## Кнопка отправки: arming авто-отправки (общий `ComposerSendButton`)
+
+Круглая кнопка отправки в обоих composer'ах (Gemini-чат и Terminal) — общий
+`ComposerSendButton` (в `VoiceChat.swift`), маленький стейт-машина: есть draft → обычная
+отправка; armed → отмена арминга (НИКОГДА не отправляет, явный guard); пустой инпут → тап
+no-op. **Арминг только по long-press** (вибрация + `.popover` «Активировать авто-отправку»
+над кнопкой), не по пустому тапу — юзер прямо убрал арминг-по-пустому-тапу как
+случайно-срабатывающий. Armed-состояние = фиолетовый indeterminate `ProgressView`; пока
+armed, пришедшая из Toggle Voice Record диктовка не просто вставляется в инпут, а
+**авто-отправляется**.
+
+Почему именно так (невидимый контекст, мотивация — внешний софт диктовки): юзер настроил
+боковую кнопку на Toggle Voice Record, заранее жмёт send-кнопку чтобы «вооружить» инпут, и
+голосовое уходит само по завершению диктовки. Если текст уже впечатан — пустой тап отправил
+бы его, поэтому арминг повешен на long-press, который работает в любом состоянии инпута.
+
+Три неочевидных решения. (1) Жест — раздельные `.onTapGesture` + `.onLongPressGesture` на
+plain-фигуре (не `Button`, не `.simultaneousGesture`): duration-gate делает их
+взаимоисключающими, избегая iOS-26 trap «срабатывают оба сразу». `suppressTap` зеркалит
+проверенный паттерн `VoiceChatGTFileRow`. (2) **Дисарм синхронно ДО** `send()` в
+`consumePendingDictationInsert` — иначе вторая вставка во время сетевого round-trip
+ре-триггерит отправку (защита от двойной отправки); seq-guard стора делает consume
+идемпотентным к пересборке вью. (3) `.contentShape(Circle())` на всю кнопку — прозрачные
+зазоры спиннера не должны создавать мёртвых зон для тапа-отмены. Арминг сбрасывается при
+уходе с composer-поверхности и в offline. Анимация смены стрелка↔лоадер — 0.15с (юзер просил
+«прям быстро»). Выбор раздельных жестов вместо `ExclusiveGesture`/`.simultaneousGesture`
+подтверждён ресёрчем (ChatGPT-5.5 35 источников + Claude Opus, июнь 2026). Эталон жеста под
+вес действия — `methodology/переносимый-дизайн.md::Жест под вес действия`.
+
+## Свайп root-вкладок и почему книжного слайда нет
+
+Перелистывание между AI Chat · Voice · Habits — `TabPagingSwipe` (UIKit
+`UIPanGestureRecognizer` через `UIGestureRecognizerRepresentable`, в `TabRouter.swift`),
+коммитит `router.page(delta:)` на отпускание. Voice (середина) листается в обе стороны;
+Habits (крайняя) — только вправо→Voice и **выключен во время reorder/драга строки** (тот
+режим владеет вертикальным драгом); AI Chat (крайняя) — только влево→Voice, и **выключен
+пока drawer открыт/тащится, идёт ввод текста, или Terminal-mode владеет своим back-swipe**
+(rightward-when-closed принадлежит history drawer, leftward свободен жесту). UIKit-распознаватель,
+а не SwiftUI `DragGesture` — на iOS 18/26 SwiftUI-жест не сосуществует детерминированно с
+приватным pan'ом `UIScrollView`; зеркалит `HistoryDrawerPanRecognizer` (intent-lock по
+горизонтали, declines тачи в text field / control / горизонтальном scroller,
+`cancelsTouchesInView`, левый край ~28pt отдан системному back-swipe).
+
+**Graveyard — книжный слайд невозможен с нативным таб-баром.** Юзер хотел чтобы свайп
+выезжал «как чтение книги», а не fade. Ресёрч (ChatGPT-5.5 35 источников + Claude Opus, июнь
+2026, с пометкой 2026/iOS 26) и доки прямо: системный bar-style `TabView` **by-design**
+делает только cross-dissolve, `.transition(.slide)`/`.animation` на selection — no-op; нет
+iOS 18/26 API для интерактивного слайда между обычными таб-бар вкладками. Книжный слайд
+достижим **только** кастомным horizontal paging-ScrollView (`.scrollTargetBehavior(.paging)`
++ `.scrollPosition` + `.containerRelativeFrame`) + **кастомным** таб-баром. Прототип сделали
+и **откатили**: кастомный плоский таб-бар (а) обрезал нижний ряд Voice (микрофон + капсюль),
+потому что не резервирует safe-area как системный, (б) `Color.white.opacity(...)`-fill
+выглядел серым прозрачным блоком без Liquid Glass перелива (тот же шрам что в `::iOS 26
+chrome`). Юзер: «некрасиво вообще нихуя», и явный fallback «если нельзя нормальный glass как
+было — вернуть нативные три кнопки». Вернули нативный `TabView`: настоящий glass, правильная
+safe-area, ничего не обрезается; свайп остался, но переключение снова fade. Не переизобретать
+кастомный pager ради слайда — цена (потеря системного chrome) перевешивает. Принцип —
+`methodology/переносимый-дизайн.md::Нативный компонент vs кастом`.
+
+## Rename чатов, терминальных вкладок и проектов
 
 Long-press на строке истории чатов и на title в detail открывает Rename sheet. Сохранение
 идёт через `PATCH /api/chats/:id {title}` на Mac, затем `loadConversation`/`refreshChats`.
 Пустой title = вернуться к auto-derived названию. Это важно: title живёт в общем
 `conversations.json`, должен синхронизироваться с desktop overlay и другим клиентом, а не
 оставаться локальным iOS-state.
+
+Тот же long-press-стандарт распространён на Terminal mode: нативный `.contextMenu` (Rename +
+Copy) на трёх поверхностях — шапка чата вкладки, строка вкладки (страница вкладок проекта),
+строка проекта (страница проектов). Rename открывает общий `CTRenameSheet` (зеркало
+Gemini-шита `VoiceChatTitleEditorSheet`). Бэкенд — custom-terminal: **вкладки** через уже
+существовавший `POST /api/sdk-tabs/:id/rename` (bridge `renameTab`, ставит
+`nameSetManually=true` чтобы команда не затёрла имя — `custom-terminal/fix-tab-naming-race.md`);
+**проекты** через добавленный в эту сессию `POST /api/projects/:id/rename` (bridge
+`renameProject` → `updateProject{name}` → персист `project:save-metadata` в SQLite).
+`TerminalControlStore` применяет переименование оптимистично (мутирует `CTTabInfo.name` /
+`CTProject.name` во всех @Published-коллекциях) и откатывает reload'ом при ошибке POST.
+Long-press = `.contextMenu` сознательно, а не кастомный жест — см.
+`CLAUDE.md::Стандарт long-press` и `methodology/переносимый-дизайн.md::Нативный компонент vs кастом`.
 
 ## Связанное
 

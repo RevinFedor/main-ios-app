@@ -22,7 +22,7 @@ enum TerminalControlConfig {
 
 struct CTProject: Identifiable, Decodable, Equatable {
     let id: String
-    let name: String
+    var name: String   // var: optimistic update on rename
     let path: String
     var icon: String?
     var tabCount: Int?
@@ -43,7 +43,7 @@ struct CTStatusMarker: Decodable, Equatable {
 
 struct CTTabInfo: Identifiable, Decodable, Equatable {
     var tabId: String?
-    let name: String
+    var name: String   // var: optimistic update on rename
     let tabType: String
     var commandType: String?
     var color: String?
@@ -656,32 +656,87 @@ enum TerminalAPI {
         req.setValue("Bearer \(Secrets.remoteWebToken)", forHTTPHeaderField: "Authorization")
     }
 
+    private static func ms(_ started: Date) -> Int {
+        Int(Date().timeIntervalSince(started) * 1000)
+    }
+
+    private static func safeHost(_ url: URL) -> String {
+        (url.scheme ?? "?") + "://" + (url.host ?? "?") + (url.port.map { ":\($0)" } ?? "")
+    }
+
+    private static func bodyPreview(_ data: Data) -> String {
+        (String(data: data, encoding: .utf8) ?? "\(data.count)b")
+            .replacingOccurrences(of: "\n", with: " ")
+            .prefix(220)
+            .description
+    }
+
     static func getJSON<T: Decodable>(_ path: String) async throws -> T {
-        guard let url = TerminalControlConfig.apiURL(path) else { throw VoiceChatError.badURL }
+        guard let url = TerminalControlConfig.apiURL(path) else {
+            VCLog.log("TerminalHTTP", "GET bad-url path=\(path) host=\(TerminalControlConfig.displayHost())")
+            throw VoiceChatError.badURL
+        }
         var req = URLRequest(url: url)
         req.timeoutInterval = 20
         authed(&req)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let started = Date()
+        VCLog.log("TerminalHTTP", "GET start path=\(path) host=\(safeHost(url)) timeout=20")
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            VCLog.log("TerminalHTTP", "GET transport-fail path=\(path) ms=\(ms(started)): \(error.localizedDescription)")
+            throw error
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        VCLog.log("TerminalHTTP", "GET response path=\(path) status=\(status) bytes=\(data.count) ms=\(ms(started))")
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            VCLog.log("TerminalHTTP", "GET rejected path=\(path) status=\(status) body=\(bodyPreview(data))")
             throw VoiceChatError.http((resp as? HTTPURLResponse)?.statusCode ?? 0, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            VCLog.log("TerminalHTTP", "GET decode-fail path=\(path) status=\(status) bytes=\(data.count): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     @discardableResult
     static func postJSON<T: Decodable>(_ path: String, body: [String: Any] = [:]) async throws -> T {
-        guard let url = TerminalControlConfig.apiURL(path) else { throw VoiceChatError.badURL }
+        guard let url = TerminalControlConfig.apiURL(path) else {
+            VCLog.log("TerminalHTTP", "POST bad-url path=\(path) host=\(TerminalControlConfig.displayHost())")
+            throw VoiceChatError.badURL
+        }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 25
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         authed(&req)
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let started = Date()
+        VCLog.log("TerminalHTTP", "POST start path=\(path) host=\(safeHost(url)) bodyKeys=\(body.keys.sorted().joined(separator: ",")) timeout=25")
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            VCLog.log("TerminalHTTP", "POST transport-fail path=\(path) ms=\(ms(started)): \(error.localizedDescription)")
+            throw error
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        VCLog.log("TerminalHTTP", "POST response path=\(path) status=\(status) bytes=\(data.count) ms=\(ms(started))")
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            VCLog.log("TerminalHTTP", "POST rejected path=\(path) status=\(status) body=\(bodyPreview(data))")
             throw VoiceChatError.http((resp as? HTTPURLResponse)?.statusCode ?? 0, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            VCLog.log("TerminalHTTP", "POST decode-fail path=\(path) status=\(status) bytes=\(data.count): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     static func projects() async throws -> [CTProject] {
@@ -782,6 +837,21 @@ enum TerminalAPI {
         try await postJSON("/api/sdk-tabs/" + vcPathComponent(tabId) + "/resume")
     }
 
+    // Rename a tab. Server sets nameSetManually=true so the command name can't
+    // clobber it later (custom-terminal fix-tab-naming-race.md). Works for any
+    // open tab (Claude PTY / Codex PTY / SDK) by id.
+    static func renameTab(tabId: String, name: String) async throws {
+        let _: CTGenericOK = try await postJSON(
+            "/api/sdk-tabs/" + vcPathComponent(tabId) + "/rename", body: ["name": name])
+    }
+
+    // Rename a project. Server persists via project:save-metadata (SQLite) and
+    // updates the desktop in-memory map the project list reads from.
+    static func renameProject(projectId: String, name: String) async throws {
+        let _: CTGenericOK = try await postJSON(
+            "/api/projects/" + vcPathComponent(projectId) + "/rename", body: ["name": name])
+    }
+
     static func timeline(tabId: String) async throws -> CTTimelineResponse {
         try await getJSON("/api/sdk-tabs/" + vcPathComponent(tabId) + "/timeline")
     }
@@ -832,32 +902,87 @@ enum VoiceRecordTerminalAPI {
         req.setValue("Bearer \(Secrets.remoteWebToken)", forHTTPHeaderField: "Authorization")
     }
 
+    private static func ms(_ started: Date) -> Int {
+        Int(Date().timeIntervalSince(started) * 1000)
+    }
+
+    private static func safeHost(_ url: URL) -> String {
+        (url.scheme ?? "?") + "://" + (url.host ?? "?") + (url.port.map { ":\($0)" } ?? "")
+    }
+
+    private static func bodyPreview(_ data: Data) -> String {
+        (String(data: data, encoding: .utf8) ?? "\(data.count)b")
+            .replacingOccurrences(of: "\n", with: " ")
+            .prefix(220)
+            .description
+    }
+
     static func getJSON<T: Decodable>(_ path: String) async throws -> T {
-        guard let url = VoiceChatConfig.apiURL(path) else { throw VoiceChatError.badURL }
+        guard let url = VoiceChatConfig.apiURL(path) else {
+            VCLog.log("TerminalInstallHTTP", "GET bad-url path=\(path)")
+            throw VoiceChatError.badURL
+        }
         var req = URLRequest(url: url)
         req.timeoutInterval = 15
         authed(&req)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let started = Date()
+        VCLog.log("TerminalInstallHTTP", "GET start path=\(path) host=\(safeHost(url)) timeout=15")
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            VCLog.log("TerminalInstallHTTP", "GET transport-fail path=\(path) ms=\(ms(started)): \(error.localizedDescription)")
+            throw error
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        VCLog.log("TerminalInstallHTTP", "GET response path=\(path) status=\(status) bytes=\(data.count) ms=\(ms(started))")
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            VCLog.log("TerminalInstallHTTP", "GET rejected path=\(path) status=\(status) body=\(bodyPreview(data))")
             throw VoiceChatError.http((resp as? HTTPURLResponse)?.statusCode ?? 0, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            VCLog.log("TerminalInstallHTTP", "GET decode-fail path=\(path) status=\(status) bytes=\(data.count): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     @discardableResult
     static func postJSON<T: Decodable>(_ path: String, body: [String: Any] = [:]) async throws -> T {
-        guard let url = VoiceChatConfig.apiURL(path) else { throw VoiceChatError.badURL }
+        guard let url = VoiceChatConfig.apiURL(path) else {
+            VCLog.log("TerminalInstallHTTP", "POST bad-url path=\(path)")
+            throw VoiceChatError.badURL
+        }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 20
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         authed(&req)
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let started = Date()
+        VCLog.log("TerminalInstallHTTP", "POST start path=\(path) host=\(safeHost(url)) bodyKeys=\(body.keys.sorted().joined(separator: ",")) timeout=20")
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            VCLog.log("TerminalInstallHTTP", "POST transport-fail path=\(path) ms=\(ms(started)): \(error.localizedDescription)")
+            throw error
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        VCLog.log("TerminalInstallHTTP", "POST response path=\(path) status=\(status) bytes=\(data.count) ms=\(ms(started))")
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            VCLog.log("TerminalInstallHTTP", "POST rejected path=\(path) status=\(status) body=\(bodyPreview(data))")
             throw VoiceChatError.http((resp as? HTTPURLResponse)?.statusCode ?? 0, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            VCLog.log("TerminalInstallHTTP", "POST decode-fail path=\(path) status=\(status) bytes=\(data.count): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     static func startBuildInstall() async throws -> CTBuildInstallJob? {
@@ -887,7 +1012,9 @@ struct CTDraftResponse: Decodable, Equatable {
 struct CTParamsStatus: Decodable {
     var tabId: String?
     var status: String?
+    var busy: Bool?
     var commandType: String?
+    var toolType: String?
     var sessionId: String?
     var cwd: String?
 }
@@ -998,12 +1125,54 @@ final class TerminalControlStore: ObservableObject {
         return CTActivitySummary(count: count, streaming: streaming)
     }
 
+    private func projectIdForTab(_ tabId: String) -> String? {
+        for (projectId, tabs) in tabsByProject {
+            if tabs.contains(where: { ($0.tabId ?? $0.id) == tabId }) {
+                return projectId
+            }
+        }
+        if selectedTab?.tabId == tabId { return selectedProject?.id }
+        return nil
+    }
+
+    private func tabRowStatus(tabId: String) -> String {
+        for (_, tabs) in tabsByProject {
+            if let tab = tabs.first(where: { ($0.tabId ?? $0.id) == tabId }) {
+                return tab.sessionStatus ?? "nil"
+            }
+        }
+        return "missing"
+    }
+
+    private func activityDebug(projectId: String?) -> String {
+        guard let projectId else {
+            return "project=nil runningSet=\(runningTabs.count)"
+        }
+        let activity = activitySummary(projectId: projectId)
+        return "project=\(shortID(projectId)) activityCount=\(activity.count) streaming=\(activity.streaming) runningSet=\(runningTabs.count)"
+    }
+
+    private func logRuntimeTransition(tabId: String, reason: String, oldStatus: String?, oldRunning: Bool) {
+        let newStatus = statusByTab[tabId] ?? "nil"
+        let newRunning = runningTabs.contains(tabId)
+        let projectId = projectIdForTab(tabId)
+        VCLog.log(
+            "TerminalState",
+            "runtime tab=\(shortID(tabId)) reason=\(reason) map=\(oldStatus ?? "nil")->\(newStatus) running=\(oldRunning)->\(newRunning) tabRowStatus=\(tabRowStatus(tabId: tabId)) \(activityDebug(projectId: projectId))"
+        )
+    }
+
     func start() {
-        guard warmCacheTask == nil else { return }
-        let cold = projects.isEmpty
-        if !cold, let lastProjectsRefreshAt, Date().timeIntervalSince(lastProjectsRefreshAt) < 20 {
+        guard warmCacheTask == nil else {
+            VCLog.log("TerminalCache", "start skip warm task already running projects=\(projects.count) offline=\(offline)")
             return
         }
+        let cold = projects.isEmpty
+        if !cold, let lastProjectsRefreshAt, Date().timeIntervalSince(lastProjectsRefreshAt) < 20 {
+            VCLog.log("TerminalCache", "start skip recent projects ageMs=\(elapsedMs(since: lastProjectsRefreshAt)) count=\(projects.count) offline=\(offline)")
+            return
+        }
+        VCLog.log("TerminalCache", "start warm cache cold=\(cold) projects=\(projects.count) host=\(TerminalControlConfig.displayHost()) prefetchTabs=true")
         warmCacheTask = Task { [weak self] in
             await self?.refreshProjects(showLoader: cold, prefetchTabs: true)
             await MainActor.run { self?.warmCacheTask = nil }
@@ -1012,73 +1181,178 @@ final class TerminalControlStore: ObservableObject {
 
     func refreshProjects(showLoader: Bool = true, prefetchTabs: Bool = false) async {
         if showLoader { loadingProjects = true }
+        let started = Date()
+        VCLog.log("TerminalCache", "projects load start showLoader=\(showLoader) prefetch=\(prefetchTabs) cached=\(projects.count) offline=\(offline)")
         do {
             let loaded = try await TerminalAPI.projects()
-            projects = loaded
+            // Only publish when the list actually changed. A reconnect/re-warm
+            // every ~2min otherwise re-assigns an identical array, re-rendering the
+            // projects list (and bumping objectWillChange for the whole terminal
+            // tree) for nothing. CTProject is Equatable, so this is a cheap guard.
+            if projects != loaded {
+                projects = loaded
+            }
             lastProjectsRefreshAt = Date()
             offline = false
             lastError = nil
+            let openCount = loaded.filter { $0.isOpen == true }.count
+            let activeName = loaded.first(where: { $0.isActive == true })?.name ?? "-"
+            VCLog.log("TerminalCache", "projects load done count=\(loaded.count) open=\(openCount) active=\(activeName) ms=\(elapsedMs(since: started))")
             if prefetchTabs {
                 scheduleTabsPrefetch(for: loaded)
             }
         } catch {
+            VCLog.log("TerminalCache", "projects load failed ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
             mark(error)
         }
         if showLoader { loadingProjects = false }
     }
 
     func terminalBuildInstallBlockers() async throws -> [CTActiveLoader] {
+        let started = Date()
+        VCLog.log("TerminalInstall", "preflight start host=\(TerminalControlConfig.displayHost())")
         do {
             let snap = try await TerminalAPI.activeLoaders()
-            return snap.loaders.filter(\.blocksMobileInstall)
+            let blockers = snap.loaders.filter(\.blocksMobileInstall)
+            VCLog.log(
+                "TerminalInstall",
+                "preflight snapshot idle=\(snap.idle) count=\(snap.count ?? snap.loaders.count) raw=[\(activeLoaderSummary(snap.loaders))] blockers=[\(activeLoaderSummary(blockers))] ms=\(elapsedMs(since: started))"
+            )
+            return blockers
         } catch {
             if isTerminalUnavailable(error) {
                 offline = true
+                VCLog.log("TerminalInstall", "preflight terminal-unavailable ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
                 return []
             }
+            VCLog.log("TerminalInstall", "preflight failed ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
             throw error
         }
     }
 
     func runTerminalBuildInstall() async throws -> CTBuildInstallJob? {
-        if terminalInstallRunning { return terminalInstallJob }
+        if terminalInstallRunning {
+            VCLog.log("TerminalInstall", "run ignored already-running job=\(terminalInstallJob?.id ?? "-")")
+            return terminalInstallJob
+        }
         terminalInstallRunning = true
         defer { terminalInstallRunning = false }
 
+        VCLog.log("TerminalInstall", "run start via VoiceRecord host=\(VoiceChatConfig.displayHost())")
         var job = try await VoiceRecordTerminalAPI.startBuildInstall()
         terminalInstallJob = job
+        VCLog.log("TerminalInstall", "run job accepted id=\(job?.id ?? "-") running=\(job?.running == true) pid=\(job?.pid.map(String.init) ?? "-") command=\(job?.command ?? "-")")
 
+        var poll = 0
         while job?.running == true {
             try await Task.sleep(for: .seconds(2))
+            poll += 1
             job = try await VoiceRecordTerminalAPI.buildInstallStatus()
             terminalInstallJob = job
+            VCLog.log("TerminalInstall", "run poll#\(poll) id=\(job?.id ?? "-") running=\(job?.running == true) exit=\(job?.exitCode.map(String.init) ?? "-") ok=\(job?.ok.map(String.init) ?? "-")")
         }
 
         if let job, job.ok == false {
             let code = job.exitCode.map { "code \($0)" } ?? "failed"
             let detail = job.error ?? job.logTail ?? "npm run build:install failed"
+            VCLog.log("TerminalInstall", "run failed id=\(job.id ?? "-") exit=\(job.exitCode.map(String.init) ?? "-") error=\(detail.prefix(180))")
             throw VoiceChatError.http(job.exitCode ?? 1, code + ": " + detail)
         }
 
+        VCLog.log("TerminalInstall", "run done id=\(job?.id ?? "-") exit=\(job?.exitCode.map(String.init) ?? "-") ok=\(job?.ok.map(String.init) ?? "-")")
         return job
+    }
+
+    // Rename a tab: optimistic local update across every collection that holds
+    // a copy of the name (the per-project tab list + selectedTab), then POST.
+    // On failure reload the project's tabs so the UI snaps back to server truth.
+    func renameTab(_ tab: CTTabInfo, to newName: String, projectId explicitProjectId: String? = nil) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let tabId = tab.tabId, !trimmed.isEmpty, trimmed != tab.name else { return }
+        // Prefer the explicit project (from the tab-list surface); fall back to
+        // selectedProject (chat-detail surface), then to whichever project's
+        // cached list actually contains this tab.
+        let projectId = explicitProjectId
+            ?? selectedProject?.id
+            ?? tabsByProject.first(where: { $0.value.contains(where: { $0.tabId == tabId }) })?.key
+        if let projectId, var tabs = tabsByProject[projectId],
+           let idx = tabs.firstIndex(where: { $0.tabId == tabId }) {
+            tabs[idx].name = trimmed
+            tabsByProject[projectId] = tabs
+        }
+        if selectedTab?.tabId == tabId { selectedTab?.name = trimmed }
+        VCLog.log("TerminalRename", "tab id=\(shortID(tabId)) → \(trimmed)")
+        Task {
+            do {
+                try await TerminalAPI.renameTab(tabId: tabId, name: trimmed)
+            } catch {
+                VCLog.log("TerminalRename", "tab FAILED id=\(shortID(tabId)) err=\(error.localizedDescription)")
+                if let projectId { await loadTabs(projectId: projectId, showLoader: false) }
+            }
+        }
+    }
+
+    // Rename a project: optimistic update of the projects list + selectedProject,
+    // then POST. Reload on failure.
+    func renameProject(_ project: CTProject, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != project.name else { return }
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].name = trimmed
+        }
+        if selectedProject?.id == project.id { selectedProject?.name = trimmed }
+        VCLog.log("TerminalRename", "project id=\(shortID(project.id)) → \(trimmed)")
+        Task {
+            do {
+                try await TerminalAPI.renameProject(projectId: project.id, name: trimmed)
+            } catch {
+                VCLog.log("TerminalRename", "project FAILED id=\(shortID(project.id)) err=\(error.localizedDescription)")
+                await refreshProjects(showLoader: false)
+            }
+        }
     }
 
     func selectProject(_ project: CTProject) {
         selectedProject = project
         selectedTab = nil
         let hasCachedTabs = !(tabsByProject[project.id]?.isEmpty ?? true)
-        Task { await loadTabs(projectId: project.id, showLoader: !hasCachedTabs, updateSelectedProject: true) }
+        VCLog.log("TerminalNav", "select project id=\(shortID(project.id)) name=\(project.name) cachedTabs=\(hasCachedTabs) tabCount=\(project.tabCount ?? -1) open=\(project.isOpen == true)")
+        if hasCachedTabs {
+            // Cached: the slide renders from cache instantly. DEFER the network
+            // refresh until the push/back animation has settled (~0.35s) so its
+            // @Published tabsByProject write can't land mid-slide and stutter it
+            // (logs showed a 100-300ms GET response rewriting the array right on
+            // top of the animation). updateSelectedProject:false so it can't swap
+            // selectedProject out from under the in-flight transition either.
+            Task {
+                try? await Task.sleep(for: .milliseconds(360))
+                guard selectedProject?.id == project.id else { return }
+                await loadTabs(projectId: project.id, showLoader: false, updateSelectedProject: true)
+            }
+        } else {
+            Task { await loadTabs(projectId: project.id, showLoader: true, updateSelectedProject: true) }
+        }
     }
 
     func loadTabs(projectId: String, showLoader: Bool = true, updateSelectedProject: Bool = true) async {
         if showLoader { loadingTabs.insert(projectId) }
+        let started = Date()
+        let cachedCount = tabsByProject[projectId]?.count ?? 0
+        VCLog.log("TerminalCache", "tabs load start project=\(shortID(projectId)) showLoader=\(showLoader) updateSelected=\(updateSelectedProject) cached=\(cachedCount)")
         do {
             let r = try await TerminalAPI.tabs(projectId: projectId)
-            if updateSelectedProject && selectedProject?.id == projectId {
+            if updateSelectedProject && selectedProject?.id == projectId, selectedProject != r.project {
                 selectedProject = r.project
             }
-            tabsByProject[projectId] = r.tabs
-            statusMarkerByProject[projectId] = r.statusMarker ?? .fallback
+            // Change-guard the @Published writes: a deferred/prefetch reload that
+            // returns identical tabs must not re-render the list (esp. mid-slide).
+            if tabsByProject[projectId] != r.tabs {
+                tabsByProject[projectId] = r.tabs
+            }
+            let newMarker = r.statusMarker ?? .fallback
+            if statusMarkerByProject[projectId] != newMarker {
+                statusMarkerByProject[projectId] = newMarker
+            }
             for tab in r.tabs {
                 guard let id = tab.tabId else { continue }
                 if let status = tab.sessionStatus { statusByTab[id] = status }
@@ -1094,7 +1368,21 @@ final class TerminalControlStore: ObservableObject {
             }
             offline = false
             lastError = nil
+            let statuses = r.tabs.reduce(into: [String: Int]()) { acc, tab in
+                let key = tab.sessionStatus ?? "nil"
+                acc[key, default: 0] += 1
+            }
+            let statusSummary = statuses
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            let markerSize = r.statusMarker?.sizePx.map { String(format: "%.0f", $0) } ?? "-"
+            VCLog.log(
+                "TerminalCache",
+                "tabs load done project=\(shortID(projectId)) tabs=\(r.tabs.count) ai=\(r.tabs.filter { $0.isInteractiveAI }.count) statuses=\(statusSummary) \(activityDebug(projectId: projectId)) marker=\(r.statusMarker?.shape ?? "-")/\(markerSize) ms=\(elapsedMs(since: started))"
+            )
         } catch {
+            VCLog.log("TerminalCache", "tabs load failed project=\(shortID(projectId)) ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
             mark(error)
         }
         if showLoader { loadingTabs.remove(projectId) }
@@ -1140,13 +1428,36 @@ final class TerminalControlStore: ObservableObject {
         selectedProject = project ?? selectedProject
         selectedTab = tab
         if let status = tab.sessionStatus { statusByTab[tabId] = status }
+        // Show the history spinner IMMEDIATELY (before the network GET starts) when
+        // there's nothing cached, so opening a chat reads as "loading…" from the
+        // first frame instead of a blank/janky pane until the 470KB history lands
+        // over the tunnel. activateSelectedTab → loadHistory clears it when done.
+        if (entriesByTab[tabId]?.isEmpty ?? true) {
+            historyLoading.insert(tabId)
+        }
         return tabId
     }
 
     func activateSelectedTab(tabId: String) async {
+        // Guard every step against the user navigating away mid-load. Without
+        // this, stepping back (backToTabs → selectedTab=nil + stopLiveChannel)
+        // while this chain is awaiting the remote tunnel still ran connectSSE /
+        // startStatusPolling for the DEAD tab — reviving a channel that was just
+        // stopped and racing the view's teardown (pin/proxy on an unmounted
+        // ScrollView). That race is the back-before-load crash. Each guard makes
+        // activation abort cleanly the instant the selection changes.
         await loadHistory(tabId: tabId)
+        guard selectedTab?.tabId == tabId else {
+            VCLog.log("TerminalSSE", "activate ABORT after history (tab changed) tab=\(shortID(tabId))")
+            return
+        }
         await refreshParams(tabId: tabId)
+        guard selectedTab?.tabId == tabId else { return }
         await refreshStatus(tabId: tabId)
+        guard selectedTab?.tabId == tabId else {
+            VCLog.log("TerminalSSE", "activate ABORT before SSE (tab changed) tab=\(shortID(tabId))")
+            return
+        }
         connectSSE(tabId: tabId)
         startStatusPolling(tabId: tabId)
     }
@@ -1208,6 +1519,8 @@ final class TerminalControlStore: ObservableObject {
         do {
             let s = try await TerminalAPI.status(tabId: tabId)
             let status = s.status ?? "inactive"
+            let oldStatus = statusByTab[tabId]
+            let oldRunning = runningTabs.contains(tabId)
             statusByTab[tabId] = status
             if status == "busy" {
                 runningTabs.insert(tabId)
@@ -1231,8 +1544,14 @@ final class TerminalControlStore: ObservableObject {
                     }
                 }
             }
+            VCLog.log(
+                "TerminalStatus",
+                "poll tab=\(shortID(tabId)) status=\(status) session=\(shortID(s.sessionId)) command=\(s.commandType ?? "-") tool=\(s.toolType ?? "-") busyField=\(s.busy.map { String($0) } ?? "-")"
+            )
+            logRuntimeTransition(tabId: tabId, reason: "poll", oldStatus: oldStatus, oldRunning: oldRunning)
             offline = false
         } catch {
+            VCLog.log("TerminalStatus", "poll failed tab=\(shortID(tabId)): \(error.localizedDescription)")
             mark(error)
         }
     }
@@ -1257,6 +1576,8 @@ final class TerminalControlStore: ObservableObject {
     func send(tabId: String, text: String) async throws {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        let oldStatus = statusByTab[tabId]
+        let oldRunning = runningTabs.contains(tabId)
         if let reducer = reducers[tabId] {
             entriesByTab[tabId] = reducer.addLocalUser(clean)
         } else {
@@ -1269,6 +1590,7 @@ final class TerminalControlStore: ObservableObject {
         statusByTab[tabId] = "busy"
         pendingPromptRecoveryByTab[tabId] = Date()
         draftNoticeByTab[tabId] = nil
+        logRuntimeTransition(tabId: tabId, reason: "local-send", oldStatus: oldStatus, oldRunning: oldRunning)
         do {
             try await TerminalAPI.send(tabId: tabId, prompt: clean, params: paramsByTab[tabId])
             offline = false
@@ -1301,10 +1623,13 @@ final class TerminalControlStore: ObservableObject {
         Task {
             do {
                 try await TerminalAPI.stop(tabId: tabId)
+                let oldStatus = statusByTab[tabId]
+                let oldRunning = runningTabs.contains(tabId)
                 statusByTab[tabId] = "inactive"
                 runningTabs.remove(tabId)
                 turnStartedAt[tabId] = nil
                 clearPromptRecovery(tabId: tabId)
+                logRuntimeTransition(tabId: tabId, reason: "local-stop-process", oldStatus: oldStatus, oldRunning: oldRunning)
             } catch { mark(error) }
         }
     }
@@ -1316,7 +1641,10 @@ final class TerminalControlStore: ObservableObject {
                 if r.alreadyRunning == true {
                     await refreshStatus(tabId: tabId)
                 } else {
+                    let oldStatus = statusByTab[tabId]
+                    let oldRunning = runningTabs.contains(tabId)
                     statusByTab[tabId] = "starting"
+                    logRuntimeTransition(tabId: tabId, reason: "local-resume-starting", oldStatus: oldStatus, oldRunning: oldRunning)
                 }
             } catch { mark(error) }
         }
@@ -1392,12 +1720,15 @@ final class TerminalControlStore: ObservableObject {
     }
 
     private func finishTurn(tabId: String, reason: String?) {
+        let oldStatus = statusByTab[tabId]
+        let oldRunning = runningTabs.contains(tabId)
         runningTabs.remove(tabId)
         if statusByTab[tabId] == "busy" { statusByTab[tabId] = "active" }
         turnStartedAt[tabId] = nil
         pendingQuestionByTab.removeValue(forKey: tabId)
         questionAnsweringTabs.remove(tabId)
         VCLog.log("TerminalSSE", "finish turn tab=\(shortID(tabId)) reason=\(reason ?? "-") entries=\(entriesByTab[tabId]?.count ?? 0)")
+        logRuntimeTransition(tabId: tabId, reason: "finish-turn:\(reason ?? "-")", oldStatus: oldStatus, oldRunning: oldRunning)
         scheduleHistoryReload(tabId: tabId, delayNs: 250_000_000, reason: "finish-turn")
 
         if isInterruptedTurnReason(reason) {
@@ -1569,6 +1900,8 @@ final class TerminalControlStore: ObservableObject {
         let seq = nextSSEEventSeq(tabId: tabId)
         switch event.type {
         case "snapshot":
+            let oldStatus = statusByTab[tabId]
+            let oldRunning = runningTabs.contains(tabId)
             if let status = event.sessionStatus {
                 statusByTab[tabId] = status
                 if status == "busy" { runningTabs.insert(tabId) } else { runningTabs.remove(tabId) }
@@ -1602,6 +1935,7 @@ final class TerminalControlStore: ObservableObject {
                 "TerminalSSE",
                 "event#\(seq) snapshot tab=\(shortID(tabId)) status=\(event.sessionStatus ?? "-") busy=\(event.busy.map { String($0) } ?? "-") session=\(shortID(event.sessionId)) tool=\(event.toolType ?? event.commandType ?? "-") entries=\(entriesByTab[tabId]?.count ?? 0) questions=\(event.questions?.count ?? 0)"
             )
+            logRuntimeTransition(tabId: tabId, reason: "sse-snapshot#\(seq)", oldStatus: oldStatus, oldRunning: oldRunning)
         case "message":
             if let msg = event.message {
                 let beforeEntries = entriesByTab[tabId]?.count ?? 0
@@ -1627,6 +1961,8 @@ final class TerminalControlStore: ObservableObject {
                 VCLog.log("TerminalSSE", "event#\(seq) message tab=\(shortID(tabId)) missing payload")
             }
         case "busy":
+            let oldStatus = statusByTab[tabId]
+            let oldRunning = runningTabs.contains(tabId)
             if event.busy == true {
                 runningTabs.insert(tabId)
                 statusByTab[tabId] = "busy"
@@ -1635,6 +1971,9 @@ final class TerminalControlStore: ObservableObject {
                 finishTurn(tabId: tabId, reason: event.reason)
             }
             VCLog.log("TerminalSSE", "event#\(seq) busy tab=\(shortID(tabId)) busy=\(event.busy.map { String($0) } ?? "-") reason=\(event.reason ?? "-") status=\(statusByTab[tabId] ?? "-")")
+            if event.busy == true {
+                logRuntimeTransition(tabId: tabId, reason: "sse-busy#\(seq)", oldStatus: oldStatus, oldRunning: oldRunning)
+            }
         case "done":
             finishTurn(tabId: tabId, reason: event.reason)
             VCLog.log("TerminalSSE", "event#\(seq) done tab=\(shortID(tabId)) reason=\(event.reason ?? "-")")
@@ -1702,6 +2041,17 @@ final class TerminalControlStore: ObservableObject {
         Int(Date().timeIntervalSince(date) * 1000)
     }
 
+    private func activeLoaderSummary(_ loaders: [CTActiveLoader]) -> String {
+        guard !loaders.isEmpty else { return "none" }
+        return loaders.prefix(8).map { loader in
+            let kind = loader.kind ?? "?"
+            let status = loader.status ?? "?"
+            let project = loader.project ?? "-"
+            let name = loader.name ?? "-"
+            return "\(kind):\(status):\(project)/\(name):\(shortID(loader.tabId))"
+        }.joined(separator: " | ") + (loaders.count > 8 ? " | +\(loaders.count - 8)" : "")
+    }
+
     private func messageDebugSummary(_ raw: CTRawMessage) -> String {
         let msgObject = object(raw.message)
         let blocks = msgObject?["content"].flatMap(array) ?? []
@@ -1759,6 +2109,7 @@ final class TerminalControlStore: ObservableObject {
         let ids = loadedProjects
             .filter { ($0.tabCount ?? 0) > 0 || $0.isOpen == true }
             .map(\.id)
+        VCLog.log("TerminalCache", "tabs prefetch schedule projects=\(ids.count) cancelledPrevious=true")
         guard !ids.isEmpty else { return }
 
         tabsPrefetchTask = Task { [weak self] in
@@ -1767,20 +2118,39 @@ final class TerminalControlStore: ObservableObject {
                 let alreadyCached = await MainActor.run {
                     !(self?.tabsByProject[projectId]?.isEmpty ?? true)
                 }
-                await self?.loadTabs(projectId: projectId, showLoader: false, updateSelectedProject: false)
-                if !alreadyCached {
-                    try? await Task.sleep(for: .milliseconds(80))
+                // Prefetch is a COLD-cache warmer, not a refresher. If a project's
+                // tabs are already cached, re-fetching them over the (possibly
+                // remote, 100-1300ms) tunnel re-writes @Published tabsByProject for
+                // no new info — and every such write re-renders the whole terminal
+                // tree. On a warm reconnect that's 9 redundant GETs landing across
+                // ~3s, each able to stutter an in-flight slide/drag. Skip cached;
+                // a project the user actually opens still gets a fresh load via
+                // selectProject. (Live status stays current via SSE, not prefetch.)
+                guard !alreadyCached else {
+                    await MainActor.run {
+                        VCLog.log("TerminalCache", "tabs prefetch SKIP cached project=\(self?.shortID(projectId) ?? String(projectId.suffix(8)))")
+                    }
+                    continue
                 }
+                await MainActor.run {
+                    VCLog.log("TerminalCache", "tabs prefetch item project=\(self?.shortID(projectId) ?? String(projectId.suffix(8))) alreadyCached=false")
+                }
+                await self?.loadTabs(projectId: projectId, showLoader: false, updateSelectedProject: false)
+                try? await Task.sleep(for: .milliseconds(80))
+            }
+            await MainActor.run {
+                VCLog.log("TerminalCache", "tabs prefetch done projects=\(ids.count)")
             }
         }
     }
 
     private func mark(_ error: Error) {
         let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let beforeOffline = offline
         lastError = msg
         if error is URLError { offline = true }
         if case VoiceChatError.http(let code, _) = error, code == 0 || code == 503 { offline = true }
-        VCLog.log("Terminal", msg)
+        VCLog.log("Terminal", "error type=\(String(describing: Swift.type(of: error))) offline \(beforeOffline)->\(offline): \(msg)")
     }
 
     private func isTerminalUnavailable(_ error: Error) -> Bool {

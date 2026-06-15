@@ -40,6 +40,12 @@
 - **Не делать on-device Wake-on-LAN для пробуждения Mac — пробовали, отклонили.** Unicast-magic-packet будит только ~5 мин после засыпания (потом ARP-запись истекает, кадр дропается), broadcast закрыт `multicast`-entitlement'ом (недоступен free Apple ID), sleep-proxy нет. Фичу удалили, юзер выбрал «не усыплять Mac». Надёжный wake потребовал бы always-on relay в LAN. Не переизобретать. См. `knowledge/fix-пробуждение-mac.md`.
 - **Не строить AI Chat history drawer на SwiftUI `DragGesture` / hidden `UIViewRepresentable` superview bridge.** Это root-level custom container transition, конкурирующий с `UIScrollView`, search/text input, iOS 26 back-swipe и tab bar. Compact iPhone drawer делается через `UIGestureRecognizerRepresentable` + кастомный `UIPanGestureRecognizer` с intent-lock и scroll arbitration; regular width — `NavigationSplitView`. См. `knowledge/fact-voice-chat-tab.md::History drawer gesture`.
 
+## Стандарт long-press (единый по проекту)
+
+Длительное зажатие строки/заголовка (карточка чата, вкладка терминала, проект, строка истории) = **нативный SwiftUI `.contextMenu`**, не кастомный жест. Он сам даёт платформенный feel, который юзер принял за эталон: мгновенный lift+scale элемента, haptic через ~0.1-0.2с, затем выпадающее меню. Действия в меню — лёгкие (Rename / Copy / Delete). Rename открывает bottom-sheet (`presentationDetents([.height(220),.medium])`, Cancel слева / Save справа, автофокус) — эталон `VoiceChatTitleEditorSheet` / `CTRenameSheet`. Не изобретать кастомный scale+haptic+popover там, где `.contextMenu` подходит (методология «Нативный компонент vs кастом»). Кастомный long-press оправдан ТОЛЬКО когда `.contextMenu` структурно не подходит (reorder-драг — там UIKit long-press recognizer, см. `fact-habit-tracker.md::Перестановка`).
+
+Переименование терминальных вкладок/проектов с телефона: вкладка — `POST /api/sdk-tabs/:id/rename` (уже было, ставит `nameSetManually`), проект — `POST /api/projects/:id/rename` (`renameProject` bridge → `updateProject{name}`). Оба в custom-terminal, оптимистично применяются в `TerminalControlStore`.
+
 ## Tabs
 
 Voice — **первая** вкладка (default at cold-start); Habits — вторая. Habit-виджет deep-link'ает в Habits через `habittracker://habits`. Детали — `knowledge/fact-voice-record.md::Tabs` и `knowledge/fact-habit-widget.md::Deep-link`.

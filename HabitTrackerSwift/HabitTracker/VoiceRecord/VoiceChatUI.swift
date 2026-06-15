@@ -314,6 +314,8 @@ private struct HistoryDrawerPanGesture: UIGestureRecognizerRepresentable {
 
             if isClosed {
                 guard !configuration.navigationCanGoBack else { return false }
+                // Rightward → open the drawer. Leftward-when-closed is declined so
+                // the ROOT pager (RootTabView) owns the chat→Voice page slide.
                 guard translation.x > 0 || velocity.x > 0 else { return false }
 
                 if !configuration.fullScreenOpenEnabled {
@@ -391,6 +393,7 @@ struct VoiceChatTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.bottomBarInset) private var bottomBarInset
 
     @State private var selectedChatId: String? = nil
     @State private var draftToken = UUID()
@@ -415,6 +418,21 @@ struct VoiceChatTabView: View {
         chatComposerFocused || terminalComposerFocused || allChatsSearchActive
     }
 
+    // Coarse lock for the root pager: only while the user types or the history
+    // drawer is open/dragging. NOT for the Terminal back-swipe.
+    //
+    // Terminal back-swipe is handled by a UIKit recognizer (TerminalBackPanGesture)
+    // that arbitrates directionally with the root pager via canPrevent: rightward
+    // → it claims the gesture and prevents the pager's scroll pan (back a level);
+    // leftward → it declines so the pager pages to Voice. Locking the pager on
+    // `canStepBack` (an earlier attempt) was wrong twice over: it killed
+    // leftward→Voice on the tabs/chat level, and toggling .scrollDisabled as
+    // canStepBack flipped at the projects boundary re-laid-out the ScrollView
+    // mid-animation — the jerk the user saw "именно на проектах".
+    private var pagingShouldLock: Bool {
+        textInputActive || drawerPhase != .closed
+    }
+
     var body: some View {
         Group {
             if horizontalSizeClass == .regular {
@@ -425,12 +443,36 @@ struct VoiceChatTabView: View {
         }
         .tint(.white)
         .background(VCPageBackground.ignoresSafeArea())
-        .toolbarBackground(VCPageBackground, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
+        // NB: no outer .safeAreaInset here — the page is inside the pager's
+        // containerRelativeFrame so it'd extend off-screen, and the ignoresSafeArea
+        // background above would reset it anyway. The chat reserves bar space
+        // internally: composer dock lifted by bottomBarInset + transcript bottom
+        // sentinel grown by it.
+        // Drive the root pager's coarse lock: the history drawer (rightward-open),
+        // composer/search typing, and Terminal back-swipe own horizontal motion on
+        // this surface, so the page-swipe must yield while any is active.
+        .onChange(of: pagingShouldLock) { _, lock in
+            router.pagingLocked = lock
+            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed)]")
+        }
+        // Focus-driven bar hide: the moment the composer/search is focused, tell
+        // the root shell to slide its glass bar away (and back on blur). Synchronous
+        // with focus so the bar and the keyboard-lifted composer move together — no
+        // notification lag. Mirrors textInputActive; terminal composer included.
+        .onChange(of: textInputActive) { _, active in
+            router.chatKeyboardUp = active
+            VCLog.log("bar", "textInputActive=\(active) chatFocus=\(chatComposerFocused) termFocus=\(terminalComposerFocused) search=\(allChatsSearchActive)")
+        }
         .onAppear {
             store.start()
             terminal.start()
             consumePending()
+            router.pagingLocked = pagingShouldLock
+            router.chatKeyboardUp = textInputActive
+        }
+        .onDisappear {
+            router.pagingLocked = false
+            router.chatKeyboardUp = false
         }
         .onChange(of: router.pendingChatRequest) { _, _ in consumePending() }
         .onChange(of: router.selected) { _, sel in
@@ -438,6 +480,11 @@ struct VoiceChatTabView: View {
                 store.start()
                 terminal.start()
                 consumePending()
+                router.pagingLocked = pagingShouldLock
+                router.chatKeyboardUp = textInputActive
+            } else {
+                router.pagingLocked = false   // never freeze paging on another tab
+                router.chatKeyboardUp = false // and always restore the bar off-chat
             }
         }
         .onChange(of: scenePhase) { _, p in
@@ -815,7 +862,9 @@ struct VoiceChatTabView: View {
         .overlay(alignment: .bottomTrailing) {
             floatingNewChatButton(action: { startNewChat(closeWidth: width) })
                 .padding(.trailing, 14)
-                .padding(.bottom, 16)
+                // Lift above the root glass bar (user: "New Chat в выдвижной
+                // панели повыше поднять"). bottomBarInset already carries the gap.
+                .padding(.bottom, bottomBarInset)
         }
         .overlay(alignment: .trailing) {
             Rectangle().fill(Color.white.opacity(0.12)).frame(width: 0.5)
@@ -979,6 +1028,7 @@ private struct AllChatsView: View {
     @ObservedObject private var store = VoiceChatStore.shared
     @State private var search = ""
     @FocusState private var searchFocused: Bool
+    @Environment(\.bottomBarInset) private var bottomBarInset
 
     @AppStorage(VoiceChatConfig.Keys.uiFont,
                 store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
@@ -1038,7 +1088,8 @@ private struct AllChatsView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
-                    .padding(.bottom, 150)
+                    // Clear the floating New Chat + search dock AND the root bar.
+                    .padding(.bottom, bottomBarInset + 92)
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -1052,7 +1103,9 @@ private struct AllChatsView: View {
                 allChatsSearchField
             }
             .padding(.horizontal, 16)
-            .padding(.bottom, 16)
+            // Lift the New Chat + search dock above the root glass bar; when the
+            // search keyboard is up the bar hides, so drop to a small constant.
+            .padding(.bottom, searchFocused ? 16 : bottomBarInset)
             .contentShape(Rectangle())
             .background(Color.black.opacity(0.001))
             .onTapGesture { }
@@ -1165,6 +1218,7 @@ struct ChatDetailView: View {
     let onComposerFocusChange: (Bool) -> Void
     @ObservedObject private var store = VoiceChatStore.shared
     @EnvironmentObject var router: TabRouter
+    @Environment(\.bottomBarInset) private var bottomBarInset
 
     @State private var chatId: String? = nil
     @State private var input = ""
@@ -1184,8 +1238,24 @@ struct ChatDetailView: View {
     @State private var keyboardVisible = false
     @State private var keyboardHeight: CGFloat = 0
     @State private var baseBottomInset: CGFloat = 0
+    // Set when the app drives its OWN keyboard dismissal (Send / hide button /
+    // offline). The proactive collapse already animated the composer down; the
+    // system willChangeFrame/willHide that follows must NOT re-animate the same
+    // value with a different curve, or the composer bobbles "down→up→down". The
+    // flag swallows that redundant second animation for a short window.
+    @State private var suppressSystemKeyboardHideUntil: Date = .distantPast
+    // Measured height of the docked composer (input + tool row + any attachment/
+    // confirm strips). The bottom scroll sentinel is sized to THIS instead of a
+    // fixed 142, so the gap between the last message and the input is exact — no
+    // oversized dead space (the "слишком большой отступ" the user noticed).
+    @State private var composerDockHeight: CGFloat = 0
     @State private var optimisticMessages: [VCMessage] = []
     @State private var localSending = false
+    // Auto-send arming: when true the trailing send button is a purple spinner
+    // and the next dictation insert auto-submits instead of just landing in the
+    // field. Armed by tap-on-empty or the long-press popover; cleared on send,
+    // cancel-tap, leaving the chat, or going offline.
+    @State private var autoSendArmed = false
     @FocusState private var composerFocused: Bool
 
     @AppStorage(VoiceChatConfig.Keys.model, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
@@ -1285,7 +1355,14 @@ struct ChatDetailView: View {
                                         }
                                         .padding(.horizontal, 10).padding(.vertical, 4)
                                     }
-                                    Color.clear.frame(height: 142).id("BOTTOM")
+                                    // Sentinel = real composer height (measured) +
+                                    // a small gap, so the last message sits just
+                                    // above the input. The composer is lifted by
+                                    // bottomBarInset when the keyboard is down, so
+                                    // include that; fall back to 132 until measured.
+                                    Color.clear
+                                        .frame(height: (composerDockHeight > 1 ? composerDockHeight : 132) + bottomBarInset + 12)
+                                        .id("BOTTOM")
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.top, 10)
@@ -1314,6 +1391,14 @@ struct ChatDetailView: View {
                     }
                     .overlay(alignment: .bottom) {
                         composerDock(proxy: proxy, keyboardLift: keyboardLift(in: geo))
+                            .background(
+                                GeometryReader { p in
+                                    Color.clear.preference(key: ComposerDockHeightKey.self, value: p.size.height)
+                                }
+                            )
+                    }
+                    .onPreferenceChange(ComposerDockHeightKey.self) { h in
+                        if h > 1 { composerDockHeight = h }
                     }
                 }
             }
@@ -1400,6 +1485,7 @@ struct ChatDetailView: View {
         .onDisappear {
             onComposerFocusChange(false)
             store.clearActiveComposer(chatId: chatId)
+            autoSendArmed = false   // arming is ephemeral to this composer surface
         }
         .task {
             if let id = initialChatId, let conv = await store.loadConversation(id), let b = conv.bypass {
@@ -1437,7 +1523,7 @@ struct ChatDetailView: View {
             onComposerFocusChange(focused)
         }
         .onChange(of: store.offline) { _, offline in
-            if offline { dismissKeyboard() }
+            if offline { dismissKeyboard(); autoSendArmed = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             updateKeyboard(from: note)
@@ -1497,7 +1583,18 @@ struct ChatDetailView: View {
     private func pin(_ proxy: ScrollViewProxy) {
         guard followBottom else { return }
         // Instant exact landing (scar: animated/eased scrolls undershoot).
+        // Pin in the SAME runloop for the common case, then once more after a
+        // yield: a row appended in this update isn't measured yet, so the first
+        // scrollTo can resolve against stale geometry (DTS: "can't scroll to an
+        // item added in the same update"). The deferred re-pin lands against the
+        // materialized row. Both no-animation. followBottom re-checked after the
+        // yield so a user who grabbed the scroll mid-flight isn't yanked back.
         proxy.scrollTo("BOTTOM", anchor: .bottom)
+        Task { @MainActor in
+            await Task.yield()
+            guard followBottom else { return }
+            proxy.scrollTo("BOTTOM", anchor: .bottom)
+        }
     }
 
     private var draftHint: some View {
@@ -1557,15 +1654,23 @@ struct ChatDetailView: View {
                 keyboardDismissButton
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .frame(height: 36)
+            // Collapse to zero height when the keyboard is DOWN: these buttons only
+            // act while typing, but a constant 36pt row reserved dead space between
+            // the last message and the input even when invisible — the persistent
+            // "слишком большой отступ". Now it occupies layout only when keyboard up.
+            .frame(height: keyboardVisible ? 36 : 0)
             .padding(.horizontal, 10)
             .opacity(keyboardVisible ? 1 : 0)
             .allowsHitTesting(keyboardVisible)
+            .clipped()
             composer
                 .disabled(store.offline)
                 .opacity(store.offline ? 0.45 : 1)
         }
-        .offset(y: -keyboardLift)
+        // Lift the composer above the root glass bar when the keyboard is DOWN
+        // (when it's up, the keyboard lift already clears the bar). Without this
+        // the composer sat at the screen edge, fully under the bar.
+        .offset(y: -(keyboardLift + (keyboardVisible ? 0 : bottomBarInset)))
         .animation(.easeInOut(duration: 0.16), value: shouldShowScrollToBottomButton)
     }
 
@@ -1601,6 +1706,14 @@ struct ChatDetailView: View {
         let intersection = window.bounds.intersection(keyboardFrameInWindow)
         let height = intersection.isNull || intersection.isEmpty ? 0 : intersection.height
         let visible = height > 0.5
+        // App-owned dismiss already animated the collapse: swallow the redundant
+        // system HIDE frame (a SHOW must always pass through so opening animates).
+        if !visible, Date() < suppressSystemKeyboardHideUntil {
+            keyboardHeight = 0
+            keyboardVisible = false
+            VCLog.log("Keyboard", "willChangeFrame HIDE suppressed (app-owned collapse owns it)")
+            return
+        }
         let animation = note.vcKeyboardAnimation(opening: visible)
         var transaction = Transaction(animation: animation)
         transaction.disablesAnimations = false
@@ -1618,6 +1731,13 @@ struct ChatDetailView: View {
     }
 
     private func beginKeyboardHide(from note: Notification) {
+        // App-owned dismiss already ran its collapse animation — don't re-animate.
+        if Date() < suppressSystemKeyboardHideUntil {
+            keyboardHeight = 0
+            keyboardVisible = false
+            VCLog.log("Keyboard", "willHide suppressed (app-owned collapse owns it)")
+            return
+        }
         let priorHeight = keyboardHeight
         let priorLift = max(0, priorHeight - baseBottomInset)
         let animation = note.vcKeyboardAnimation(opening: false, zeroDurationFallback: 0.22)
@@ -1636,6 +1756,9 @@ struct ChatDetailView: View {
 
     private func collapseKeyboardDock(reason: String, duration: Double = 0.16) {
         guard keyboardVisible || keyboardHeight > 0 else { return }
+        // Own this dismissal: swallow the system willChangeFrame/willHide that
+        // arrives in the next ~0.35s so the composer animates down exactly once.
+        suppressSystemKeyboardHideUntil = Date().addingTimeInterval(0.35)
         let priorHeight = keyboardHeight
         let priorLift = max(0, priorHeight - baseBottomInset)
         var transaction = Transaction(animation: .easeOut(duration: duration))
@@ -1709,13 +1832,14 @@ struct ChatDetailView: View {
                         }
                         .disabled(chatId == nil)
                     } else {
-                        Button { send(promptId: nil, variationId: nil) } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
-                                .frame(width: 38, height: 38)
-                                .background(Circle().fill(hasDraftPayload ? VCAccent : Color(white: 0.18)))
-                        }
-                        .disabled(!hasDraftPayload)
+                        ComposerSendButton(
+                            hasDraft: hasDraftPayload,
+                            armed: autoSendArmed,
+                            accent: VCAccent,
+                            onSend: { send(promptId: nil, variationId: nil) },
+                            onArm: { autoSendArmed = true },
+                            onCancelArm: { autoSendArmed = false }
+                        )
                     }
                 }
             }
@@ -1768,7 +1892,15 @@ struct ChatDetailView: View {
         guard let insert = store.pendingComposerInsert,
               insert.targetKey == VoiceChatStore.composerKey(for: chatId) else { return }
         appendToComposer(insert.text)
+        // consume nils out pendingComposerInsert (seq-guarded) → idempotent even
+        // if a view rebuild re-runs this handler before the send completes.
         store.consumeDictationInsert(insert)
+        // Armed → auto-submit the freshly-appended draft. Disarm FIRST so a
+        // second insert during the send round-trip can't re-fire (research E).
+        if autoSendArmed {
+            autoSendArmed = false
+            send(promptId: nil, variationId: nil)
+        }
     }
 
     private func appendToComposer(_ text: String) {
@@ -1815,7 +1947,18 @@ struct ChatDetailView: View {
         let sendVariationId = variationId ?? sentPromptAttachments.first?.variationId
         let attachments = gtAttachments
         guard !text.isEmpty || sendPromptId != nil || !attachments.isEmpty else { return }
-        dismissKeyboard()
+        // Scroll-jump-on-send fix (research June 2026, ChatGPT-5.5 33 src + Opus
+        // 4.8). The bug: the optimistic append fires pin()→scrollTo(.bottom) in the
+        // SAME runloop as dismissKeyboard()'s full-screen safe-area collapse, and
+        // `.defaultScrollAnchor(.bottom)` re-anchors on that size change — over
+        // variable-height rows this is FB20979569, an iOS-26-only regression
+        // (fine on iOS 18). Net: content lurches up ~a keyboard-height, new row
+        // lands off-screen-top. Fix = DON'T dismiss the keyboard in the same
+        // transaction as the append. Arm follow-bottom + append first so the pin
+        // lands against stable (keyboard-up) geometry; defer dismissKeyboard to
+        // the next runloop. NOT switching to safeAreaInset — the overlay composer
+        // is the documented keyboard model (fact-voice-chat-tab.md::Composer keyboard).
+        followBottom = true
         let optimistic = VCMessage(
             id: "local-" + UUID().uuidString,
             role: "user",
@@ -1828,7 +1971,10 @@ struct ChatDetailView: View {
         input = ""
         promptAttachments = []
         gtAttachments = []
-        followBottom = true
+        Task { @MainActor in
+            await Task.yield()      // let the append + bottom-pin commit first
+            dismissKeyboard()       // THEN collapse the keyboard — no coincident scrollTo
+        }
         Task {
             do {
                 let id = try await store.send(chatId: chatId, text: text, promptId: sendPromptId,
@@ -3987,6 +4133,13 @@ private struct FontStepper: View {
         editing = false
         if let v = Double(draft) { value = min(24, max(10, v)) }
     }
+}
+
+// Measures the docked composer's height so the transcript's bottom sentinel can
+// be sized to it exactly (no fixed-142 dead space above the input).
+private struct ComposerDockHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 private extension Notification {

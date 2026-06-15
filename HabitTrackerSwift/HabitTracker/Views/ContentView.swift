@@ -10,6 +10,8 @@ struct SelectedHabitItem: Identifiable {
 // MARK: - Content View
 struct ContentView: View {
     @EnvironmentObject var store: HabitStore
+    @EnvironmentObject var router: TabRouter
+    @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var weekOffset: Int = 0
     @State private var showAddSheet = false
     @State private var showSettingsSheet = false
@@ -101,6 +103,9 @@ struct ContentView: View {
                         }
                     }
                 }
+                // Lift the FAB stack above the root glass bar. bottomBarInset
+                // already includes the breathing gap; no extra padding.
+                .padding(.bottom, bottomBarInset)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -172,6 +177,11 @@ struct ContentView: View {
                 EditGroupSheet(group: group)
             }
         }
+        // Lock the root pager during reorder / an active row drag — that mode owns
+        // the drag and a horizontal pan must not flip tabs.
+        .onChange(of: isReordering) { _, on in router.pagingLocked = on || draggingIndex != nil }
+        .onChange(of: draggingIndex) { _, idx in router.pagingLocked = isReordering || idx != nil }
+        .onDisappear { router.pagingLocked = false }
     }
 
     // MARK: - Normal List (tap + long-press-to-edit, NO drag)
@@ -201,7 +211,9 @@ struct ContentView: View {
                             onEdit: { openEditor(for: item) }
                         )
                     }
-                    Color.clear.frame(height: 100)
+                    // Bottom spacer so the last habit row scrolls clear of the
+                    // root glass bar (env-passed clearance), with extra room for the FAB.
+                    Color.clear.frame(height: bottomBarInset + 72)
                 }
             }
             .scrollIndicators(.hidden)
@@ -269,7 +281,7 @@ struct ContentView: View {
                                    : .interactiveSpring(response: 0.25, dampingFraction: 0.8),
                                    value: itemOffset)
                 }
-                Color.clear.frame(height: 100)
+                Color.clear.frame(height: bottomBarInset + 72)
             }
             // Track the content's TRUE global top. As the list scrolls, this minY
             // goes negative; the row index = (globalTouchY − contentTopY)/rowHeight

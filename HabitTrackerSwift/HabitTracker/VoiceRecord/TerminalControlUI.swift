@@ -8,6 +8,138 @@ private let CTGreen = Color(hex: "22c55e")
 private let CTCodexGreen = Color(hex: "22c55e")
 private let CTViolet = Color(hex: "a78bfa")
 
+// MARK: - Terminal back-swipe (UIKit recognizer)
+//
+// The Terminal back-swipe (rightward → up one nav level: chat→tabs→projects) must
+// coexist with TWO other horizontal gestures on the same surface: the root pager
+// (RootTabView's paging UIScrollView — leftward pages chat→Voice) and vertical
+// list scrolling. A SwiftUI `DragGesture` cannot arbitrate with `UIScrollView` on
+// iOS 18/26 (FB14688465; `fix-ios-stability.md::custom DragGesture kills scroll`):
+// fast flicks were grabbed by the pager's pan and rubber-banded into empty space
+// (the black area), slow drags reached the DragGesture — the "иногда листается,
+// иногда нет" symptom. So this is a UIKit `UIPanGestureRecognizer`, mirroring
+// `HistoryDrawerPanRecognizer`: it claims RIGHTWARD only and `canPrevent`s the
+// scroll-view pan (back wins rightward, deterministically), and DECLINES leftward
+// + vertical so the pager pages to Voice and lists scroll. Directional split =
+// no race, no black overscroll.
+private final class TerminalBackPanRecognizer: UIPanGestureRecognizer {
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Once we've begun (claimed a rightward back-swipe), prevent the root
+        // pager's scroll pan so it can't also move.
+        if preventedGestureRecognizer.isScrollViewPanGesture { return true }
+        return super.canPrevent(preventedGestureRecognizer)
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // We are never prevented by a scroll-view pan — our `shouldBegin` already
+        // gated on direction, so if we begin we mean it.
+        if preventingGestureRecognizer.isScrollViewPanGesture { return false }
+        return super.canBePrevented(by: preventingGestureRecognizer)
+    }
+}
+
+@available(iOS 18.0, *)
+private struct TerminalBackPanGesture: UIGestureRecognizerRepresentable {
+    let isEnabled: Bool          // swipeBackEnabled && canStepBack && no forward anim
+    let width: CGFloat
+    let onBegan: () -> Void
+    let onChanged: (CGFloat) -> Void          // rightward translation, clamped ≥ 0
+    let onEnded: (_ translationX: CGFloat, _ predictedX: CGFloat, _ velocityX: CGFloat) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> TerminalBackPanRecognizer {
+        let r = TerminalBackPanRecognizer()
+        r.maximumNumberOfTouches = 1
+        r.cancelsTouchesInView = true
+        r.delaysTouchesBegan = false
+        r.delaysTouchesEnded = false
+        r.delegate = context.coordinator
+        context.coordinator.configuration = self
+        return r
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: TerminalBackPanRecognizer, context: Context) {
+        context.coordinator.configuration = self
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: TerminalBackPanRecognizer, context: Context) {
+        context.coordinator.handle(recognizer)
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var configuration: TerminalBackPanGesture?
+
+        func handle(_ recognizer: TerminalBackPanRecognizer) {
+            guard let configuration, let view = recognizer.view else { return }
+            let tx = recognizer.translation(in: view).x
+            switch recognizer.state {
+            case .began:
+                VCLog.log("term-swipe", "uikit BEGAN tx=\(Int(tx))")
+                configuration.onBegan()
+            case .changed:
+                configuration.onChanged(max(0, tx))
+            case .ended:
+                let v = recognizer.velocity(in: view).x
+                // predicted end = current + velocity-projected (UIKit doesn't give
+                // predictedEndTranslation on pan, approximate with v * 0.25s).
+                let predicted = tx + v * 0.25
+                VCLog.log("term-swipe", "uikit ENDED tx=\(Int(tx)) v=\(Int(v)) predicted=\(Int(predicted))")
+                configuration.onEnded(tx, predicted, v)
+            case .cancelled, .failed:
+                VCLog.log("term-swipe", "uikit \(recognizer.state == .cancelled ? "CANCELLED" : "FAILED")")
+                configuration.onCancelled()
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let configuration,
+                  configuration.isEnabled,
+                  let pan = gestureRecognizer as? UIPanGestureRecognizer,
+                  let view = gestureRecognizer.view else {
+                VCLog.log("term-swipe", "uikit shouldBegin=NO enabled=\(configuration?.isEnabled ?? false)")
+                return false
+            }
+            let t = pan.translation(in: view)
+            let v = pan.velocity(in: view)
+            // RIGHTWARD + dominantly horizontal only. Leftward (page→Voice) and
+            // vertical (list scroll) are declined so their owners win.
+            let translationRight = t.x >= 8 && t.x >= abs(t.y) * 1.2
+            let velocityRight = v.x >= 220 && v.x >= abs(v.y) * 0.9
+            let begin = translationRight || velocityRight
+            VCLog.log("term-swipe", "uikit shouldBegin=\(begin ? "YES" : "no") t=(\(Int(t.x)),\(Int(t.y))) v=(\(Int(v.x)),\(Int(v.y)))")
+            return begin
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldReceive touch: UITouch) -> Bool {
+            // Don't start a back-swipe from inside a text field / control.
+            var current = touch.view
+            while let view = current {
+                if view is UITextField || view is UITextView || view is UIControl { return false }
+                current = view.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            // Exclusive: once we own the rightward back-swipe, nobody else moves.
+            false
+        }
+    }
+}
+
+private extension UIGestureRecognizer {
+    var isScrollViewPanGesture: Bool {
+        guard let scrollView = view as? UIScrollView else { return false }
+        return scrollView.panGestureRecognizer === self
+    }
+}
+
 private struct TerminalHeaderTitle: View {
     let title: String
     let subtitle: String
@@ -100,6 +232,11 @@ struct TerminalControlRootView: View {
     @State private var horizontalScrollLocked = false
     @State private var terminalSelectionSuppressed = false
     @State private var terminalSelectionSuppressionGeneration = 0
+    // True from the instant a back-swipe begins (before the offset moves), so the
+    // heavy back-preview list mounts and renders one frame EARLY instead of
+    // instantiating on the same frame the drag first offsets it — that same-frame
+    // cost was the stutter when sliding back to the projects list.
+    @State private var backInteractionActive = false
 
     private var terminalInteractionsSuspended: Bool {
         terminalSelectionSuppressed || forwardDestination != nil || backDragOffset > 0
@@ -108,7 +245,10 @@ struct TerminalControlRootView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                if backDragOffset > 0, store.canStepBack {
+                // Mount the back-preview as soon as the interaction BEGINS (not when
+                // the offset first moves) so its heavy list is already rendered when
+                // the drag starts shifting it — removes the first-frame stutter.
+                if backInteractionActive, store.canStepBack {
                     terminalBackPreview
                         .frame(width: geo.size.width, height: geo.size.height)
                         .offset(x: terminalBackPreviewOffset(width: geo.size.width))
@@ -117,14 +257,21 @@ struct TerminalControlRootView: View {
                 terminalContent(width: geo.size.width)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .offset(x: backDragOffset + terminalForwardContentOffset(width: geo.size.width))
-                    .shadow(color: .black.opacity(backDragOffset > 0 ? 0.32 : 0), radius: 18, x: -8, y: 0)
+                    // Static-radius drop shadow drawn only while a slide is active.
+                    // The opacity is constant during the slide (not keyed to the
+                    // moving offset) so SwiftUI doesn't re-rasterize the shadow every
+                    // frame — the per-frame shadow recompute was part of the jank.
+                    .compositingGroup()
+                    .shadow(color: .black.opacity((backInteractionActive || forwardDestination != nil) ? 0.3 : 0),
+                            radius: 14, x: -8, y: 0)
                     .allowsHitTesting(forwardDestination == nil && backDragOffset == 0)
 
                 if let forwardDestination {
                     terminalForwardView(forwardDestination, width: geo.size.width)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .offset(x: forwardOffset)
-                        .shadow(color: .black.opacity(0.30), radius: 18, x: -8, y: 0)
+                        .compositingGroup()
+                        .shadow(color: .black.opacity(0.3), radius: 14, x: -8, y: 0)
                         .allowsHitTesting(false)
                 }
             }
@@ -137,7 +284,20 @@ struct TerminalControlRootView: View {
                     VoiceChatStore.shared.clearActiveComposerKey(VoiceChatStore.terminalComposerKey(tabId: tabId))
                 }
             }
-            .simultaneousGesture(terminalBackGesture(width: geo.size.width))
+            // UIKit back-swipe recognizer (rightward → up one level). Mounted via
+            // .gesture; its delegate gates direction and prevents the root pager's
+            // scroll pan so rightward is deterministic (no black overscroll / race).
+            // Enabled only when there's a level to go back to and no forward anim.
+            .gesture(
+                TerminalBackPanGesture(
+                    isEnabled: swipeBackEnabled && store.canStepBack && forwardDestination == nil,
+                    width: geo.size.width,
+                    onBegan: { beginTerminalBackDrag() },
+                    onChanged: { tx in updateTerminalBackDrag(tx, width: geo.size.width) },
+                    onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, width: geo.size.width) },
+                    onCancelled: { cancelTerminalBackDrag() }
+                )
+            )
         }
     }
 
@@ -177,45 +337,59 @@ struct TerminalControlRootView: View {
         }
     }
 
-    private func terminalBackGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 24, coordinateSpace: .local)
-            .onChanged { value in
-                guard swipeBackEnabled, store.canStepBack, forwardDestination == nil else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return }
-                beginTerminalHorizontalInteraction()
-                backDragOffset = min(dx, max(0, width - 18))
+    // UIKit back-swipe handlers (driven by TerminalBackPanGesture). The recognizer
+    // already gated direction/enable in shouldBegin, so these just track the drag.
+    private func beginTerminalBackDrag() {
+        VCLog.log("term-swipe", "begin drag level=\(terminalLevelLabel)")
+        backInteractionActive = true   // mount the preview before the offset moves
+        beginTerminalHorizontalInteraction()
+    }
+
+    private func updateTerminalBackDrag(_ translationX: CGFloat, width: CGFloat) {
+        backDragOffset = min(translationX, max(0, width - 18))
+    }
+
+    private func endTerminalBackDrag(_ translationX: CGFloat, predicted: CGFloat, width: CGFloat) {
+        let commit = translationX > 64 || predicted > 110
+        guard commit else {
+            VCLog.log("term-swipe", "end CANCEL tx=\(Int(translationX)) predicted=\(Int(predicted)) (below threshold)")
+            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9), completionCriteria: .logicallyComplete) {
+                backDragOffset = 0
+            } completion: {
+                backInteractionActive = false
+                endTerminalHorizontalInteraction()
             }
-            .onEnded { value in
-                guard swipeBackEnabled, store.canStepBack, forwardDestination == nil else {
-                    backDragOffset = 0
-                    endTerminalHorizontalInteraction()
-                    return
-                }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                let projected = value.predictedEndTranslation.width
-                guard abs(dx) > abs(dy) * 1.25, dx > 64 || projected > 110 else {
-                    withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9), completionCriteria: .logicallyComplete) {
-                        backDragOffset = 0
-                    } completion: {
-                        endTerminalHorizontalInteraction()
-                    }
-                    return
-                }
-                withAnimation(.easeOut(duration: 0.14), completionCriteria: .logicallyComplete) {
-                    backDragOffset = width
-                } completion: {
-                    var transaction = Transaction(animation: nil)
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        store.stepBackOneLevel()
-                        backDragOffset = 0
-                        endTerminalHorizontalInteraction()
-                    }
-                }
+            return
+        }
+        VCLog.log("term-swipe", "end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(terminalLevelLabel)")
+        withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
+            backDragOffset = width
+        } completion: {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                store.stepBackOneLevel()
+                backDragOffset = 0
+                backInteractionActive = false
+                endTerminalHorizontalInteraction()
             }
+        }
+    }
+
+    private func cancelTerminalBackDrag() {
+        VCLog.log("term-swipe", "cancel drag")
+        withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9)) {
+            backDragOffset = 0
+        }
+        backInteractionActive = false
+        endTerminalHorizontalInteraction()
+    }
+
+    // Human-readable current Terminal nav level for swipe logs.
+    private var terminalLevelLabel: String {
+        if store.selectedTab != nil { return "chat" }
+        if store.selectedProject != nil { return "tabs" }
+        return "projects"
     }
 
     private func terminalBackPreviewOffset(width: CGFloat) -> CGFloat {
@@ -237,18 +411,27 @@ struct TerminalControlRootView: View {
             store.selectProject(project)
             return
         }
+        VCLog.log("term-swipe", "pushProject \(project.name) — mount@width then slide")
         backDragOffset = 0
         beginTerminalHorizontalInteraction()
+        // Mount the incoming page OFF-SCREEN (forwardOffset = width) with NO
+        // animation first; let SwiftUI render that frame, THEN slide it in next
+        // runloop. Previously mount + animate shared one transaction, so the heavy
+        // tabs list instantiated on the slide's first frame → the "дёрганое"
+        // open. The pre-render frame absorbs the instantiation cost off-screen.
         forwardDestination = .project(project)
         forwardOffset = width
-        withAnimation(.easeOut(duration: 0.14), completionCriteria: .logicallyComplete) {
-            forwardOffset = 0
-        } completion: {
-            commitWithoutTerminalAnimation {
-                store.selectProject(project)
-                forwardDestination = nil
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
-                endTerminalHorizontalInteraction()
+            } completion: {
+                commitWithoutTerminalAnimation {
+                    store.selectProject(project)
+                    forwardDestination = nil
+                    forwardOffset = 0
+                    endTerminalHorizontalInteraction()
+                }
             }
         }
     }
@@ -260,22 +443,26 @@ struct TerminalControlRootView: View {
             Task { await store.openTab(tab, project: project) }
             return
         }
+        VCLog.log("term-swipe", "pushTab \(tab.name) — mount@width then slide")
         backDragOffset = 0
         beginTerminalHorizontalInteraction()
         forwardDestination = .tab(tab, project)
         forwardOffset = width
-        withAnimation(.easeOut(duration: 0.14), completionCriteria: .logicallyComplete) {
-            forwardOffset = 0
-        } completion: {
-            let tabId = commitWithoutTerminalAnimation {
-                let tabId = store.selectTabForDisplay(tab, project: project)
-                forwardDestination = nil
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
-                endTerminalHorizontalInteraction()
-                return tabId
-            }
-            if let tabId {
-                Task { await store.activateSelectedTab(tabId: tabId) }
+            } completion: {
+                let tabId = commitWithoutTerminalAnimation {
+                    let tabId = store.selectTabForDisplay(tab, project: project)
+                    forwardDestination = nil
+                    forwardOffset = 0
+                    endTerminalHorizontalInteraction()
+                    return tabId
+                }
+                if let tabId {
+                    Task { await store.activateSelectedTab(tabId: tabId) }
+                }
             }
         }
     }
@@ -359,8 +546,10 @@ private struct TerminalProjectsView: View {
     let interactionsSuspended: Bool
     let onOpenProject: (CTProject) -> Void
     @ObservedObject private var store = TerminalControlStore.shared
+    @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showBuildInstallConfirm = false
     @State private var installAlert: TerminalInstallAlert?
+    @State private var renameTarget: CTProject?
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -397,13 +586,27 @@ private struct TerminalProjectsView: View {
                             }
                             .buttonStyle(.plain)
                             .allowsHitTesting(!interactionsSuspended)
+                            // Standard long-press: native contextMenu (lift/scale +
+                            // haptic + dropdown). Rename → PATCH on Mac (custom-terminal
+                            // project:save-metadata); Copy name / path for convenience.
+                            .contextMenu {
+                                Button { renameTarget = project } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                Button { UIPasteboard.general.string = project.name } label: {
+                                    Label("Copy name", systemImage: "doc.on.doc")
+                                }
+                                Button { UIPasteboard.general.string = project.path } label: {
+                                    Label("Copy path", systemImage: "folder")
+                                }
+                            }
                             .id(project.id)
                         }
                     }
                     .scrollTargetLayout()
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
-                    .padding(.bottom, 120)
+                    .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
                 }
                 .scrollPosition(id: scrollAnchor)
                 .refreshable { await store.refreshProjects() }
@@ -427,6 +630,7 @@ private struct TerminalProjectsView: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
+                    VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
                     Task { await prepareBuildInstall() }
                 } label: {
                     if store.terminalInstallRunning {
@@ -448,9 +652,12 @@ private struct TerminalProjectsView: View {
         .toolbarBackground(.visible, for: .navigationBar)
         .confirmationDialog("Запустить npm run build:install?", isPresented: $showBuildInstallConfirm, titleVisibility: .visible) {
             Button("Запустить install", role: .destructive) {
+                VCLog.log("TerminalInstallUI", "confirm accepted")
                 Task { await runBuildInstall() }
             }
-            Button("Отмена", role: .cancel) {}
+            Button("Отмена", role: .cancel) {
+                VCLog.log("TerminalInstallUI", "confirm cancelled")
+            }
         } message: {
             Text("Custom Terminal станет недоступен на время переустановки. Запуск пойдёт через Voice Record, поэтому процесс не оборвётся при закрытии Terminal.")
         }
@@ -461,21 +668,33 @@ private struct TerminalProjectsView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .sheet(item: $renameTarget) { project in
+            CTRenameSheet(title: "Rename project", label: "Project name", initialName: project.name) { newName in
+                store.renameProject(project, to: newName)
+            }
+        }
     }
 
     private func prepareBuildInstall() async {
-        guard !store.terminalInstallRunning else { return }
+        guard !store.terminalInstallRunning else {
+            VCLog.log("TerminalInstallUI", "prepare ignored already-running")
+            return
+        }
+        VCLog.log("TerminalInstallUI", "prepare start")
         do {
             let blockers = try await store.terminalBuildInstallBlockers()
             if !blockers.isEmpty {
+                VCLog.log("TerminalInstallUI", "prepare blocked count=\(blockers.count)")
                 installAlert = TerminalInstallAlert(
                     title: "Terminal занят",
                     message: buildBlockerMessage(blockers)
                 )
                 return
             }
+            VCLog.log("TerminalInstallUI", "prepare ok showConfirm")
             showBuildInstallConfirm = true
         } catch {
+            VCLog.log("TerminalInstallUI", "prepare failed: \(friendlyError(error))")
             installAlert = TerminalInstallAlert(
                 title: "Не удалось проверить Terminal",
                 message: friendlyError(error)
@@ -484,12 +703,15 @@ private struct TerminalProjectsView: View {
     }
 
     private func runBuildInstall() async {
+        VCLog.log("TerminalInstallUI", "run start")
         do {
             let job = try await store.runTerminalBuildInstall()
             let command = job?.command ?? "npm run build:install"
+            VCLog.log("TerminalInstallUI", "run success command=\(command)")
             installAlert = TerminalInstallAlert(title: "Install завершён", message: command + " завершился.")
             await store.refreshProjects()
         } catch {
+            VCLog.log("TerminalInstallUI", "run failed: \(friendlyError(error))")
             installAlert = TerminalInstallAlert(title: "Install не завершился", message: friendlyError(error))
         }
     }
@@ -604,7 +826,9 @@ private struct TerminalProjectTabsView: View {
     let interactionsSuspended: Bool
     let onOpenTab: (CTTabInfo) -> Void
     @ObservedObject private var store = TerminalControlStore.shared
+    @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showNewTerminal = false
+    @State private var renameTarget: CTTabInfo?
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
@@ -647,13 +871,23 @@ private struct TerminalProjectTabsView: View {
                             .disabled(!tab.isInteractiveAI)
                             .allowsHitTesting(!interactionsSuspended)
                             .opacity(tab.isInteractiveAI ? 1 : 0.55)
+                            // Standard long-press: native contextMenu (lift/scale +
+                            // haptic + dropdown). Rename works for ANY open tab.
+                            .contextMenu {
+                                Button { renameTarget = tab } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                Button { UIPasteboard.general.string = tab.name } label: {
+                                    Label("Copy name", systemImage: "doc.on.doc")
+                                }
+                            }
                             .id(tab.tabId ?? tab.id)
                         }
                     }
                     .scrollTargetLayout()
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
-                    .padding(.bottom, 120)
+                    .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
                 }
                 .scrollPosition(id: scrollAnchor)
                 .refreshable { await store.loadTabs(projectId: project.id) }
@@ -664,7 +898,10 @@ private struct TerminalProjectTabsView: View {
                 showNewTerminal = true
             }
             .padding(.trailing, 16)
-            .padding(.bottom, 18)
+            // Lift above the root glass bar (user: "на странице проекта в правом
+            // нижнем углу New Terminal тоже повыше поднять"). +4 keeps a touch
+            // more gap than the list rows since this is a tap target.
+            .padding(.bottom, bottomBarInset + 4)
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -694,6 +931,11 @@ private struct TerminalProjectTabsView: View {
         .sheet(isPresented: $showNewTerminal) {
             TerminalNewTerminalSheet(project: project)
                 .presentationDetents([.medium])
+        }
+        .sheet(item: $renameTarget) { tab in
+            CTRenameSheet(title: "Rename tab", label: "Tab name", initialName: tab.name) { newName in
+                store.renameTab(tab, to: newName, projectId: project.id)
+            }
         }
     }
 }
@@ -929,6 +1171,7 @@ private struct TerminalChatDetailView: View {
 
     @ObservedObject private var store = TerminalControlStore.shared
     @ObservedObject private var voiceStore = VoiceChatStore.shared
+    @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var input = ""
     @State private var showTerminalPrompts = false
     @State private var showVoicePrompts = false
@@ -938,11 +1181,25 @@ private struct TerminalChatDetailView: View {
     @State private var draftNotice: String?
     @State private var showQueue = false
     @State private var showTimeline = false
+    @State private var showRename = false
     @State private var localSending = false
     @State private var followBottom = true
     @State private var userTouching = false
     @State private var distFromBottom: CGFloat = 0
+    // Auto-send arming (see ComposerSendButton). Armed → purple spinner on the
+    // send button; the next dictation insert auto-submits instead of just
+    // landing in the field.
+    @State private var autoSendArmed = false
     @FocusState private var composerFocused: Bool
+    // Keyboard lift for the docked composer. The terminal chat previously had NO
+    // keyboard handling at all — it relied on the system's automatic avoidance,
+    // which the root pager's containerRelativeFrame + ignoresSafeArea defeat, so
+    // the keyboard rose but the composer stayed pinned behind it (user: "инпут не
+    // поднимается"). We mirror the Gemini ChatDetailView overlay model: measure
+    // keyboard overlap against the window and lift the composer by an offset
+    // (NOT safeAreaInset — the documented overlay-composer model).
+    @State private var keyboardOverlap: CGFloat = 0
+    @State private var keyboardLiftAnim: Animation = .easeOut(duration: 0.22)
 
     @AppStorage(VoiceChatConfig.Keys.chatFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var chatFont: Double = 15
@@ -979,7 +1236,7 @@ private struct TerminalChatDetailView: View {
                                     TerminalEntryView(entry: entry, chatFont: chatFont)
                                 }
                             }
-                            Color.clear.frame(height: 142).id("BOTTOM")
+                            Color.clear.frame(height: 142 + bottomBarInset).id("BOTTOM")
                         }
                         .padding(.horizontal, 8)
                         .padding(.top, 48)
@@ -1014,6 +1271,11 @@ private struct TerminalChatDetailView: View {
                 }
                 .overlay(alignment: .bottom) {
                     terminalComposer(proxy: proxy)
+                        // Lift above the keyboard. When the keyboard is up,
+                        // keyboardOverlap = its height minus the home-indicator
+                        // inset already baked into the composer's bottom padding.
+                        .offset(y: -keyboardOverlap)
+                        .animation(keyboardLiftAnim, value: keyboardOverlap)
                 }
                 .onChange(of: entries.count) { _, _ in pin(proxy) }
                 .onChange(of: busy) { _, _ in pin(proxy) }
@@ -1049,6 +1311,18 @@ private struct TerminalChatDetailView: View {
                     }
                 }
                 .frame(maxWidth: 190)
+                .contentShape(Rectangle())
+                // Long-press the title for tab actions — the standard native
+                // contextMenu (instant lift/scale + haptic + dropdown). Rename
+                // mirrors the Gemini chat title; double-tap-copy stays as-is.
+                .contextMenu {
+                    Button { showRename = true } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                    Button { UIPasteboard.general.string = tab.name } label: {
+                        Label("Copy name", systemImage: "doc.on.doc")
+                    }
+                }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button { Task { await store.loadHistory(tabId: tabId) } } label: {
@@ -1081,10 +1355,12 @@ private struct TerminalChatDetailView: View {
             // forward copy unmounts, so this guard preserves the key on handoff.
             if !tabId.isEmpty && store.selectedTab?.tabId != tabId {
                 voiceStore.clearActiveComposerKey(voiceComposerKey)
+                autoSendArmed = false   // arming is ephemeral to this composer
             }
         }
         .onChange(of: tabId) { oldValue, newValue in
             if !oldValue.isEmpty { voiceStore.clearActiveComposerKey(VoiceChatStore.terminalComposerKey(tabId: oldValue)) }
+            autoSendArmed = false       // switching tabs drops any pending arm
             if !newValue.isEmpty {
                 voiceStore.setActiveComposerKey(VoiceChatStore.terminalComposerKey(tabId: newValue))
                 consumePendingDictationInsert()
@@ -1092,6 +1368,17 @@ private struct TerminalChatDetailView: View {
             }
         }
         .onChange(of: composerFocused) { _, focused in onComposerFocusChange(focused) }
+        // Keyboard lift: drive the composer offset off the real keyboard frame.
+        // willChangeFrame covers show/predictive/interactive; willHide covers
+        // dismissal. Overlap = how much the keyboard intrudes into the window
+        // minus the home-indicator safe area (the composer already floats above
+        // that via its bottom padding), so we don't double-count it.
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            applyTerminalKeyboard(note, hiding: false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+            applyTerminalKeyboard(note, hiding: true)
+        }
         .sheet(isPresented: $showTerminalPrompts) {
             TerminalPromptPicker { text in
                 appendPrompt(text)
@@ -1113,6 +1400,11 @@ private struct TerminalChatDetailView: View {
         .sheet(isPresented: $showTimeline) {
             TerminalTimelineSheet(tabId: tabId)
                 .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showRename) {
+            CTRenameSheet(title: "Rename tab", label: "Tab name", initialName: tab.name) { newName in
+                store.renameTab(tab, to: newName)
+            }
         }
         .sheet(isPresented: $showGTPicker) {
             VoiceChatGTFilePicker { att, closeAfterPick in
@@ -1153,7 +1445,16 @@ private struct TerminalChatDetailView: View {
 
     private func pin(_ proxy: ScrollViewProxy) {
         guard followBottom else { return }
+        // Pin now + once more after a yield: a row appended in this update isn't
+        // measured yet, so the first scrollTo can resolve against stale geometry.
+        // The deferred re-pin lands against the materialized row. Both instant
+        // (animated scrolls undershoot). followBottom re-checked after the yield.
         proxy.scrollTo("BOTTOM", anchor: .bottom)
+        Task { @MainActor in
+            await Task.yield()
+            guard followBottom else { return }
+            proxy.scrollTo("BOTTOM", anchor: .bottom)
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -1280,14 +1581,15 @@ private struct TerminalChatDetailView: View {
                                     .background(Circle().fill(Color(hex: "ef4444")))
                             }
                         } else {
-                            Button { send() } label: {
-                                Image(systemName: "arrow.up")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 38, height: 38)
-                                    .background(Circle().fill(hasDraft ? CTViolet : Color(white: 0.18)))
-                            }
-                            .disabled(!hasDraft || !canUseComposer)
+                            ComposerSendButton(
+                                hasDraft: hasDraft,
+                                armed: autoSendArmed,
+                                accent: CTViolet,
+                                onSend: { if canUseComposer { send() } },
+                                onArm: { if canUseComposer { autoSendArmed = true } },
+                                onCancelArm: { autoSendArmed = false }
+                            )
+                            .opacity(canUseComposer ? 1 : 0.5)
                         }
                     }
                 }
@@ -1297,9 +1599,15 @@ private struct TerminalChatDetailView: View {
                 .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(Color(white: 0.105)))
                 .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(Color.white.opacity(0.18)))
                 .padding(.horizontal, 10)
-                .padding(.bottom, 8)
             }
         }
+        // Lift the WHOLE dock — composer, Resume banner, Starting strip, question
+        // card — above the root glass bar by the same amount. Previously only the
+        // composer branch carried this inset, so the Resume banner sat lower and
+        // the bar clipped it (user's Image #5: "resume session тоже вылазит").
+        // When the keyboard is up the root bar hides and the lift already clears
+        // it, so the inset drops to a small constant gap.
+        .padding(.bottom, 8 + (composerFocused ? 0 : bottomBarInset))
         .background(LinearGradient(colors: [CTPageBackground.opacity(0), CTPageBackground], startPoint: .top, endPoint: .bottom).allowsHitTesting(false))
     }
 
@@ -1327,6 +1635,45 @@ private struct TerminalChatDetailView: View {
         .buttonStyle(.plain)
     }
 
+    // Compute keyboard overlap against the key window and lift the composer by
+    // it. Mirrors the Gemini chat's overlay-keyboard model but kept minimal and
+    // self-contained for the terminal chat. Subtract the bottom safe-area inset
+    // because the composer already floats above the home indicator via padding.
+    private func applyTerminalKeyboard(_ note: Notification, hiding: Bool) {
+        if let isLocal = note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool, !isLocal { return }
+        var overlap: CGFloat = 0
+        if !hiding,
+           let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+           let win = UIApplication.vcKeyWindow {
+            let inWindow = win.convert(end, from: win.screen.coordinateSpace)
+            let inter = win.bounds.intersection(inWindow)
+            let raw = inter.isNull ? 0 : inter.height
+            let safeBottom = win.safeAreaInsets.bottom
+            overlap = max(0, raw - safeBottom)
+        }
+        // Match the keyboard's own duration/curve (private curve 7 on iOS 26 has
+        // no faithful SwiftUI mapping → front-loaded open / easeOut close).
+        let rawDur = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let dur = rawDur <= 0.01 ? 0.22 : rawDur
+        let curve = note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? -1
+        let opening = overlap > 0
+        if curve == 7 {
+            keyboardLiftAnim = opening
+                ? .timingCurve(0.17, 0.84, 0.44, 1.0, duration: min(0.28, max(0.18, dur * 0.70)))
+                : .easeOut(duration: dur)
+        } else if let c = UIView.AnimationCurve(rawValue: curve) {
+            let t = UICubicTimingParameters(animationCurve: c)
+            keyboardLiftAnim = .timingCurve(Double(t.controlPoint1.x), Double(t.controlPoint1.y),
+                                            Double(t.controlPoint2.x), Double(t.controlPoint2.y), duration: dur)
+        } else {
+            keyboardLiftAnim = .easeOut(duration: dur)
+        }
+        if keyboardOverlap != overlap {
+            withAnimation(keyboardLiftAnim) { keyboardOverlap = overlap }
+            VCLog.log("term-kbd", "overlap=\(Int(overlap)) hiding=\(hiding) curve=\(curve) dur=\(String(format: "%.2f", dur))")
+        }
+    }
+
     private func dismissTerminalKeyboard() {
         composerFocused = false
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -1344,8 +1691,16 @@ private struct TerminalChatDetailView: View {
         guard let insert = voiceStore.pendingComposerInsert,
               insert.targetKey == voiceComposerKey else { return }
         appendPrompt(insert.text)
+        // seq-guarded consume → idempotent against view rebuilds.
         voiceStore.consumeDictationInsert(insert)
-        composerFocused = true
+        // Armed → auto-submit. Disarm FIRST so a second insert mid-send can't
+        // re-fire. Only when the composer is actually usable (not resuming/busy).
+        if autoSendArmed && canUseComposer && !busy {
+            autoSendArmed = false
+            send()
+        } else {
+            composerFocused = true
+        }
     }
 
     private func send() {
@@ -1356,8 +1711,17 @@ private struct TerminalChatDetailView: View {
         input = ""
         gtAttachments = []
         localSending = true
-        composerFocused = false
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        followBottom = true
+        // Scroll-jump-on-send fix (mirror of the Gemini composer): dismissing the
+        // keyboard in the SAME runloop as the append collides with the pin and
+        // `.defaultScrollAnchor(.bottom)` re-anchor over variable-height rows
+        // (FB20979569, iOS-26-only). Defer the keyboard dismiss one runloop so the
+        // bottom-pin lands against stable geometry first.
+        Task { @MainActor in
+            await Task.yield()
+            composerFocused = false
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
         Task {
             do {
                 try await store.send(tabId: tabId, text: text)
@@ -2553,5 +2917,59 @@ private struct TerminalOfflineView: View {
             .tint(Color(hex: "8AB4F8"))
             .padding(.horizontal, 48)
         }
+    }
+}
+
+// Shared rename bottom-sheet for terminal tabs and projects. Mirrors the
+// Gemini-chat rename sheet (`VoiceChatTitleEditorSheet`) the user named as the
+// reference: NavigationStack + Form, Cancel left / Save right, partial-height
+// detents, autofocused field. `title`/`label` let one sheet serve both surfaces.
+struct CTRenameSheet: View {
+    let title: String          // nav title, e.g. "Rename tab" / "Rename project"
+    let label: String          // field placeholder
+    let initialName: String
+    let onSave: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @FocusState private var focused: Bool
+
+    init(title: String, label: String, initialName: String, onSave: @escaping (String) -> Void) {
+        self.title = title
+        self.label = label
+        self.initialName = initialName
+        self.onSave = onSave
+        _name = State(initialValue: initialName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(label, text: $name, axis: .vertical)
+                        .focused($focused)
+                        .lineLimit(1...3)
+                        .submitLabel(.done)
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { onSave(trimmed) }
+                        dismiss()
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .onAppear { focused = true }
+        }
+        .presentationDetents([.height(220), .medium])
+        .presentationDragIndicator(.visible)
     }
 }

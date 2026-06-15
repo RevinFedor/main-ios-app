@@ -4,38 +4,39 @@
     "type": "fact",
     "explicit": [
       "ux_design_principles",
-      "mobile_ux_guidance",
-      "native_vs_custom_controls",
-      "gesture_driven_ui"
+      "portable_ux",
+      "hardware_constraints",
+      "native_vs_custom",
+      "gesture_arbitration",
+      "background_watchdog",
+      "data_durable_recovery"
     ],
     "implicit": [
-      "bluetooth_hfp_a2dp_collision",
       "watchdog_sigkill_0x8badf00d",
-      "sticky_default_override",
-      "stealth_mode_privacy_indicators",
-      "serial_action_animation_locks",
-      "uigesture_recognizer_representable_arbitration",
-      "merge_directional_identity",
-      "invariant_merge_marker_seam",
-      "widget_content_margins_disabled",
-      "keyboard_composer_overlay_reflow",
-      "durable_writing_reconcile_on_return",
-      "temporary_inert_control_guard"
+      "airpods_hfp_a2dp_constraint",
+      "custom_gesture_scroll_conflict",
+      "uigesturerecognizer_representable_delegate",
+      "invisible_merge_marker_seam",
+      "control_disabled_dimming_bypass",
+      "dependency_failure_isolation",
+      "docs_search_semantic_routing",
+      "keyboard_reflow_vs_overlay",
+      "stealth_mode_privacy_indicators"
     ],
     "symptoms": [
-      "The iOS app gets killed with SIGKILL 0x8badf00d after a background intent finishes execution",
-      "Selecting Bluetooth audio inputs unexpectedly stops background music streams",
-      "List reordering or drag-and-drop operations suffer from artificial post-interaction delays",
-      "UI components jump or shift shapes noticeably when entering an active interaction or context menu state",
-      "An interactive sheet freezes or behaves weirdly because dismiss animations were programmatically disabled"
+      "App crashes with 0x8badf00d watchdog exit code in background after a trigger action",
+      "List scrolling is blocked, laggy, or breaks entirely when using custom drag gesture recognizers",
+      "Keyboard entry shifts the entire chat history layout up instead of sliding over it as an overlay",
+      "Buttons look dimmed or disabled when they should stay bright but temporarily reject user interaction",
+      "Interactive cards warp or jump when long-pressed because rounded corners only show up during active state",
+      "Merging two items causes the combined item to jump positions or lose its target identity"
     ],
     "related_components": [
-      "src/ios/VoiceRecordingLiveActivity.swift",
-      "src/ios/RecordingActivityManager.swift",
-      "src/ios/HabitTrackerView.swift",
-      "src/ios/AIChatView.swift"
+      "VoiceRecordingLiveActivity.swift",
+      "RecordingActivityManager.swift",
+      "UIGestureRecognizerRepresentable"
     ],
-    "hash": "0ca9231740957d152fbd2ad23f50289c3a4ecf033784d214c188e069b227a364"
+    "hash": "01467ff79447467de8ac9e16a8d1411dc524014c2a744caa5f40e4eb65606941"
   },
   {
     "path": "docs/methodology/сценарии-использования.md",
@@ -667,44 +668,47 @@
     "path": "docs/knowledge/fact-voice-chat-tab.md",
     "type": "fact",
     "explicit": [
-      "ai_chat_tab",
-      "swiftui_native_client",
-      "terminal_mode",
-      "voice_record_integration",
-      "prompt_picker",
-      "keyboard_composer_overlay",
-      "history_drawer_gesture",
-      "ios_26_liquid_glass"
+      "Voice Chat Tab",
+      "Terminal mode inside AI Chat",
+      "VoiceChatStore",
+      "TerminalControlStore",
+      "SwiftUI native view",
+      "Keyboard overlay mechanics",
+      "Handoff openChat tokenization",
+      "Prompt picker",
+      "GT Editor integration",
+      "Recent drawer custom pan gesture"
     ],
     "implicit": [
-      "handoff_openChat_race",
-      "ios_keyboard_bounds_geometry_lift",
-      "drawer_pan_uigesturerecognizer_representable",
-      "terminal_history_jsonl_rollout",
-      "sse_tombstone_confirm_sync",
-      "voice_chat_gt_file_picker",
-      "ios26_toolbar_item_liquid_glass",
-      "composer_draft_append_transcript",
-      "mobile_model_preset_switch",
-      "chat_creating_root_tab_router"
+      "openChat_handoff_token",
+      "composer_keyboard_overlay_geometry",
+      "followBottom_scroll_dismiss",
+      "terminal_back_swipe_delay",
+      "prompt_picker_self_loading",
+      "gt_file_picker_multiselect",
+      "bypass_midstream_toggle",
+      "tab_paging_swipe_pan",
+      "keyboard_dismiss_append_race",
+      "liquid_glass_toolbar_chrome",
+      "rename_tab_metadata_race",
+      "history_drawer_pan_recognizer"
     ],
     "symptoms": [
-      "Transitioning to AI Chat tab from Voice screen fails or shows the previous conversation",
-      "Keyboard hides the message composer input field or animates out of sync on iOS 26",
-      "Swiping to open the history drawer triggers unintended item clicks or scrolls vertically instead of sliding",
-      "Custom toolbar buttons on iOS 26 show unexpected double borders or circular background wrapping",
-      "Draft text and file attachments in the composer are lost when sending fails due to offline states"
+      "Transition to AI Chat from Voice screen fails or shows the previous conversation.",
+      "Scroll position jumps wildly or content shifts up when sending a message on iOS 26.",
+      "Composer input field gets hidden under the keyboard or moves with a visible lag.",
+      "Horizontal swipe gesture in Terminal mode triggers parent drawer or row tap accidentally.",
+      "Prompt picker or GT file picker sheet opens blank before loading network data."
     ],
     "related_components": [
       "HabitTracker/VoiceRecord/VoiceChat.swift",
-      "VoiceChatStore.swift",
-      "VoiceChatUI.swift",
-      "Views/VoiceRecord/VoiceRecordTabView.swift",
-      "Views/VoiceRecord/TranscriptHistoryView.swift",
-      "VoiceRecord/TabRouter.swift",
-      "TerminalControlStore.swift"
+      "HabitTracker/VoiceRecord/VoiceChatStore.swift",
+      "HabitTracker/VoiceRecord/VoiceChatUI.swift",
+      "HabitTracker/VoiceRecord/TerminalControlStore.swift",
+      "HabitTracker/VoiceRecord/TabRouter.swift",
+      "Views/VoiceRecord/VoiceRecordTabView.swift"
     ],
-    "hash": "8962d4262514ffb87062e58847abb1c95d292f45c6cbbec63b13cb851ed4a737"
+    "hash": "e61b1c951aebe8cec326bd59d06fe1869e28aa846cad9ca11d8659ea324a6022"
   },
   {
     "path": "docs/knowledge/fix-coredevice-no-provider.md",
