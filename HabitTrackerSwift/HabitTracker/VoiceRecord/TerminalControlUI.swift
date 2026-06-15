@@ -539,6 +539,10 @@ struct TerminalControlRootView: View {
     // animated SwiftUI/bitmap hybrid. Make forward project opens instant so the
     // outgoing projects ScrollView cannot visibly re-anchor mid-slide.
     private let terminalAnimatedProjectPushEnabled = false
+    // Phase E: move the projects/tabs/chat navigation surface into a UIKit-owned
+    // container. The SwiftUI stack below remains as a fallback while the new
+    // container takes ownership of horizontal navigation and vertical scroll state.
+    private let terminalUIKitContainerEnabled = true
     private var terminalSnapshotOverlayActive: Bool {
         switch terminalSnapshotOverlay {
         case .none: return false
@@ -567,63 +571,74 @@ struct TerminalControlRootView: View {
 
                 GeometryReader { contentGeo in
                     let contentSize = contentGeo.size
-                    ZStack(alignment: .leading) {
-                        terminalPersistentLayer(.projects, size: contentSize)
-                            .frame(width: contentSize.width)
-                            .overlay(alignment: .leading) {
-                                if terminalLayerNeedsEdgeShade(.projects, width: contentSize.width) {
-                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
-                                }
-                            }
-                            .offset(x: terminalLayerOffset(.projects, width: contentSize.width))
-                            .zIndex(terminalLayerZIndex(.projects))
-                            .allowsHitTesting(terminalLayerAllowsHitTesting(.projects))
-
-                        terminalPersistentLayer(.tabs, size: contentSize)
-                            .frame(width: contentSize.width)
-                            .overlay(alignment: .leading) {
-                                if terminalLayerNeedsEdgeShade(.tabs, width: contentSize.width) {
-                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
-                                }
-                            }
-                            .offset(x: terminalLayerOffset(.tabs, width: contentSize.width))
-                            .zIndex(terminalLayerZIndex(.tabs))
-                            .allowsHitTesting(terminalLayerAllowsHitTesting(.tabs))
-
-                        terminalPersistentLayer(.chat, size: contentSize)
-                            .frame(width: contentSize.width)
-                            .overlay(alignment: .leading) {
-                                if terminalLayerNeedsEdgeShade(.chat, width: contentSize.width) {
-                                    terminalEdgeShade.frame(width: 18).offset(x: -18)
-                                }
-                            }
-                            .offset(x: terminalLayerOffset(.chat, width: contentSize.width))
-                            .zIndex(terminalLayerZIndex(.chat))
-                            .allowsHitTesting(terminalLayerAllowsHitTesting(.chat))
-
-                        TerminalBitmapTransitionOverlay(state: terminalBitmapTransition) { view in
-                            if terminalBitmapOverlayView !== view {
-                                terminalBitmapOverlayView = view
-                            }
-                        }
-                            .frame(width: contentSize.width, height: contentSize.height)
-                            .allowsHitTesting(false)
-                            .zIndex(30)
-                    }
-                    .background(TerminalSnapshotHostReader { terminalSnapshotHostView = $0 })
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-                    .scrollDisabled(horizontalScrollLocked)
-                    .gesture(
-                        TerminalBackPanGesture(
-                            isEnabled: swipeBackEnabled && !interruptingForward && (forwardDestination != nil || store.canStepBack),
-                            width: contentSize.width,
-                            onBegan: { beginTerminalBackDrag(size: contentSize) },
-                            onChanged: { tx in updateTerminalBackDrag(tx, width: contentSize.width) },
-                            onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, size: contentSize) },
-                            onCancelled: { cancelTerminalBackDrag() }
+                    if terminalUIKitContainerEnabled {
+                        TerminalUIKitNavigationHost(
+                            onShowHistory: onShowHistory,
+                            onComposerFocusChange: onComposerFocusChange,
+                            bottomBarInset: bottomBarInset
                         )
-                    )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(CTPageBackground.ignoresSafeArea())
+                        .clipped()
+                    } else {
+                        ZStack(alignment: .leading) {
+                            terminalPersistentLayer(.projects, size: contentSize)
+                                .frame(width: contentSize.width)
+                                .overlay(alignment: .leading) {
+                                    if terminalLayerNeedsEdgeShade(.projects, width: contentSize.width) {
+                                        terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                    }
+                                }
+                                .offset(x: terminalLayerOffset(.projects, width: contentSize.width))
+                                .zIndex(terminalLayerZIndex(.projects))
+                                .allowsHitTesting(terminalLayerAllowsHitTesting(.projects))
+
+                            terminalPersistentLayer(.tabs, size: contentSize)
+                                .frame(width: contentSize.width)
+                                .overlay(alignment: .leading) {
+                                    if terminalLayerNeedsEdgeShade(.tabs, width: contentSize.width) {
+                                        terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                    }
+                                }
+                                .offset(x: terminalLayerOffset(.tabs, width: contentSize.width))
+                                .zIndex(terminalLayerZIndex(.tabs))
+                                .allowsHitTesting(terminalLayerAllowsHitTesting(.tabs))
+
+                            terminalPersistentLayer(.chat, size: contentSize)
+                                .frame(width: contentSize.width)
+                                .overlay(alignment: .leading) {
+                                    if terminalLayerNeedsEdgeShade(.chat, width: contentSize.width) {
+                                        terminalEdgeShade.frame(width: 18).offset(x: -18)
+                                    }
+                                }
+                                .offset(x: terminalLayerOffset(.chat, width: contentSize.width))
+                                .zIndex(terminalLayerZIndex(.chat))
+                                .allowsHitTesting(terminalLayerAllowsHitTesting(.chat))
+
+                            TerminalBitmapTransitionOverlay(state: terminalBitmapTransition) { view in
+                                if terminalBitmapOverlayView !== view {
+                                    terminalBitmapOverlayView = view
+                                }
+                            }
+                                .frame(width: contentSize.width, height: contentSize.height)
+                                .allowsHitTesting(false)
+                                .zIndex(30)
+                        }
+                        .background(TerminalSnapshotHostReader { terminalSnapshotHostView = $0 })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .scrollDisabled(horizontalScrollLocked)
+                        .gesture(
+                            TerminalBackPanGesture(
+                                isEnabled: swipeBackEnabled && !interruptingForward && (forwardDestination != nil || store.canStepBack),
+                                width: contentSize.width,
+                                onBegan: { beginTerminalBackDrag(size: contentSize) },
+                                onChanged: { tx in updateTerminalBackDrag(tx, width: contentSize.width) },
+                                onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, size: contentSize) },
+                                onCancelled: { cancelTerminalBackDrag() }
+                            )
+                        )
+                    }
                 }
             }
             .background(CTPageBackground.ignoresSafeArea())
@@ -2341,6 +2356,1235 @@ private struct TerminalSnapshotHostReader: UIViewRepresentable {
         DispatchQueue.main.async {
             onResolve(uiView)
         }
+    }
+}
+
+private struct TerminalUIKitNavigationHost: UIViewControllerRepresentable {
+    let onShowHistory: () -> Void
+    let onComposerFocusChange: (Bool) -> Void
+    let bottomBarInset: CGFloat
+    @EnvironmentObject private var router: TabRouter
+
+    func makeUIViewController(context: Context) -> TerminalUIKitNavigationController {
+        let controller = TerminalUIKitNavigationController()
+        controller.update(router: router, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange, bottomBarInset: bottomBarInset)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: TerminalUIKitNavigationController, context: Context) {
+        uiViewController.update(router: router, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange, bottomBarInset: bottomBarInset)
+    }
+}
+
+@MainActor
+private final class TerminalUIKitNavigationController: UIViewController, UIGestureRecognizerDelegate {
+    private let store = TerminalControlStore.shared
+    private let projectsController = TerminalUIKitProjectsController()
+    private let tabsController = TerminalUIKitTabsController()
+    private let projectsShell = UIView()
+    private let tabsShell = UIView()
+    private let chatShell = UIView()
+    private var chatController: UIHostingController<AnyView>?
+    private weak var router: TabRouter?
+    private var onShowHistory: () -> Void = {}
+    private var onComposerFocusChange: (Bool) -> Void = { _ in }
+    private var bottomBarInset: CGFloat = 0
+    private var currentLevel: TerminalNavLevel = .projects
+    private var transitionLevel: TerminalNavLevel?
+    private var panRecognizer: UIPanGestureRecognizer?
+    private var syncTimer: Timer?
+    private var lastSelectedProjectId: String?
+    private var lastSelectedTabId: String?
+    private var lastBackGeometryLogBucket = -1
+
+    private var isTransitioning: Bool {
+        transitionLevel != nil
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = ctUIKitColor(gray: 0.055)
+        installShell(projectsShell)
+        installShell(tabsShell)
+        installShell(chatShell)
+        installChild(projectsController, in: projectsShell)
+        installChild(tabsController, in: tabsShell)
+        chatShell.isHidden = true
+
+        projectsController.onOpenProject = { [weak self] project in
+            self?.pushProject(project)
+        }
+        projectsController.onRenameProject = { [weak self] project in
+            self?.presentRenameProject(project)
+        }
+        projectsController.onCopyProject = { project in
+            UIPasteboard.general.string = project.path
+        }
+        tabsController.onOpenTab = { [weak self] tab in
+            self?.pushTab(tab)
+        }
+        tabsController.onRefresh = { [weak self] project in
+            self?.refreshTabs(project)
+        }
+        tabsController.onNewTerminal = { [weak self] project in
+            self?.presentNewTerminal(project)
+        }
+        tabsController.onRenameTab = { [weak self] tab, project in
+            self?.presentRenameTab(tab, project: project)
+        }
+        tabsController.onCopyTab = { tab in
+            UIPasteboard.general.string = tab.name
+        }
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleBackPan(_:)))
+        pan.delegate = self
+        pan.cancelsTouchesInView = true
+        view.addGestureRecognizer(pan)
+        panRecognizer = pan
+
+        syncFromStore(force: true)
+        arrangeSettled(animated: false)
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.syncFromStore(force: false) }
+        }
+    }
+
+    deinit {
+        syncTimer?.invalidate()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard !isTransitioning else { return }
+        for shell in [projectsShell, tabsShell, chatShell] {
+            shell.frame = view.bounds
+            shell.subviews.first?.frame = shell.bounds
+        }
+        arrangeSettled(animated: false)
+    }
+
+    func update(
+        router: TabRouter,
+        onShowHistory: @escaping () -> Void,
+        onComposerFocusChange: @escaping (Bool) -> Void,
+        bottomBarInset: CGFloat
+    ) {
+        self.router = router
+        self.onShowHistory = onShowHistory
+        self.onComposerFocusChange = onComposerFocusChange
+        self.bottomBarInset = bottomBarInset
+        projectsController.bottomBarInset = bottomBarInset
+        tabsController.bottomBarInset = bottomBarInset
+        rebuildChatIfNeeded(force: false)
+        syncFromStore(force: false)
+    }
+
+    private func installShell(_ shell: UIView) {
+        shell.backgroundColor = .clear
+        shell.clipsToBounds = true
+        shell.frame = view.bounds
+        view.addSubview(shell)
+    }
+
+    private func installChild(_ child: UIViewController, in shell: UIView) {
+        addChild(child)
+        shell.addSubview(child.view)
+        child.view.frame = shell.bounds
+        child.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        child.didMove(toParent: self)
+    }
+
+    private func syncFromStore(force: Bool) {
+        projectsController.apply(
+            projects: store.projects,
+            activities: Dictionary(uniqueKeysWithValues: store.projects.map { ($0.id, store.activitySummary(projectId: $0.id)) }),
+            savedAnchorId: store.projectsScrollAnchorId,
+            force: force
+        )
+
+        if let project = store.selectedProject {
+            let tabs = store.tabsByProject[project.id] ?? []
+            tabsController.apply(
+                project: project,
+                tabs: tabs,
+                marker: store.statusMarkerByProject[project.id] ?? .fallback,
+                statusByTab: store.statusByTab,
+                runningTabs: store.runningTabs,
+                loading: store.loadingTabs.contains(project.id),
+                savedAnchorId: store.tabsScrollAnchorByProject[project.id],
+                force: force || project.id != lastSelectedProjectId
+            )
+        } else {
+            tabsController.applyEmpty(force: force || lastSelectedProjectId != nil)
+        }
+
+        let selectedProjectId = store.selectedProject?.id
+        let selectedTabId = store.selectedTab?.tabId
+        if selectedProjectId != lastSelectedProjectId || selectedTabId != lastSelectedTabId {
+            lastSelectedProjectId = selectedProjectId
+            lastSelectedTabId = selectedTabId
+            rebuildChatIfNeeded(force: true)
+        }
+
+        guard !isTransitioning else { return }
+        let desired = desiredLevelFromStore()
+        if desired != currentLevel {
+            currentLevel = desired
+            arrangeSettled(animated: false)
+        }
+    }
+
+    private func desiredLevelFromStore() -> TerminalNavLevel {
+        if store.selectedTab != nil { return .chat }
+        if store.selectedProject != nil { return .tabs }
+        return .projects
+    }
+
+    private func arrangeSettled(animated: Bool) {
+        let updates = {
+            for shell in [self.projectsShell, self.tabsShell, self.chatShell] {
+                shell.frame = self.view.bounds
+                shell.subviews.first?.frame = shell.bounds
+                shell.transform = .identity
+                shell.layer.zPosition = 0
+            }
+            self.projectsShell.isHidden = false
+            self.tabsShell.isHidden = self.store.selectedProject == nil && self.currentLevel == .projects
+            self.chatShell.isHidden = self.store.selectedTab == nil && self.currentLevel != .chat
+            self.view.bringSubviewToFront(self.projectsShell)
+            if self.currentLevel.rawValue >= TerminalNavLevel.tabs.rawValue {
+                self.view.bringSubviewToFront(self.tabsShell)
+            }
+            if self.currentLevel == .chat {
+                self.view.bringSubviewToFront(self.chatShell)
+            }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.beginFromCurrentState, .curveEaseOut], animations: updates)
+        } else {
+            UIView.performWithoutAnimation(updates)
+        }
+    }
+
+    private func pushProject(_ project: CTProject) {
+        guard !isTransitioning, currentLevel == .projects else { return }
+        let width = max(1, view.bounds.width)
+        VCLog.log("term-swipe", "pushProject \(project.name) — UIKit container")
+        MainThreadWatchdog.mark("term-project-push \(String(project.id.suffix(8)))")
+        beginUIKitNavigation(label: "uikit pushProject name=\(project.name) id=\(String(project.id.suffix(8)))", phase: "animate")
+        transitionLevel = .tabs
+        tabsController.prepareForProject(project)
+        store.selectProject(project)
+        syncFromStore(force: true)
+        tabsShell.isHidden = false
+        projectsShell.isHidden = false
+        projectsShell.frame = view.bounds
+        tabsShell.frame = view.bounds
+        projectsShell.transform = .identity
+        tabsShell.transform = CGAffineTransform(translationX: width, y: 0)
+        view.bringSubviewToFront(projectsShell)
+        view.bringSubviewToFront(tabsShell)
+        UIView.animate(
+            withDuration: 0.18,
+            delay: 0,
+            options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut]
+        ) {
+            self.tabsShell.transform = .identity
+        } completion: { _ in
+            self.currentLevel = .tabs
+            self.transitionLevel = nil
+            self.arrangeSettled(animated: false)
+            self.endUIKitNavigation()
+        }
+    }
+
+    private func pushTab(_ tab: CTTabInfo) {
+        guard !isTransitioning, currentLevel == .tabs, tab.isInteractiveAI else { return }
+        guard let project = store.selectedProject else { return }
+        let width = max(1, view.bounds.width)
+        VCLog.log("term-swipe", "pushTab \(tab.name) — UIKit container")
+        MainThreadWatchdog.mark("term-tab-push \(String((tab.tabId ?? tab.id).suffix(8)))")
+        beginUIKitNavigation(label: "uikit pushTab name=\(tab.name) id=\(String((tab.tabId ?? tab.id).suffix(8)))", phase: "animate")
+        transitionLevel = .chat
+        store.selectTabForDisplay(tab, project: project)
+        rebuildChatIfNeeded(force: true)
+        guard chatController != nil else {
+            transitionLevel = nil
+            endUIKitNavigation()
+            return
+        }
+        chatShell.isHidden = false
+        tabsShell.frame = view.bounds
+        chatShell.frame = view.bounds
+        tabsShell.transform = .identity
+        chatShell.transform = CGAffineTransform(translationX: width, y: 0)
+        view.bringSubviewToFront(tabsShell)
+        view.bringSubviewToFront(chatShell)
+        UIView.animate(
+            withDuration: 0.18,
+            delay: 0,
+            options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut]
+        ) {
+            self.chatShell.transform = .identity
+        } completion: { _ in
+            self.currentLevel = .chat
+            self.transitionLevel = nil
+            self.arrangeSettled(animated: false)
+            self.endUIKitNavigation()
+        }
+    }
+
+    private func rebuildChatIfNeeded(force: Bool) {
+        guard let tab = store.selectedTab else {
+            if let chatController {
+                chatController.willMove(toParent: nil)
+                chatController.view.removeFromSuperview()
+                chatController.removeFromParent()
+                self.chatController = nil
+            }
+            chatShell.isHidden = true
+            return
+        }
+        let tabId = tab.tabId ?? tab.id
+        if !force, chatController != nil, lastSelectedTabId == tabId { return }
+        let root: AnyView
+        if let router {
+            root = AnyView(
+                TerminalChatDetailView(
+                    tab: tab,
+                    onShowHistory: onShowHistory,
+                    onComposerFocusChange: onComposerFocusChange,
+                    showsHeader: false
+                )
+                .environmentObject(router)
+                .environment(\.bottomBarInset, bottomBarInset)
+            )
+        } else {
+            root = AnyView(
+                TerminalChatDetailView(
+                    tab: tab,
+                    onShowHistory: onShowHistory,
+                    onComposerFocusChange: onComposerFocusChange,
+                    showsHeader: false
+                )
+                .environment(\.bottomBarInset, bottomBarInset)
+            )
+        }
+
+        if let chatController {
+            chatController.rootView = root
+        } else {
+            let controller = UIHostingController(rootView: root)
+            controller.view.backgroundColor = ctUIKitColor(gray: 0.055)
+            installChild(controller, in: chatShell)
+            chatController = controller
+        }
+    }
+
+    private func refreshTabs(_ project: CTProject) {
+        Task {
+            await store.loadTabs(projectId: project.id, showLoader: false, updateSelectedProject: true)
+            tabsController.endRefreshing()
+        }
+    }
+
+    private func presentNewTerminal(_ project: CTProject) {
+        let sheet = UIAlertController(title: "New terminal", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Codex", style: .default) { [weak self] _ in
+            self?.store.createAgentTab(in: project, toolType: "codex")
+        })
+        sheet.addAction(UIAlertAction(title: "Claude", style: .default) { [weak self] _ in
+            self?.store.createAgentTab(in: project, toolType: "claude")
+        })
+        sheet.addAction(UIAlertAction(title: "Claude SDK tab", style: .default) { [weak self] _ in
+            self?.store.createSDKTab(in: project)
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = tabsController.newButton
+            popover.sourceRect = tabsController.newButton.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private func presentRenameProject(_ project: CTProject) {
+        presentRename(title: "Rename project", initialName: project.name) { [weak self] name in
+            self?.store.renameProject(project, to: name)
+        }
+    }
+
+    private func presentRenameTab(_ tab: CTTabInfo, project: CTProject) {
+        presentRename(title: "Rename tab", initialName: tab.name) { [weak self] name in
+            self?.store.renameTab(tab, to: name, projectId: project.id)
+        }
+    }
+
+    private func presentRename(title: String, initialName: String, onSave: @escaping (String) -> Void) {
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = initialName
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { _ in
+            let value = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !value.isEmpty { onSave(value) }
+        })
+        present(alert, animated: true)
+    }
+
+    private func beginUIKitNavigation(label: String, phase: String) {
+        store.setInteractionActive(true, source: "term-uikit")
+        FrameMonitor.shared.arm(reason: "term-nav", label: label, phase: phase)
+    }
+
+    private func endUIKitNavigation() {
+        store.setInteractionActive(false, source: "term-uikit")
+        FrameMonitor.shared.setPhase("settle")
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === panRecognizer else { return true }
+        guard !isTransitioning, currentLevel != .projects else {
+            VCLog.log("term-swipe", "uikit shouldBegin=NO enabled=false")
+            return false
+        }
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+        let velocity = pan.velocity(in: view)
+        let location = pan.location(in: view)
+        let horizontal = velocity.x > abs(velocity.y) * 1.15 && velocity.x > 80
+        // This is Terminal's own page-back gesture, not the system edge pop. The
+        // user expects a book-like page drag from the content area too. Direction
+        // filtering protects vertical scroll; an edge-only gate made mid-screen
+        // rightward swipes fall through as "cannot go back".
+        let should = horizontal
+        VCLog.log("term-swipe", "uikit shouldBegin=\(should ? "YES" : "NO") t=(\(Int(location.x)),0) v=(\(Int(velocity.x)),\(Int(velocity.y)))")
+        return should
+    }
+
+    @objc private func handleBackPan(_ recognizer: UIPanGestureRecognizer) {
+        let width = max(1, view.bounds.width)
+        let translationX = max(0, min(width, recognizer.translation(in: view).x))
+        switch recognizer.state {
+        case .began:
+            let from = currentLevel
+            let to: TerminalNavLevel = from == .chat ? .tabs : .projects
+            transitionLevel = to
+            VCLog.log("term-swipe", "begin drag level=\(levelLabel(from))")
+            beginUIKitNavigation(label: "uikit back from=\(levelLabel(from))", phase: "gesture")
+            prepareBackTransition(from: from, to: to)
+            updateBackTransition(translationX: max(translationX, initialBackPreviewOffset(width: width)), width: width)
+        case .changed:
+            let velocityX = max(0, recognizer.velocity(in: view).x)
+            updateBackTransition(translationX: visualBackTranslation(raw: translationX, velocityX: velocityX, width: width), width: width)
+        case .ended:
+            let velocityX = recognizer.velocity(in: view).x
+            let predicted = translationX + max(0, velocityX) * 0.18
+            let commit = translationX > width * 0.28 || predicted > width * 0.42 || velocityX > 900
+            finishBackTransition(commit: commit, translationX: translationX, predicted: predicted, width: width)
+        case .cancelled, .failed:
+            finishBackTransition(commit: false, translationX: translationX, predicted: translationX, width: width)
+        default:
+            break
+        }
+    }
+
+    private func initialBackPreviewOffset(width: CGFloat) -> CGFloat {
+        min(36, width * 0.10)
+    }
+
+    private func visualBackTranslation(raw: CGFloat, velocityX: CGFloat, width: CGFloat) -> CGFloat {
+        let velocityLead = min(width * 0.22, velocityX * 0.06)
+        return min(width, max(raw, raw + velocityLead, initialBackPreviewOffset(width: width)))
+    }
+
+    private func prepareBackTransition(from: TerminalNavLevel, to: TerminalNavLevel) {
+        let source = viewForLevel(from)
+        let destination = viewForLevel(to)
+        source.frame = view.bounds
+        destination.frame = view.bounds
+        source.isHidden = false
+        destination.isHidden = false
+        source.transform = .identity
+        destination.transform = .identity
+        source.layer.removeAllAnimations()
+        destination.layer.removeAllAnimations()
+        source.layer.zPosition = 1
+        destination.layer.zPosition = 0
+        view.bringSubviewToFront(destination)
+        view.bringSubviewToFront(source)
+        lastBackGeometryLogBucket = -1
+        logBackGeometry("prepare", translationX: 0, width: max(1, view.bounds.width))
+    }
+
+    private func updateBackTransition(translationX: CGFloat, width: CGFloat) {
+        currentBackSourceView()?.transform = CGAffineTransform(translationX: translationX, y: 0)
+        currentBackDestinationView()?.transform = .identity
+        let progress = min(1, max(0, translationX / width))
+        let bucket = Int((progress * 4).rounded(.down))
+        if bucket != lastBackGeometryLogBucket {
+            lastBackGeometryLogBucket = bucket
+            logBackGeometry("drag", translationX: translationX, width: width)
+        }
+    }
+
+    private func currentBackSourceView() -> UIView? {
+        switch currentLevel {
+        case .projects: return nil
+        case .tabs: return tabsShell
+        case .chat: return chatController == nil ? nil : chatShell
+        }
+    }
+
+    private func currentBackDestinationView() -> UIView? {
+        switch transitionLevel {
+        case .projects: return projectsShell
+        case .tabs: return tabsShell
+        case .chat: return chatController == nil ? nil : chatShell
+        case nil: return nil
+        }
+    }
+
+    private func finishBackTransition(commit: Bool, translationX: CGFloat, predicted: CGFloat, width: CGFloat) {
+        guard let source = currentBackSourceView() else {
+            transitionLevel = nil
+            endUIKitNavigation()
+            return
+        }
+        let destination = currentBackDestinationView()
+        let from = currentLevel
+        let to: TerminalNavLevel = from == .chat ? .tabs : .projects
+        if commit {
+            VCLog.log("term-swipe", "uikit end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(levelLabel(from))")
+            MainThreadWatchdog.mark("term-back-commit from=\(levelLabel(from))")
+            FrameMonitor.shared.setPhase("animate")
+        } else {
+            VCLog.log("term-swipe", "uikit end CANCEL tx=\(Int(translationX)) predicted=\(Int(predicted))")
+        }
+        logBackGeometry(commit ? "commit-start" : "cancel-start", translationX: translationX, width: width)
+        UIView.animate(
+            withDuration: commit ? 0.16 : 0.14,
+            delay: 0,
+            options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut]
+        ) {
+            source.transform = CGAffineTransform(translationX: commit ? width : 0, y: 0)
+            destination?.transform = .identity
+        } completion: { _ in
+            if commit {
+                self.store.stepBackOneLevel()
+                self.currentLevel = to
+                // Hide the outgoing page BEFORE clearing its transform. If we reset
+                // transform first, the tabs/chat page can briefly snap back over the
+                // destination on the completion frame, which reads as a double page
+                // flash before the preserved scroll position appears.
+                source.isHidden = true
+                UIView.performWithoutAnimation {
+                    source.transform = .identity
+                    source.frame = self.view.bounds
+                    source.layer.zPosition = 0
+                }
+            } else {
+                source.transform = .identity
+                source.frame = self.view.bounds
+                source.layer.zPosition = 0
+            }
+            destination?.transform = .identity
+            destination?.frame = self.view.bounds
+            destination?.layer.zPosition = 0
+            self.transitionLevel = nil
+            self.syncFromStore(force: true)
+            self.arrangeSettled(animated: false)
+            self.logBackGeometry(commit ? "commit-done" : "cancel-done", translationX: commit ? width : 0, width: width)
+            self.endUIKitNavigation()
+        }
+    }
+
+    private func logBackGeometry(_ event: String, translationX: CGFloat, width: CGFloat) {
+        func state(_ label: String, _ view: UIView?) -> String {
+            guard let view else { return "\(label)=nil" }
+            return "\(label)[hidden=\(view.isHidden) frameX=\(Int(view.frame.minX)) tx=\(Int(view.transform.tx)) centerX=\(Int(view.center.x)) w=\(Int(view.bounds.width))]"
+        }
+        let transition = transitionLevel.map(levelLabel) ?? "nil"
+        VCLog.log(
+            "term-swipe-geo",
+            "event=\(event) current=\(levelLabel(currentLevel)) transition=\(transition) tx=\(Int(translationX)) width=\(Int(width)) " +
+            state("projects", projectsShell) + " " +
+            state("tabs", tabsShell) + " " +
+            state("chat", chatController == nil ? nil : chatShell)
+        )
+    }
+
+    private func viewForLevel(_ level: TerminalNavLevel) -> UIView {
+        switch level {
+        case .projects: return projectsShell
+        case .tabs: return tabsShell
+        case .chat:
+            rebuildChatIfNeeded(force: false)
+            return chatController == nil ? tabsShell : chatShell
+        }
+    }
+
+    private func levelLabel(_ level: TerminalNavLevel) -> String {
+        switch level {
+        case .projects: return "projects"
+        case .tabs: return "tabs"
+        case .chat: return "chat"
+        }
+    }
+}
+
+@MainActor
+private final class TerminalUIKitProjectsController: UIViewController, UITableViewDataSource, UITableViewDelegate {
+    let tableView = UITableView(frame: .zero, style: .plain)
+    var onOpenProject: (CTProject) -> Void = { _ in }
+    var onRenameProject: (CTProject) -> Void = { _ in }
+    var onCopyProject: (CTProject) -> Void = { _ in }
+    var bottomBarInset: CGFloat = 0 {
+        didSet { updateInsets() }
+    }
+    private var projects: [CTProject] = []
+    private var activities: [String: CTActivitySummary] = [:]
+    private var snapshotKey = ""
+    private var restoredSavedAnchor = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = ctUIKitColor(gray: 0.055)
+        tableView.backgroundColor = .clear
+        tableView.separatorStyle = .none
+        tableView.showsVerticalScrollIndicator = true
+        tableView.alwaysBounceVertical = true
+        tableView.contentInsetAdjustmentBehavior = .never
+        tableView.estimatedRowHeight = 0
+        tableView.register(TerminalUIKitProjectCell.self, forCellReuseIdentifier: TerminalUIKitProjectCell.reuseID)
+        tableView.dataSource = self
+        tableView.delegate = self
+        view.addSubview(tableView)
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        updateInsets()
+    }
+
+    func apply(projects: [CTProject], activities: [String: CTActivitySummary], savedAnchorId: String?, force: Bool) {
+        let key = projects.map { project in
+            let activity = activities[project.id] ?? CTActivitySummary(count: 0, streaming: false)
+            return [
+                project.id,
+                project.name,
+                String(project.tabCount ?? -1),
+                String(project.liveSdkCount ?? -1),
+                String(project.hasAwaiting == true),
+                "\(activity.count):\(activity.streaming)"
+            ].joined(separator: "|")
+        }.joined(separator: "\n")
+        guard force || key != snapshotKey else { return }
+        let offset = tableView.contentOffset
+        self.projects = projects
+        self.activities = activities
+        snapshotKey = key
+        tableView.reloadData()
+        tableView.layoutIfNeeded()
+        if !restoredSavedAnchor, let savedAnchorId, let row = projects.firstIndex(where: { $0.id == savedAnchorId }) {
+            restoredSavedAnchor = true
+            tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .top, animated: false)
+            VCLog.log("TerminalScroll", "projects restore id=\(String(savedAnchorId.suffix(8)))")
+        } else if force || offset.y > -tableView.adjustedContentInset.top {
+            tableView.setContentOffset(offset, animated: false)
+        }
+    }
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        projects.count
+    }
+
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        86
+    }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: TerminalUIKitProjectCell.reuseID, for: indexPath) as! TerminalUIKitProjectCell
+        let project = projects[indexPath.row]
+        cell.configure(project: project, activity: activities[project.id] ?? CTActivitySummary(count: 0, streaming: false))
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard projects.indices.contains(indexPath.row) else { return }
+        let project = projects[indexPath.row]
+        commitAnchor(reason: "click")
+        VCLog.log("TerminalScroll", "projects open click id=\(String(project.id.suffix(8)))")
+        onOpenProject(project)
+    }
+
+    func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard projects.indices.contains(indexPath.row) else { return nil }
+        let project = projects[indexPath.row]
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            UIMenu(children: [
+                UIAction(title: "Rename", image: UIImage(systemName: "pencil")) { _ in self?.onRenameProject(project) },
+                UIAction(title: "Copy path", image: UIImage(systemName: "doc.on.doc")) { _ in self?.onCopyProject(project) }
+            ])
+        }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { commitAnchor(reason: "idle") }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        commitAnchor(reason: "idle")
+    }
+
+    private func commitAnchor(reason: String) {
+        guard let first = tableView.indexPathsForVisibleRows?.sorted().first,
+              projects.indices.contains(first.row)
+        else { return }
+        let id = projects[first.row].id
+        if TerminalControlStore.shared.projectsScrollAnchorId != id {
+            TerminalControlStore.shared.projectsScrollAnchorId = id
+            VCLog.log("TerminalScroll", "projects anchor \(reason) id=\(String(id.suffix(8)))")
+        }
+    }
+
+    private func updateInsets() {
+        tableView.contentInset = UIEdgeInsets(top: 10, left: 0, bottom: bottomBarInset + 18, right: 0)
+        tableView.scrollIndicatorInsets = tableView.contentInset
+    }
+}
+
+@MainActor
+private final class TerminalUIKitTabsController: UIViewController, UITableViewDataSource, UITableViewDelegate {
+    let tableView = UITableView(frame: .zero, style: .plain)
+    let newButton = UIButton(type: .system)
+    var onOpenTab: (CTTabInfo) -> Void = { _ in }
+    var onRefresh: (CTProject) -> Void = { _ in }
+    var onNewTerminal: (CTProject) -> Void = { _ in }
+    var onRenameTab: (CTTabInfo, CTProject) -> Void = { _, _ in }
+    var onCopyTab: (CTTabInfo) -> Void = { _ in }
+    var bottomBarInset: CGFloat = 0 {
+        didSet { updateInsetsAndButton() }
+    }
+    private var project: CTProject?
+    private var tabs: [CTTabInfo] = []
+    private var marker: CTStatusMarker = .fallback
+    private var statusByTab: [String: String] = [:]
+    private var runningTabs: Set<String> = []
+    private var loading = false
+    private var snapshotKey = ""
+    private var restoredAnchorByProject: Set<String> = []
+    private var offsetByProject: [String: CGPoint] = [:]
+    private let emptyLabel = UILabel()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = ctUIKitColor(gray: 0.055)
+        tableView.backgroundColor = .clear
+        tableView.separatorStyle = .none
+        tableView.showsVerticalScrollIndicator = true
+        tableView.alwaysBounceVertical = true
+        tableView.contentInsetAdjustmentBehavior = .never
+        tableView.estimatedRowHeight = 0
+        tableView.register(TerminalUIKitTabCell.self, forCellReuseIdentifier: TerminalUIKitTabCell.reuseID)
+        tableView.dataSource = self
+        tableView.delegate = self
+        let refresh = UIRefreshControl()
+        refresh.tintColor = .white
+        refresh.addTarget(self, action: #selector(refreshPulled), for: .valueChanged)
+        tableView.refreshControl = refresh
+
+        emptyLabel.text = "No terminal tabs"
+        emptyLabel.textColor = UIColor.secondaryLabel
+        emptyLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        emptyLabel.textAlignment = .center
+        emptyLabel.isHidden = true
+
+        var config = UIButton.Configuration.filled()
+        config.title = "New Terminal"
+        config.image = UIImage(systemName: "plus")
+        config.imagePadding = 7
+        config.baseForegroundColor = .black
+        config.baseBackgroundColor = .white
+        config.cornerStyle = .capsule
+        newButton.configuration = config
+        newButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        newButton.addTarget(self, action: #selector(newTerminalTapped), for: .touchUpInside)
+
+        view.addSubview(tableView)
+        view.addSubview(emptyLabel)
+        view.addSubview(newButton)
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        newButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -24),
+            newButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            newButton.heightAnchor.constraint(equalToConstant: 46)
+        ])
+        updateInsetsAndButton()
+    }
+
+    func prepareForProject(_ project: CTProject) {
+        if let oldId = self.project?.id {
+            offsetByProject[oldId] = tableView.contentOffset
+        }
+        self.project = project
+        newButton.isHidden = false
+    }
+
+    func apply(
+        project: CTProject,
+        tabs: [CTTabInfo],
+        marker: CTStatusMarker,
+        statusByTab: [String: String],
+        runningTabs: Set<String>,
+        loading: Bool,
+        savedAnchorId: String?,
+        force: Bool
+    ) {
+        if let oldId = self.project?.id, oldId != project.id {
+            offsetByProject[oldId] = tableView.contentOffset
+        }
+        self.project = project
+        self.marker = marker
+        self.statusByTab = statusByTab
+        self.runningTabs = runningTabs
+        self.loading = loading
+        let key = tabs.map { tab in
+            let id = tab.tabId ?? tab.id
+            return [
+                id,
+                tab.name,
+                tab.cwd,
+                tab.effectiveToolType ?? "-",
+                runtimeStatus(for: tab),
+                String(tab.awaiting == true),
+                tab.statusColor ?? "-"
+            ].joined(separator: "|")
+        }.joined(separator: "\n") + "|loading=\(loading)|project=\(project.id)"
+        guard force || key != snapshotKey else { return }
+        let previousOffset = tableView.contentOffset
+        self.tabs = tabs
+        snapshotKey = key
+        emptyLabel.isHidden = !tabs.isEmpty || loading
+        tableView.reloadData()
+        tableView.layoutIfNeeded()
+        if let stored = offsetByProject[project.id] {
+            tableView.setContentOffset(stored, animated: false)
+        } else if !restoredAnchorByProject.contains(project.id),
+                  let savedAnchorId,
+                  let row = tabs.firstIndex(where: { ($0.tabId ?? $0.id) == savedAnchorId }) {
+            restoredAnchorByProject.insert(project.id)
+            tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .top, animated: false)
+            VCLog.log("TerminalScroll", "tabs restore project=\(String(project.id.suffix(8))) tab=\(String(savedAnchorId.suffix(8)))")
+        } else if force || previousOffset.y > -tableView.adjustedContentInset.top {
+            tableView.setContentOffset(previousOffset, animated: false)
+        }
+        newButton.isHidden = false
+    }
+
+    func applyEmpty(force: Bool) {
+        guard force || project != nil || !tabs.isEmpty else { return }
+        if let oldId = project?.id {
+            offsetByProject[oldId] = tableView.contentOffset
+        }
+        project = nil
+        tabs = []
+        snapshotKey = ""
+        emptyLabel.isHidden = true
+        newButton.isHidden = true
+        tableView.reloadData()
+    }
+
+    func endRefreshing() {
+        tableView.refreshControl?.endRefreshing()
+    }
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        tabs.count
+    }
+
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        70
+    }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: TerminalUIKitTabCell.reuseID, for: indexPath) as! TerminalUIKitTabCell
+        let tab = tabs[indexPath.row]
+        cell.configure(tab: tab, marker: marker, runtime: runtimeStatus(for: tab), running: isRunning(tab))
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard tabs.indices.contains(indexPath.row) else { return }
+        let tab = tabs[indexPath.row]
+        guard tab.isInteractiveAI else { return }
+        if let project {
+            commitAnchor(reason: "click")
+            offsetByProject[project.id] = tableView.contentOffset
+            VCLog.log("TerminalScroll", "tabs open click project=\(String(project.id.suffix(8))) tab=\(String((tab.tabId ?? tab.id).suffix(8)))")
+        }
+        onOpenTab(tab)
+    }
+
+    func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard tabs.indices.contains(indexPath.row), let project else { return nil }
+        let tab = tabs[indexPath.row]
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            UIMenu(children: [
+                UIAction(title: "Rename", image: UIImage(systemName: "pencil")) { _ in self?.onRenameTab(tab, project) },
+                UIAction(title: "Copy name", image: UIImage(systemName: "doc.on.doc")) { _ in self?.onCopyTab(tab) }
+            ])
+        }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { commitAnchor(reason: "idle") }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        commitAnchor(reason: "idle")
+    }
+
+    private func commitAnchor(reason: String) {
+        guard let project,
+              let first = tableView.indexPathsForVisibleRows?.sorted().first,
+              tabs.indices.contains(first.row)
+        else { return }
+        let id = tabs[first.row].tabId ?? tabs[first.row].id
+        offsetByProject[project.id] = tableView.contentOffset
+        if TerminalControlStore.shared.tabsScrollAnchorByProject[project.id] != id {
+            TerminalControlStore.shared.tabsScrollAnchorByProject[project.id] = id
+            VCLog.log("TerminalScroll", "tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(id.suffix(8)))")
+        }
+    }
+
+    private func runtimeStatus(for tab: CTTabInfo) -> String {
+        guard let id = tab.tabId else { return tab.sessionStatus ?? "inactive" }
+        return statusByTab[id] ?? tab.sessionStatus ?? "inactive"
+    }
+
+    private func isRunning(_ tab: CTTabInfo) -> Bool {
+        guard let id = tab.tabId else { return false }
+        return runningTabs.contains(id)
+    }
+
+    private func updateInsetsAndButton() {
+        tableView.contentInset = UIEdgeInsets(top: 10, left: 0, bottom: bottomBarInset + 74, right: 0)
+        tableView.scrollIndicatorInsets = tableView.contentInset
+        for constraint in view.constraints where constraint.firstItem === newButton && constraint.firstAttribute == .bottom {
+            constraint.isActive = false
+        }
+        newButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -(bottomBarInset + 12)).isActive = true
+    }
+
+    @objc private func refreshPulled() {
+        guard let project else {
+            endRefreshing()
+            return
+        }
+        onRefresh(project)
+    }
+
+    @objc private func newTerminalTapped() {
+        guard let project else { return }
+        onNewTerminal(project)
+    }
+}
+
+private final class TerminalUIKitProjectCell: UITableViewCell {
+    static let reuseID = "TerminalUIKitProjectCell"
+    private let cardView = UIView()
+    private let iconView = UIImageView()
+    private let titleLabel = UILabel()
+    private let pathLabel = UILabel()
+    private let metaLabel = UILabel()
+    private let activityLabel = UILabel()
+    private let awaitingDot = UIView()
+    private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        build()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(project: CTProject, activity: CTActivitySummary) {
+        titleLabel.text = project.name
+        pathLabel.text = project.path
+        var meta = ["\(project.tabCount ?? 0) tabs"]
+        if (project.liveSdkCount ?? 0) > 0 { meta.append("live \(project.liveSdkCount ?? 0)") }
+        if project.isOpen == true { meta.append("open") }
+        metaLabel.text = meta.joined(separator: "  ")
+        awaitingDot.isHidden = project.hasAwaiting != true
+        if activity.count > 0 {
+            activityLabel.isHidden = false
+            activityLabel.text = "\(activity.count)"
+            activityLabel.backgroundColor = activity.streaming ? ctUIKitColor(hex: "22c55e", alpha: 0.24) : UIColor.white.withAlphaComponent(0.14)
+            activityLabel.textColor = activity.streaming ? ctUIKitColor(hex: "86efac") : .white
+        } else {
+            activityLabel.isHidden = true
+        }
+        if let image = ctImageFromDataURL(project.icon) {
+            iconView.image = image
+            iconView.contentMode = .scaleAspectFill
+            iconView.tintColor = nil
+        } else {
+            iconView.image = UIImage(systemName: "folder")
+            iconView.contentMode = .center
+            iconView.tintColor = UIColor.white.withAlphaComponent(0.84)
+        }
+    }
+
+    private func build() {
+        backgroundColor = .clear
+        selectedBackgroundView = UIView()
+        selectedBackgroundView?.backgroundColor = UIColor.white.withAlphaComponent(0.05)
+        contentView.backgroundColor = .clear
+        cardView.backgroundColor = UIColor.white.withAlphaComponent(0.065)
+        cardView.layer.cornerRadius = 12
+        cardView.layer.cornerCurve = .continuous
+        cardView.layer.borderWidth = 1 / UIScreen.main.scale
+        cardView.layer.borderColor = UIColor.white.withAlphaComponent(0.08).cgColor
+
+        iconView.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+        iconView.layer.cornerRadius = 9
+        iconView.layer.cornerCurve = .continuous
+        iconView.clipsToBounds = true
+
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .white
+        titleLabel.lineBreakMode = .byTruncatingTail
+        pathLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        pathLabel.textColor = UIColor.secondaryLabel
+        pathLabel.lineBreakMode = .byTruncatingMiddle
+        metaLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        metaLabel.textColor = UIColor.secondaryLabel.withAlphaComponent(0.75)
+        activityLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        activityLabel.textAlignment = .center
+        activityLabel.layer.cornerRadius = 8
+        activityLabel.layer.cornerCurve = .continuous
+        activityLabel.clipsToBounds = true
+        awaitingDot.backgroundColor = ctUIKitColor(hex: "a78bfa")
+        awaitingDot.layer.cornerRadius = 3.5
+        chevron.tintColor = UIColor.secondaryLabel
+
+        [cardView, iconView, titleLabel, pathLabel, metaLabel, activityLabel, awaitingDot, chevron].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        contentView.addSubview(cardView)
+        cardView.addSubview(iconView)
+        cardView.addSubview(titleLabel)
+        cardView.addSubview(pathLabel)
+        cardView.addSubview(metaLabel)
+        cardView.addSubview(activityLabel)
+        cardView.addSubview(awaitingDot)
+        cardView.addSubview(chevron)
+
+        NSLayoutConstraint.activate([
+            cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
+            cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
+            cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            iconView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+            iconView.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 38),
+            iconView.heightAnchor.constraint(equalToConstant: 38),
+            chevron.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+            chevron.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 12),
+            chevron.heightAnchor.constraint(equalToConstant: 16),
+            activityLabel.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -10),
+            activityLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            activityLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 22),
+            activityLabel.heightAnchor.constraint(equalToConstant: 18),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 11),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: activityLabel.leadingAnchor, constant: -8),
+            titleLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 11),
+            awaitingDot.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
+            awaitingDot.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            awaitingDot.widthAnchor.constraint(equalToConstant: 7),
+            awaitingDot.heightAnchor.constraint(equalToConstant: 7),
+            pathLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            pathLabel.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -12),
+            pathLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 3),
+            metaLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            metaLabel.trailingAnchor.constraint(equalTo: pathLabel.trailingAnchor),
+            metaLabel.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 5)
+        ])
+    }
+}
+
+private final class TerminalUIKitTabCell: UITableViewCell {
+    static let reuseID = "TerminalUIKitTabCell"
+    private let cardView = UIView()
+    private let iconView = UIImageView()
+    private let markerView = UIView()
+    private let titleLabel = UILabel()
+    private let cwdLabel = UILabel()
+    private let statusDot = UIView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        build()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(tab: CTTabInfo, marker: CTStatusMarker, runtime: String, running: Bool) {
+        titleLabel.text = tab.name
+        cwdLabel.text = tab.cwd
+        iconView.image = agentUIImage(toolType: tab.effectiveToolType)
+        iconView.tintColor = agentUIColor(toolType: tab.effectiveToolType).withAlphaComponent(tab.effectiveToolType == nil ? 0.7 : 1)
+        markerView.backgroundColor = ctUIKitColor(hex: tab.statusColor ?? "6b7280")
+        let markerSize = max(4, min(12, marker.sizePx ?? 8))
+        markerView.layer.cornerRadius = marker.shape == "square" ? 2 : CGFloat(markerSize) / 2
+        let busy = runtime == "busy" || runtime == "running" || running
+        statusDot.backgroundColor = statusUIColor(runtime: runtime, awaiting: tab.awaiting == true)
+        statusDot.isHidden = busy
+        if busy {
+            spinner.color = statusUIColor(runtime: runtime, awaiting: tab.awaiting == true)
+            spinner.startAnimating()
+        } else {
+            spinner.stopAnimating()
+        }
+        let enabled = tab.isInteractiveAI
+        contentView.alpha = enabled ? 1 : 0.55
+        cardView.backgroundColor = tabUIKitBackground(tab: tab, runtime: runtime)
+    }
+
+    private func build() {
+        backgroundColor = .clear
+        selectedBackgroundView = UIView()
+        selectedBackgroundView?.backgroundColor = UIColor.white.withAlphaComponent(0.05)
+        contentView.backgroundColor = .clear
+        cardView.layer.cornerRadius = 11
+        cardView.layer.cornerCurve = .continuous
+        cardView.layer.borderWidth = 1 / UIScreen.main.scale
+        cardView.layer.borderColor = UIColor.white.withAlphaComponent(0.08).cgColor
+        iconView.backgroundColor = UIColor.white.withAlphaComponent(0.08)
+        iconView.layer.cornerRadius = 13
+        iconView.layer.cornerCurve = .continuous
+        iconView.contentMode = .center
+        markerView.layer.cornerCurve = .continuous
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = .white
+        titleLabel.lineBreakMode = .byTruncatingTail
+        cwdLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        cwdLabel.textColor = UIColor.secondaryLabel
+        cwdLabel.lineBreakMode = .byTruncatingMiddle
+        statusDot.layer.cornerRadius = 4
+        spinner.transform = CGAffineTransform(scaleX: 0.72, y: 0.72)
+
+        [cardView, iconView, markerView, titleLabel, cwdLabel, statusDot, spinner].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        contentView.addSubview(cardView)
+        cardView.addSubview(iconView)
+        cardView.addSubview(markerView)
+        cardView.addSubview(titleLabel)
+        cardView.addSubview(cwdLabel)
+        cardView.addSubview(statusDot)
+        cardView.addSubview(spinner)
+
+        NSLayoutConstraint.activate([
+            cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
+            cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
+            cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            iconView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 11),
+            iconView.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 26),
+            iconView.heightAnchor.constraint(equalToConstant: 26),
+            markerView.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 11),
+            markerView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            markerView.widthAnchor.constraint(equalToConstant: 8),
+            markerView.heightAnchor.constraint(equalToConstant: 8),
+            titleLabel.leadingAnchor.constraint(equalTo: markerView.trailingAnchor, constant: 7),
+            titleLabel.trailingAnchor.constraint(equalTo: statusDot.leadingAnchor, constant: -10),
+            titleLabel.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+            cwdLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            cwdLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            cwdLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            statusDot.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+            statusDot.centerYAnchor.constraint(equalTo: cardView.centerYAnchor),
+            statusDot.widthAnchor.constraint(equalToConstant: 8),
+            statusDot.heightAnchor.constraint(equalToConstant: 8),
+            spinner.centerXAnchor.constraint(equalTo: statusDot.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: statusDot.centerYAnchor)
+        ])
+    }
+}
+
+private func ctUIKitColor(gray: CGFloat, alpha: CGFloat = 1) -> UIColor {
+    UIColor(white: gray, alpha: alpha)
+}
+
+private func ctUIKitColor(hex: String, alpha: CGFloat = 1) -> UIColor {
+    var value = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.hasPrefix("#") { value.removeFirst() }
+    guard value.count == 6, let int = Int(value, radix: 16) else {
+        return UIColor.white.withAlphaComponent(alpha)
+    }
+    return UIColor(
+        red: CGFloat((int >> 16) & 0xff) / 255,
+        green: CGFloat((int >> 8) & 0xff) / 255,
+        blue: CGFloat(int & 0xff) / 255,
+        alpha: alpha
+    )
+}
+
+private func agentUIColor(toolType: String?) -> UIColor {
+    switch toolType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "codex": return ctUIKitColor(hex: "22c55e")
+    case "claude": return ctUIKitColor(hex: "DA7756")
+    default: return UIColor.white.withAlphaComponent(0.58)
+    }
+}
+
+private func agentUIImage(toolType: String?) -> UIImage? {
+    let normalized = toolType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized == "claude", let image = ctClaudeIconImage { return image }
+    if normalized == "codex", let image = ctCodexIconImage { return image }
+    return UIImage(systemName: "terminal")
+}
+
+private func statusUIColor(runtime: String, awaiting: Bool) -> UIColor {
+    if awaiting { return ctUIKitColor(hex: "a78bfa") }
+    switch runtime {
+    case "busy", "running": return ctUIKitColor(hex: "d97706")
+    case "active": return ctUIKitColor(hex: "22c55e")
+    case "starting": return ctUIKitColor(hex: "DA7756")
+    default: return ctUIKitColor(gray: 0.38)
+    }
+}
+
+private func tabUIKitBackground(tab: CTTabInfo, runtime: String) -> UIColor {
+    if runtime == "busy" || runtime == "running" {
+        if tab.isCodexPTY { return ctUIKitColor(hex: "12351f", alpha: 0.55) }
+        return ctUIKitColor(hex: "3f2a13", alpha: 0.45)
+    }
+    switch tab.effectiveToolType {
+    case "codex": return ctUIKitColor(hex: "22c55e", alpha: 0.12)
+    case "claude": return ctUIKitColor(hex: "DA7756", alpha: 0.13)
+    default: return UIColor.white.withAlphaComponent(0.065)
     }
 }
 
