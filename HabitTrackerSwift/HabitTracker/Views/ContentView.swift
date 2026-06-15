@@ -14,7 +14,6 @@ struct ContentView: View {
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var weekOffset: Int = 0
     @State private var showAddSheet = false
-    @State private var showSettingsSheet = false
     @State private var selectedHabit: SelectedHabitItem? = nil
     @State private var selectedGroup: HabitGroup? = nil
 
@@ -122,7 +121,7 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
-                        showSettingsSheet = true
+                        router.openSettings()
                     } label: {
                         Image(systemName: "gearshape.fill")
                             .foregroundColor(.white)
@@ -169,7 +168,6 @@ struct ContentView: View {
             }
             .task { logLineCount = VRLog.lineCount() }
             .sheet(isPresented: $showAddSheet) { AddHabitSheet() }
-            .sheet(isPresented: $showSettingsSheet) { SettingsSheet() }
             .sheet(item: $selectedHabit) { selected in
                 EditHabitSheet(habit: selected.habit, groupId: selected.groupId)
             }

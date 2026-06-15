@@ -111,6 +111,24 @@ private struct TerminalBackPanGesture: UIGestureRecognizerRepresentable {
             let velocityRight = v.x >= 220 && v.x >= abs(v.y) * 0.9
             let begin = translationRight || velocityRight
             VCLog.log("term-swipe", "uikit shouldBegin=\(begin ? "YES" : "no") t=(\(Int(t.x)),\(Int(t.y))) v=(\(Int(v.x)),\(Int(v.y)))")
+            // DIAGNOSTIC (no behavior change): flag the "1-in-10 black overscroll"
+            // case — a back-swipe is possible (isEnabled) and the gesture LEANS
+            // rightward (the user meant to go back), but it failed BOTH thresholds,
+            // so the recognizer declines and the rightward pan falls through to the
+            // root pager → leading overscroll = black area. This isolates WHY it was
+            // rejected: slow start (low velocity, small translation) vs not-yet-
+            // horizontal. Grep [term-swipe-miss] to tune the thresholds next session.
+            if !begin {
+                let leansRight = t.x > 0 && v.x > 0          // intent was rightward
+                let mostlyHorizontal = abs(t.x) >= abs(t.y)  // not a vertical scroll
+                if leansRight && mostlyHorizontal {
+                    let reason: String
+                    if t.x < 8 && v.x < 220 { reason = "below-both (slow start)" }
+                    else if t.x < 8 { reason = "translation<8" }
+                    else { reason = "velocity<220" }
+                    VCLog.log("term-swipe-miss", "BACK MISS \(reason) → falls through to pager (black overscroll) t=(\(Int(t.x)),\(Int(t.y))) v=(\(Int(v.x)),\(Int(v.y)))")
+                }
+            }
             return begin
         }
 
@@ -162,10 +180,82 @@ private struct TerminalHeaderTitle: View {
     }
 }
 
+// Custom top header for the three Terminal levels — replaces the system `.toolbar`.
+// WHY: the levels live inside a CUSTOM horizontal slide (not NavigationStack
+// pushes), but each declared its own `.toolbar` + `.toolbarBackground` on the ONE
+// shared navigation bar. Swapping levels made SwiftUI tear down and rebuild the
+// nav bar's Liquid Glass chrome — the measured ~79ms first-commit (phase log
+// commit=79ms), independent of row count, AND the visible "hamburger button
+// doubles for a frame" (two nav bars overlap during the rebuild). A plain HStack
+// header is just three views; swapping it is free, no nav-bar reconfiguration.
+// Fixed gear on the left (unified settings), a center slot, a trailing slot.
+private struct TerminalHeaderBar<Center: View, Trailing: View>: View {
+    let onSettings: () -> Void
+    @ViewBuilder let center: () -> Center
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Gear gets the same circular Liquid Glass as the system toolbar
+            // buttons elsewhere in the app — the custom header had flattened it to
+            // a bare glyph. Glass IS the button label, so the whole circle taps.
+            Button(action: onSettings) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .ctGlassCircle()
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+            center()
+            Spacer(minLength: 0)
+
+            // The trailing control (refresh / install) applies .ctGlassCircle()
+            // to its OWN label at each call site, so its disabled/spinner state and
+            // full-circle hit target stay correct; the header just lays it out.
+            trailing()
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 44)
+        .background(CTHeaderBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
+        }
+    }
+}
+
+private extension View {
+    // Circular Liquid Glass surface for header icon buttons — mirrors the app's
+    // vcLiquidGlassCircleSurface() (private to VoiceChatUI). Sizes the content to a
+    // fixed circle so the glass and the tap target coincide.
+    @ViewBuilder
+    func ctGlassCircle(diameter: CGFloat = 38) -> some View {
+        if #available(iOS 26.0, *) {
+            self.frame(width: diameter, height: diameter)
+                .glassEffect(.regular.tint(.black.opacity(0.22)).interactive(), in: Circle())
+                .contentShape(Circle())
+        } else {
+            self.frame(width: diameter, height: diameter)
+                .background(.regularMaterial, in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5) }
+                .contentShape(Circle())
+        }
+    }
+}
+
 private struct TerminalActivityBadge: View {
     let count: Int
     let streaming: Bool
+    // When false, the ring is drawn STATIC (no repeatForever). The back-preview
+    // (non-interactive, behind the sliding content) passes animated:false: an
+    // infinite rotation that fires its onAppear AS the heavy projects list mounts
+    // mid-slide competed with the back animation — the remaining project→projects
+    // jank. The live, foreground list keeps animated:true.
+    var animated: Bool = true
     @State private var spin = false
+
+    private var spinning: Bool { streaming && animated }
 
     var body: some View {
         ZStack {
@@ -186,12 +276,12 @@ private struct TerminalActivityBadge: View {
         }
         .frame(width: 22, height: 22)
         .onAppear {
-            guard streaming else { return }
+            guard spinning else { return }
             withAnimation(.linear(duration: 0.95).repeatForever(autoreverses: false)) {
                 spin = true
             }
         }
-        .onChange(of: streaming) { _, active in
+        .onChange(of: spinning) { _, active in
             if active {
                 spin = false
                 withAnimation(.linear(duration: 0.95).repeatForever(autoreverses: false)) {
@@ -229,6 +319,15 @@ struct TerminalControlRootView: View {
     @State private var backDragOffset: CGFloat = 0
     @State private var forwardDestination: TerminalForwardDestination?
     @State private var forwardOffset: CGFloat = 0
+    // Generation token for forward-push animations. A back-swipe that interrupts an
+    // in-flight push bumps this, so the original push's `completion` (which commits
+    // the navigation) sees a stale generation and no-ops — the push is abandoned
+    // instead of committing under the user who just swiped back.
+    @State private var forwardGeneration = 0
+    // True from the instant a rightward back-swipe interrupts a forward push until
+    // the reverse animation settles. While set, the back-drag's changed/ended are
+    // ignored — the reverse is a single committed animation, not finger-tracked.
+    @State private var interruptingForward = false
     @State private var horizontalScrollLocked = false
     @State private var terminalSelectionSuppressed = false
     @State private var terminalSelectionSuppressionGeneration = 0
@@ -237,7 +336,12 @@ struct TerminalControlRootView: View {
     // instantiating on the same frame the drag first offsets it — that same-frame
     // cost was the stutter when sliding back to the projects list.
     @State private var backInteractionActive = false
-
+    // Immutable destination snapshot captured at back-swipe start; the preview
+    // renders from this, observing no live store state during the slide.
+    @State private var backPreviewSnapshot: TerminalBackPreviewSnapshot = .none
+    // Same idea for the FORWARD push into a project's tabs: capture the tabs once
+    // at push-start so the incoming layer renders static during the slide.
+    @State private var forwardTabsSnapshot: TerminalBackPreviewSnapshot = .none
     private var terminalInteractionsSuspended: Bool {
         terminalSelectionSuppressed || forwardDestination != nil || backDragOffset > 0
     }
@@ -256,22 +360,21 @@ struct TerminalControlRootView: View {
 
                 terminalContent(width: geo.size.width)
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .overlay(alignment: .leading) {
+                        if backInteractionActive || forwardDestination != nil {
+                            terminalEdgeShade.frame(width: 18).offset(x: -18)
+                        }
+                    }
                     .offset(x: backDragOffset + terminalForwardContentOffset(width: geo.size.width))
-                    // Static-radius drop shadow drawn only while a slide is active.
-                    // The opacity is constant during the slide (not keyed to the
-                    // moving offset) so SwiftUI doesn't re-rasterize the shadow every
-                    // frame — the per-frame shadow recompute was part of the jank.
-                    .compositingGroup()
-                    .shadow(color: .black.opacity((backInteractionActive || forwardDestination != nil) ? 0.3 : 0),
-                            radius: 14, x: -8, y: 0)
                     .allowsHitTesting(forwardDestination == nil && backDragOffset == 0)
 
                 if let forwardDestination {
                     terminalForwardView(forwardDestination, width: geo.size.width)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        .overlay(alignment: .leading) {
+                            terminalEdgeShade.frame(width: 18).offset(x: -18)
+                        }
                         .offset(x: forwardOffset)
-                        .compositingGroup()
-                        .shadow(color: .black.opacity(0.3), radius: 14, x: -8, y: 0)
                         .allowsHitTesting(false)
                 }
             }
@@ -287,12 +390,16 @@ struct TerminalControlRootView: View {
             // UIKit back-swipe recognizer (rightward → up one level). Mounted via
             // .gesture; its delegate gates direction and prevents the root pager's
             // scroll pan so rightward is deterministic (no black overscroll / race).
-            // Enabled only when there's a level to go back to and no forward anim.
+            // Enabled when there's a committed level to go back to, OR a forward push
+            // is in flight (so the rightward swipe INTERRUPTS the push instead of
+            // falling through to the root pager — that fall-through was the "black
+            // area / swipe ignored until the animation finishes" bug). Disabled only
+            // while an interrupt-reverse is already animating.
             .gesture(
                 TerminalBackPanGesture(
-                    isEnabled: swipeBackEnabled && store.canStepBack && forwardDestination == nil,
+                    isEnabled: swipeBackEnabled && !interruptingForward && (forwardDestination != nil || store.canStepBack),
                     width: geo.size.width,
-                    onBegan: { beginTerminalBackDrag() },
+                    onBegan: { beginTerminalBackDrag(width: geo.size.width) },
                     onChanged: { tx in updateTerminalBackDrag(tx, width: geo.size.width) },
                     onEnded: { tx, predicted, _ in endTerminalBackDrag(tx, predicted: predicted, width: geo.size.width) },
                     onCancelled: { cancelTerminalBackDrag() }
@@ -320,36 +427,119 @@ struct TerminalControlRootView: View {
     private func terminalForwardView(_ destination: TerminalForwardDestination, width: CGFloat) -> some View {
         switch destination {
         case .project(let project):
-            TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: true) { tab in
-                pushTab(tab, project: project, width: width)
+            // Render a STATIC snapshot of the destination tabs during the push
+            // slide (reads no @Observable state), not the live TerminalProjectTabsView
+            // — which read store.tabsByProject + activitySummary per row and got its
+            // body re-run every frame by mid-slide store mutations (the forward-push
+            // hitch: 63 dropped frames, term-render bodies=30, no main hang). The
+            // live view mounts in terminalContent once the push commits.
+            if case .tabs(let tabs, let marker, let name) = forwardTabsSnapshot, !tabs.isEmpty {
+                TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name, style: .lightweight)
+            } else {
+                TerminalProjectTabsView(project: project, onShowHistory: onShowHistory, interactionsSuspended: true) { tab in
+                    pushTab(tab, project: project, width: width)
+                }
             }
         case .tab(let tab, _):
-            TerminalChatDetailView(tab: tab, onShowHistory: onShowHistory, onComposerFocusChange: onComposerFocusChange)
+            // Like the tabs case: render a STATIC, cheap placeholder during the
+            // slide, NOT the live TerminalChatDetailView. The live detail mounts a
+            // ScrollView + LazyVStack + composer AND kicks off the history load
+            // (one chat was 546 KB JSON) — all on the main thread, competing with
+            // the slide animation (commit=103ms). The placeholder matches the chat
+            // header geometry so nothing jumps; the live detail mounts in
+            // terminalContent once the push commits.
+            TerminalChatForwardPlaceholder(tab: tab)
         }
+    }
+
+    // Static edge gradient that fakes the sliding layer's drop shadow at near-zero
+    // GPU cost (no per-frame shadow rasterization). Dark at the layer edge → clear.
+    private var terminalEdgeShade: some View {
+        LinearGradient(
+            colors: [Color.black.opacity(0.28), Color.black.opacity(0)],
+            startPoint: .trailing, endPoint: .leading
+        )
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
     private var terminalBackPreview: some View {
+        // Render from the snapshot captured at slide-start (backPreviewSnapshot),
+        // NOT live store reads — so a status-poll/SSE mutation mid-slide can't
+        // re-run this subtree's body. Falls back to a live capture if the snapshot
+        // is somehow empty (defensive).
+        switch backPreviewSnapshot {
+        case .tabs(let tabs, let marker, let name):
+            TerminalTabsBackPreview(tabs: tabs, marker: marker, projectName: name)
+        case .projects(let rows):
+            TerminalProjectsBackPreview(rows: rows)
+        case .none:
+            Color.clear
+        }
+    }
+
+    // Immutable snapshot of the destination shown during the back-slide. Captured
+    // once in beginTerminalBackDrag so the preview observes no @Observable state.
+    private func captureBackPreviewSnapshot() -> TerminalBackPreviewSnapshot {
         if store.selectedTab != nil, let project = store.selectedProject {
-            TerminalTabsBackPreview(project: project)
+            let tabs = store.tabsByProject[project.id] ?? []
+            let marker = store.statusMarkerByProject[project.id] ?? .fallback
+            return .tabs(tabs, marker, project.name)
         } else {
-            TerminalProjectsBackPreview()
+            let rows = store.projects.map {
+                CTProjectRowSnapshot(project: $0, activity: store.activitySummary(projectId: $0.id))
+            }
+            return .projects(rows)
         }
     }
 
     // UIKit back-swipe handlers (driven by TerminalBackPanGesture). The recognizer
     // already gated direction/enable in shouldBegin, so these just track the drag.
-    private func beginTerminalBackDrag() {
+    private func beginTerminalBackDrag(width: CGFloat) {
+        // INTERRUPT case: a forward push is mid-flight. The committed level under it
+        // is still the SOURCE level (selection commits only at the push's completion),
+        // so reversing here just abandons the push — no back-step needed. Bump the
+        // generation so the push's completion no-ops, then animate the forward layer
+        // back out and tear it down. This is a committed reverse, not finger-tracked
+        // (interpolating a half-played .easeOut from the finger fights the in-flight
+        // animation); the user gets immediate visual response + lands on the source.
+        if forwardDestination != nil {
+            VCLog.log("term-swipe", "begin drag — INTERRUPT forward push, reversing")
+            forwardGeneration += 1
+            interruptingForward = true
+            beginTerminalHorizontalInteraction(label: "interrupt-forward from=\(terminalLevelLabel)", initialPhase: "interrupt")
+            withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
+                forwardOffset = width
+            } completion: {
+                commitWithoutTerminalAnimation {
+                    forwardDestination = nil
+                    forwardOffset = 0
+                    forwardTabsSnapshot = .none
+                    interruptingForward = false
+                    endTerminalHorizontalInteraction()
+                }
+            }
+            return
+        }
         VCLog.log("term-swipe", "begin drag level=\(terminalLevelLabel)")
+        backPreviewSnapshot = captureBackPreviewSnapshot()   // freeze data before the slide
         backInteractionActive = true   // mount the preview before the offset moves
-        beginTerminalHorizontalInteraction()
+        beginTerminalHorizontalInteraction(label: "back from=\(terminalLevelLabel)", initialPhase: "gesture")
     }
 
     private func updateTerminalBackDrag(_ translationX: CGFloat, width: CGFloat) {
+        // An interrupt-reverse owns the animation; ignore finger tracking during it.
+        guard !interruptingForward, forwardDestination == nil else { return }
         backDragOffset = min(translationX, max(0, width - 18))
     }
 
     private func endTerminalBackDrag(_ translationX: CGFloat, predicted: CGFloat, width: CGFloat) {
+        // The interrupt-reverse (begun in beginTerminalBackDrag) owns its own
+        // animation + teardown; the gesture's end must not commit a second step.
+        if interruptingForward || forwardDestination != nil {
+            VCLog.log("term-swipe", "end ignored (interrupt-reverse owns the animation)")
+            return
+        }
         let commit = translationX > 64 || predicted > 110
         guard commit else {
             VCLog.log("term-swipe", "end CANCEL tx=\(Int(translationX)) predicted=\(Int(predicted)) (below threshold)")
@@ -362,12 +552,13 @@ struct TerminalControlRootView: View {
             return
         }
         VCLog.log("term-swipe", "end COMMIT tx=\(Int(translationX)) predicted=\(Int(predicted)) → stepBack from \(terminalLevelLabel)")
+        MainThreadWatchdog.mark("term-back-commit from=\(terminalLevelLabel)")
+        FrameMonitor.shared.setPhase("animate")
         withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
             backDragOffset = width
         } completion: {
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
+            FrameMonitor.shared.setPhase("swap")
+            commitWithoutTerminalAnimation {
                 store.stepBackOneLevel()
                 backDragOffset = 0
                 backInteractionActive = false
@@ -377,6 +568,11 @@ struct TerminalControlRootView: View {
     }
 
     private func cancelTerminalBackDrag() {
+        // Interrupt-reverse owns its teardown — a cancel mustn't double-fire it.
+        if interruptingForward || forwardDestination != nil {
+            VCLog.log("term-swipe", "cancel ignored (interrupt-reverse owns the animation)")
+            return
+        }
         VCLog.log("term-swipe", "cancel drag")
         withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9)) {
             backDragOffset = 0
@@ -413,7 +609,13 @@ struct TerminalControlRootView: View {
         }
         VCLog.log("term-swipe", "pushProject \(project.name) — mount@width then slide")
         backDragOffset = 0
-        beginTerminalHorizontalInteraction()
+        // Freeze the destination tabs into a value snapshot so the incoming layer
+        // renders static during the slide (no @Observable reads → no mid-slide
+        // body churn). Empty snapshot falls back to the live view.
+        let tabs = store.tabsByProject[project.id] ?? []
+        let marker = store.statusMarkerByProject[project.id] ?? .fallback
+        forwardTabsSnapshot = .tabs(tabs, marker, project.name)
+        beginTerminalHorizontalInteraction(label: "pushProject name=\(project.name) id=\(String(project.id.suffix(8)))", initialPhase: "mount")
         // Mount the incoming page OFF-SCREEN (forwardOffset = width) with NO
         // animation first; let SwiftUI render that frame, THEN slide it in next
         // runloop. Previously mount + animate shared one transaction, so the heavy
@@ -421,15 +623,23 @@ struct TerminalControlRootView: View {
         // open. The pre-render frame absorbs the instantiation cost off-screen.
         forwardDestination = .project(project)
         forwardOffset = width
+        forwardGeneration += 1
+        let generation = forwardGeneration
         Task { @MainActor in
             await Task.yield()
+            FrameMonitor.shared.setPhase("animate")   // commit phase = up to here
             withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
             } completion: {
+                // A back-swipe may have interrupted and reversed this push; if so the
+                // generation bumped and we must NOT commit the navigation.
+                guard generation == forwardGeneration else { return }
+                FrameMonitor.shared.setPhase("swap")
                 commitWithoutTerminalAnimation {
                     store.selectProject(project)
                     forwardDestination = nil
                     forwardOffset = 0
+                    forwardTabsSnapshot = .none
                     endTerminalHorizontalInteraction()
                 }
             }
@@ -450,14 +660,19 @@ struct TerminalControlRootView: View {
         }
         VCLog.log("term-swipe", "pushTab \(tab.name) — mount@width then slide")
         backDragOffset = 0
-        beginTerminalHorizontalInteraction()
+        beginTerminalHorizontalInteraction(label: "pushTab name=\(tab.name) id=\(String((tab.tabId ?? tab.id).suffix(8)))", initialPhase: "mount")
         forwardDestination = .tab(tab, project)
         forwardOffset = width
+        forwardGeneration += 1
+        let generation = forwardGeneration
         Task { @MainActor in
             await Task.yield()
+            FrameMonitor.shared.setPhase("animate")
             withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
                 forwardOffset = 0
             } completion: {
+                guard generation == forwardGeneration else { return }   // interrupted → don't commit
+                FrameMonitor.shared.setPhase("swap")   // live chat detail mounts HERE
                 commitWithoutTerminalAnimation {
                     store.selectTabForDisplay(tab, project: project)
                     forwardDestination = nil
@@ -474,15 +689,24 @@ struct TerminalControlRootView: View {
         return withTransaction(transaction, updates)
     }
 
-    private func beginTerminalHorizontalInteraction() {
+    private func beginTerminalHorizontalInteraction(label: String, initialPhase: String = "commit") {
         horizontalScrollLocked = true
         terminalSelectionSuppressed = true
         terminalSelectionSuppressionGeneration += 1
+        // Park background tabs-prefetch while we navigate, so its writes can't land
+        // mid-slide and hitch the projects back-preview (watchdog proved this is a
+        // HITCH, not a hang — see TerminalControlStore.interactionActive).
+        store.setInteractionActive(true)
+        // Watch presented frames during the slide — the only instrument that sees
+        // GPU/compositing jank the main-thread watchdog can't.
+        FrameMonitor.shared.arm(reason: "term-nav", label: label, phase: initialPhase)
     }
 
     private func endTerminalHorizontalInteraction() {
         horizontalScrollLocked = false
+        store.setInteractionActive(false)
         let generation = terminalSelectionSuppressionGeneration
+        FrameMonitor.shared.setPhase("settle")
         DispatchQueue.main.async {
             guard terminalSelectionSuppressionGeneration == generation else { return }
             terminalSelectionSuppressed = false
@@ -490,49 +714,250 @@ struct TerminalControlRootView: View {
     }
 }
 
+// Back-preview = a STATIC snapshot of the destination, shown only while the slide
+// animates. CRITICAL (validated June 2026, +research agent reading this code): its
+// body must read ZERO @Observable store state. Previously it read store.projects +
+// store.activitySummary() (which reads projects/tabsByProject/statusByTab/
+// runningTabs) — so the status-poll Timer mutating statusByTab mid-slide re-ran the
+// whole preview body every frame → LazyVStack rebuild → the sustained per-frame
+// cost the FrameMonitor measured (38 dropped frames, no main-thread hang; not GPU,
+// so .drawingGroup didn't help). Now the parent captures an immutable value array
+// ONCE at slide-start and passes it in; the preview observes nothing. Plain VStack
+// (not Lazy): ~12 cheap rows don't need laziness, and lazy viewport estimation is
+// exactly what an ancestor .offset animation perturbs on iOS 26.
+// Static placeholder shown while a chat-detail push slides in — mirrors the chat
+// header geometry (so nothing jumps when the live view commits) and an empty
+// transcript area. Reads only the immutable `tab`, no @Observable store state, and
+// mounts no ScrollView/composer and no history load. The live TerminalChatDetailView
+// mounts in terminalContent once the push commits.
+private struct TerminalChatForwardPlaceholder: View {
+    let tab: CTTabInfo
+    @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
+    private var uiFont: Double = 14
+
+    private var status: String { tab.sessionStatus ?? "inactive" }
+    private var statusColor: Color {
+        switch status {
+        case "busy": return Color(hex: "d97706")
+        case "active": return CTGreen
+        case "starting": return CTAccent
+        default: return Color(white: 0.38)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: {}) {
+                VStack(spacing: 1) {
+                    Text(tab.name)
+                        .font(.system(size: uiFont, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Circle().fill(statusColor).frame(width: 6, height: 6)
+                        Text(status)
+                            .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: 220)
+            } trailing: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CTPageBackground)
+        .allowsHitTesting(false)
+    }
+}
+
 private struct TerminalProjectsBackPreview: View {
-    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
+    let rows: [CTProjectRowSnapshot]
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 9) {
-                ForEach(store.projects) { project in
-                    TerminalProjectRow(project: project, uiFont: uiFont, activity: store.activitySummary(projectId: project.id))
-                }
+        // MUST mirror TerminalProjectsView's layout: a 44pt header above the list.
+        // Without it the sliding snapshot has no header, so the header visually
+        // disappears mid-slide and the rows jump down ~44pt when the live level
+        // commits its header back. The gear/trailing here are decorative — the
+        // whole preview is allowsHitTesting(false).
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: {}) {
+                TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
+            } trailing: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 120)
+            ScrollView {
+                VStack(spacing: 9) {
+                    ForEach(rows) { row in
+                        TerminalProjectRow(project: row.project, uiFont: uiFont, activity: row.activity, animatedBadge: false)
+                            .equatable()
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 120)
+            }
         }
         .background(CTPageBackground)
         .allowsHitTesting(false)
     }
 }
 
+private enum TerminalTabsPreviewStyle {
+    case full
+    case lightweight
+}
+
 private struct TerminalTabsBackPreview: View {
-    let project: CTProject
-    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
+    let tabs: [CTTabInfo]
+    let marker: CTStatusMarker
+    // Project name, frozen into the snapshot so the header matches the live
+    // TerminalProjectTabsView level without reading @Observable state mid-slide.
+    var projectName: String = ""
+    var style: TerminalTabsPreviewStyle = .full
     @AppStorage(VoiceChatConfig.Keys.uiFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var uiFont: Double = 14
 
-    private var tabs: [CTTabInfo] { store.tabsByProject[project.id] ?? [] }
-    private var marker: CTStatusMarker { store.statusMarkerByProject[project.id] ?? .fallback }
-
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(tabs) { tab in
-                    TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker)
+        // Mirror TerminalProjectTabsView: 44pt header above the list (see the
+        // projects preview note — a headerless snapshot makes the header flicker
+        // and the rows jump during the slide).
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: {}) {
+                TerminalHeaderTitle(title: projectName, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
+            } trailing: {
+                if style == .lightweight {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, height: 38)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold)).ctGlassCircle()
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 120)
+            if style == .lightweight {
+                TerminalTabsPreviewList(tabs: tabs, marker: marker, uiFont: uiFont, bottomPadding: 120)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(tabs) { tab in
+                            TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker, animated: false)
+                                .equatable()
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+                    .padding(.bottom, 120)
+                }
+            }
         }
         .background(CTPageBackground)
         .allowsHitTesting(false)
+    }
+}
+
+private struct TerminalTabsPreviewList: View {
+    let tabs: [CTTabInfo]
+    let marker: CTStatusMarker
+    let uiFont: Double
+    let bottomPadding: CGFloat
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(tabs) { tab in
+                TerminalTabPreviewRow(tab: tab, uiFont: uiFont, marker: marker)
+                    .equatable()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, bottomPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct TerminalTabPreviewRow: View, Equatable {
+    let tab: CTTabInfo
+    let uiFont: Double
+    let marker: CTStatusMarker
+
+    nonisolated static func == (lhs: TerminalTabPreviewRow, rhs: TerminalTabPreviewRow) -> Bool {
+        lhs.tab == rhs.tab && lhs.uiFont == rhs.uiFont && lhs.marker == rhs.marker
+    }
+
+    private var runtime: String { tab.sessionStatus ?? "inactive" }
+    private var tint: Color {
+        if tab.awaiting == true { return CTViolet }
+        switch runtime {
+        case "busy": return Color(hex: "d97706")
+        case "active": return CTGreen
+        case "starting": return CTAccent
+        default: return Color(white: 0.38)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(agentAccent(tab.effectiveToolType).opacity(0.16))
+                Image(systemName: tab.isCodexPTY ? "chevron.left.forwardslash.chevron.right" : "terminal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(agentAccent(tab.effectiveToolType).opacity(0.86))
+            }
+            .frame(width: 26, height: 26)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    StatusMarkerSlot(colorHex: tab.statusColor, marker: marker)
+                    Text(tab.name)
+                        .font(.system(size: uiFont, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                Text(tab.cwd)
+                    .font(.system(size: uiFont - 3).monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+            Circle().fill(tint).frame(width: 8, height: 8)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(tabRowBackground(tab.color, selected: false, busy: runtime == "busy", isCodex: tab.isCodexPTY, isClaude: tab.isClaudePTY)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.white.opacity(0.07)))
+    }
+}
+
+// Value snapshot for one project row, captured at slide-start so the preview's body
+// reads no @Observable state.
+private struct CTProjectRowSnapshot: Identifiable {
+    let project: CTProject
+    let activity: CTActivitySummary
+    var id: String { project.id }
+}
+
+// Immutable destination snapshot for the back-slide preview (projects list or one
+// project's tabs), captured once at slide-start.
+private enum TerminalBackPreviewSnapshot {
+    case none
+    case projects([CTProjectRowSnapshot])
+    case tabs([CTTabInfo], CTStatusMarker, String)   // tabs, status marker, project name (for the header)
+
+    var isEmpty: Bool {
+        switch self {
+        case .none: return true
+        case .projects(let r): return r.isEmpty
+        case .tabs(let t, _, _): return t.isEmpty
+        }
     }
 }
 
@@ -547,6 +972,7 @@ private struct TerminalProjectsView: View {
     let interactionsSuspended: Bool
     let onOpenProject: (CTProject) -> Void
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
+    @EnvironmentObject private var router: TabRouter
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showBuildInstallConfirm = false
     @State private var installAlert: TerminalInstallAlert?
@@ -562,6 +988,28 @@ private struct TerminalProjectsView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                TerminalHeaderTitle(title: "Terminal", subtitle: TerminalControlConfig.displayHost(), uiFont: uiFont)
+            } trailing: {
+                Button {
+                    VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
+                    Task { await prepareBuildInstall() }
+                } label: {
+                    Group {
+                        if store.terminalInstallRunning {
+                            ProgressView().controlSize(.small).tint(.white)
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                    }
+                    .ctGlassCircle()
+                }
+                .buttonStyle(.plain)
+                .disabled(store.terminalInstallRunning)
+                .accessibilityLabel("Run npm install build")
+            }
         ZStack {
             CTPageBackground.ignoresSafeArea()
             if store.loadingProjects && store.projects.isEmpty {
@@ -573,7 +1021,9 @@ private struct TerminalProjectsView: View {
                 TerminalOfflineView(message: store.lastError, retry: { Task { await store.refreshProjects() } })
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 9) {
+                    // Plain VStack: 9 cheap rows, no laziness needed; avoids the
+                    // lazy viewport recompute under the slide .offset (iOS 26).
+                    VStack(spacing: 9) {
                         ForEach(store.projects) { project in
                             Button {
                                 guard !interactionsSuspended else { return }
@@ -584,6 +1034,7 @@ private struct TerminalProjectsView: View {
                                     uiFont: uiFont,
                                     activity: store.activitySummary(projectId: project.id)
                                 )
+                                .equatable()
                             }
                             .buttonStyle(.plain)
                             .allowsHitTesting(!interactionsSuspended)
@@ -613,44 +1064,8 @@ private struct TerminalProjectsView: View {
                 .refreshable { await store.refreshProjects() }
             }
         }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onShowHistory) {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-            }
-            ToolbarItem(placement: .principal) {
-                TerminalHeaderTitle(
-                    title: "Terminal",
-                    subtitle: TerminalControlConfig.displayHost(),
-                    uiFont: uiFont
-                )
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    VCLog.log("TerminalInstallUI", "button tap running=\(store.terminalInstallRunning) offline=\(store.offline) projects=\(store.projects.count)")
-                    Task { await prepareBuildInstall() }
-                } label: {
-                    if store.terminalInstallRunning {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(.white)
-                            .frame(width: 28, height: 28)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 16, weight: .semibold))
-                            .frame(width: 28, height: 28)
-                    }
-                }
-                .disabled(store.terminalInstallRunning)
-                .accessibilityLabel("Run npm install build")
-            }
         }
-        .toolbarBackground(CTHeaderBackground, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .navigationBarHidden(true)
         .confirmationDialog("Запустить npm run build:install?", isPresented: $showBuildInstallConfirm, titleVisibility: .visible) {
             Button("Запустить install", role: .destructive) {
                 VCLog.log("TerminalInstallUI", "confirm accepted")
@@ -739,10 +1154,21 @@ private struct TerminalProjectsView: View {
     }
 }
 
-private struct TerminalProjectRow: View {
+private struct TerminalProjectRow: View, Equatable {
     let project: CTProject
     let uiFont: Double
     let activity: CTActivitySummary
+    var animatedBadge: Bool = true   // false in the back-preview (no live spinner)
+
+    // Phase D extended: skip re-render unless this row's own inputs changed. The
+    // projects list is the heaviest surface (9 rows w/ icons + activity badges)
+    // and it renders as the back-preview DURING the project→projects slide; without
+    // this, every row re-evaluated each frame of the slide (the remaining jank the
+    // user saw on that specific transition).
+    nonisolated static func == (lhs: TerminalProjectRow, rhs: TerminalProjectRow) -> Bool {
+        lhs.project == rhs.project && lhs.uiFont == rhs.uiFont
+            && lhs.activity == rhs.activity && lhs.animatedBadge == rhs.animatedBadge
+    }
 
     var body: some View {
         HStack(spacing: 11) {
@@ -758,7 +1184,7 @@ private struct TerminalProjectRow: View {
                     }
                     Spacer(minLength: 6)
                     if activity.count > 0 {
-                        TerminalActivityBadge(count: activity.count, streaming: activity.streaming)
+                        TerminalActivityBadge(count: activity.count, streaming: activity.streaming, animated: animatedBadge)
                     }
                 }
                 Text(project.path)
@@ -809,16 +1235,35 @@ private struct CTProjectIconView: View {
     }
 }
 
+// Decoded-icon cache. Project icons arrive as base64 data-URLs (the /api/projects
+// payload is ~38KB of embedded PNGs for 9 projects). ctImageFromDataURL used to
+// base64-decode + UIImage(data:) on EVERY body eval — so the 9-row projects list,
+// rendered as the back-preview DURING the project→projects slide, re-decoded all
+// 9 PNGs each frame. UIImage decode is render-phase work (often deferred to draw),
+// which is why it lagged visibly but didn't always trip the main-thread watchdog.
+// Cache by the data-URL string so each icon decodes once for the app's lifetime.
+private let ctIconCache: NSCache<NSString, UIImage> = {
+    let c = NSCache<NSString, UIImage>()
+    c.countLimit = 64
+    return c
+}()
+
 private func ctImageFromDataURL(_ value: String?) -> UIImage? {
     guard let value, !value.isEmpty else { return nil }
+    let key = value as NSString
+    if let cached = ctIconCache.object(forKey: key) { return cached }
     let base64: String
     if let comma = value.firstIndex(of: ",") {
         base64 = String(value[value.index(after: comma)...])
     } else {
         base64 = value
     }
-    guard let data = Data(base64Encoded: base64) else { return nil }
-    return UIImage(data: data)
+    guard let data = Data(base64Encoded: base64), let image = UIImage(data: data) else { return nil }
+    // Force-decode now (off the render path) so the first draw doesn't pay the
+    // decompress cost; then cache the ready-to-draw image.
+    let decoded = image.preparingForDisplay() ?? image
+    ctIconCache.setObject(decoded, forKey: key)
+    return decoded
 }
 
 private struct TerminalProjectTabsView: View {
@@ -827,6 +1272,7 @@ private struct TerminalProjectTabsView: View {
     let interactionsSuspended: Bool
     let onOpenTab: (CTTabInfo) -> Void
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
+    @EnvironmentObject private var router: TabRouter
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var showNewTerminal = false
     @State private var renameTarget: CTTabInfo?
@@ -850,6 +1296,15 @@ private struct TerminalProjectTabsView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                TerminalHeaderTitle(title: project.name, subtitle: "Terminal projects", uiFont: uiFont, maxWidth: 190)
+            } trailing: {
+                Button { Task { await store.loadTabs(projectId: project.id) } } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+                }
+                .buttonStyle(.plain)
+            }
         ZStack {
             CTPageBackground.ignoresSafeArea()
             if store.loadingTabs.contains(project.id) && tabs.isEmpty {
@@ -858,77 +1313,63 @@ private struct TerminalProjectTabsView: View {
                     Text("Загрузка вкладок…").font(.system(size: uiFont - 1)).foregroundStyle(.secondary)
                 }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(tabs) { tab in
-                            Button {
-                                guard !interactionsSuspended else { return }
-                                guard tab.isInteractiveAI else { return }
-                                onOpenTab(tab)
-                            } label: {
-                                TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!tab.isInteractiveAI)
-                            .allowsHitTesting(!interactionsSuspended)
-                            .opacity(tab.isInteractiveAI ? 1 : 0.55)
-                            // Standard long-press: native contextMenu (lift/scale +
-                            // haptic + dropdown). Rename works for ANY open tab.
-                            .contextMenu {
-                                Button { renameTarget = tab } label: {
-                                    Label("Rename", systemImage: "pencil")
+                if interactionsSuspended {
+                    TerminalTabsPreviewList(tabs: tabs, marker: marker, uiFont: uiFont, bottomPadding: bottomBarInset + 70)
+                } else {
+                    ScrollView {
+                        // Plain VStack (not Lazy): ≤~12 cheap rows. Lazy viewport/offset
+                        // estimation is exactly what an ancestor .offset slide perturbs
+                        // on iOS 26 (research June 2026) — using VStack removes that
+                        // per-frame recompute during the push/back animation.
+                        VStack(spacing: 8) {
+                            ForEach(tabs) { tab in
+                                Button {
+                                    guard tab.isInteractiveAI else { return }
+                                    onOpenTab(tab)
+                                } label: {
+                                    TerminalTabRow(tab: tab, selected: false, uiFont: uiFont, marker: marker, animated: true)
+                                        .equatable()
                                 }
-                                Button { UIPasteboard.general.string = tab.name } label: {
-                                    Label("Copy name", systemImage: "doc.on.doc")
+                                .buttonStyle(.plain)
+                                .disabled(!tab.isInteractiveAI)
+                                .opacity(tab.isInteractiveAI ? 1 : 0.55)
+                                // Standard long-press: native contextMenu (lift/scale +
+                                // haptic + dropdown). Rename works for ANY open tab.
+                                .contextMenu {
+                                    Button { renameTarget = tab } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    Button { UIPasteboard.general.string = tab.name } label: {
+                                        Label("Copy name", systemImage: "doc.on.doc")
+                                    }
                                 }
+                                .id(tab.tabId ?? tab.id)
                             }
-                            .id(tab.tabId ?? tab.id)
                         }
+                        .scrollTargetLayout()
+                        .padding(.horizontal, 10)
+                        .padding(.top, 10)
+                        .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
                     }
-                    .scrollTargetLayout()
-                    .padding(.horizontal, 10)
-                    .padding(.top, 10)
-                    .padding(.bottom, bottomBarInset + 70)   // clear glass bar + New Terminal FAB
+                    .scrollPosition(id: scrollAnchor)
+                    .refreshable { await store.loadTabs(projectId: project.id) }
                 }
-                .scrollPosition(id: scrollAnchor)
-                .refreshable { await store.loadTabs(projectId: project.id) }
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            TerminalFloatingNewButton(title: "New Terminal") {
-                showNewTerminal = true
-            }
-            .padding(.trailing, 16)
-            // Lift above the root glass bar (user: "на странице проекта в правом
-            // нижнем углу New Terminal тоже повыше поднять"). +4 keeps a touch
-            // more gap than the list rows since this is a tap target.
-            .padding(.bottom, bottomBarInset + 4)
-        }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onShowHistory) {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 16, weight: .semibold))
+            if !interactionsSuspended {
+                TerminalFloatingNewButton(title: "New Terminal") {
+                    showNewTerminal = true
                 }
-            }
-            ToolbarItem(placement: .principal) {
-                TerminalHeaderTitle(
-                    title: project.name,
-                    subtitle: "Terminal projects",
-                    uiFont: uiFont,
-                    maxWidth: 190
-                )
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button { Task { await store.loadTabs(projectId: project.id) } } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
+                .padding(.trailing, 16)
+                // Lift above the root glass bar (user: "на странице проекта в правом
+                // нижнем углу New Terminal тоже повыше поднять"). +4 keeps a touch
+                // more gap than the list rows since this is a tap target.
+                .padding(.bottom, bottomBarInset + 4)
             }
         }
-        .toolbarBackground(CTHeaderBackground, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        }
+        .navigationBarHidden(true)
         .sheet(isPresented: $showNewTerminal) {
             TerminalNewTerminalSheet(project: project)
                 .presentationDetents([.medium])
@@ -1029,11 +1470,22 @@ private struct TerminalNewTerminalSheet: View {
     }
 }
 
-private struct TerminalTabRow: View {
+private struct TerminalTabRow: View, Equatable {
     let tab: CTTabInfo
     let selected: Bool
     let uiFont: Double
     let marker: CTStatusMarker
+    // false in the back-preview: a busy tab shows an indeterminate ProgressView
+    // (a repeatForever-class live animation). 12-tab lists with a busy row rendered
+    // as the back-preview spun that spinner behind the slide → the residual lag the
+    // watchdog couldn't see (render/animation, not a main-thread block). Static dot
+    // in preview; live spinner only in the foreground list.
+    var animated: Bool = true
+
+    nonisolated static func == (lhs: TerminalTabRow, rhs: TerminalTabRow) -> Bool {
+        lhs.tab == rhs.tab && lhs.selected == rhs.selected
+            && lhs.uiFont == rhs.uiFont && lhs.marker == rhs.marker && lhs.animated == rhs.animated
+    }
 
     private var runtime: String { tab.sessionStatus ?? "inactive" }
     private var tint: Color {
@@ -1047,6 +1499,15 @@ private struct TerminalTabRow: View {
     }
 
     var body: some View {
+        // Render-churn probe (grep [term-render], label tab:). Fires per body eval
+        // in the foreground list so a re-render storm is visible; preview rows
+        // (animated:false) are excluded to avoid noise.
+        if animated { TerminalRenderProbe.tick("tab:" + (tab.tabId ?? tab.id)) }
+        return rowBody
+    }
+
+    @ViewBuilder
+    private var rowBody: some View {
         HStack(spacing: 11) {
             AgentIconView(toolType: agentToolType, size: 26)
             VStack(alignment: .leading, spacing: 3) {
@@ -1064,9 +1525,11 @@ private struct TerminalTabRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 4)
-            if runtime == "busy" {
+            if runtime == "busy" && animated {
                 ProgressView().controlSize(.small).tint(tint)
             } else {
+                // Static dot for non-busy, AND for busy in the back-preview (no live
+                // spinner competing with the slide).
                 Circle().fill(tint).frame(width: 8, height: 8)
             }
         }
@@ -1077,9 +1540,7 @@ private struct TerminalTabRow: View {
     }
 
     private var agentToolType: String? {
-        if tab.isCodexPTY { return "codex" }
-        if tab.isClaudePTY || tab.isSDK { return "claude" }
-        return nil
+        tab.effectiveToolType
     }
 }
 
@@ -1109,20 +1570,29 @@ private struct StatusMarkerSlot: View {
     }
 }
 
+// Pre-decoded agent icons, resolved once. Per-row `Image("ClaudeIcon")` lookups
+// (×~15 rows) on first render of the live tabs list were part of the post-open
+// cost; a module-level cached UIImage skips the asset-catalog hit per row.
+private let ctClaudeIconImage = UIImage(named: "ClaudeIcon")?.preparingForDisplay() ?? UIImage(named: "ClaudeIcon")
+private let ctCodexIconImage = UIImage(named: "CodexIcon")?.preparingForDisplay() ?? UIImage(named: "CodexIcon")
+
 private struct AgentIconView: View {
     let toolType: String?
     var size: CGFloat = 24
+    private var normalizedToolType: String? {
+        toolType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 
     var body: some View {
         ZStack {
             Circle().fill(agentAccent(toolType).opacity(0.13))
-            if toolType == "claude" {
-                Image("ClaudeIcon")
+            if normalizedToolType == "claude", let img = ctClaudeIconImage {
+                Image(uiImage: img)
                     .resizable()
                     .scaledToFit()
                     .padding(size * 0.18)
-            } else if toolType == "codex" {
-                Image("CodexIcon")
+            } else if normalizedToolType == "codex", let img = ctCodexIconImage {
+                Image(uiImage: img)
                     .resizable()
                     .scaledToFit()
                     .padding(size * 0.12)
@@ -1137,7 +1607,7 @@ private struct AgentIconView: View {
 }
 
 private func agentAccent(_ toolType: String?) -> Color {
-    switch toolType {
+    switch toolType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "codex": return CTCodexGreen
     case "claude": return CTAccent
     default: return Color.white.opacity(0.55)
@@ -1172,6 +1642,7 @@ private struct TerminalChatDetailView: View {
 
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
     @ObservedObject private var voiceStore = VoiceChatStore.shared
+    @EnvironmentObject private var router: TabRouter
     @Environment(\.bottomBarInset) private var bottomBarInset
     @State private var input = ""
     @State private var showTerminalPrompts = false
@@ -1216,7 +1687,59 @@ private struct TerminalChatDetailView: View {
     private var canResume: Bool { (tab.isClaudePTY || tab.isCodexPTY) && (tab.activeSessionId?.isEmpty == false) && status == "inactive" }
     private var canUseComposer: Bool { !tabId.isEmpty && !canResume && status != "starting" }
 
+    // Center of the custom header (replaces the old principal toolbar item): tab
+    // name + status line + context%, long-press for rename / think toggle.
+    @ViewBuilder private var chatHeaderCenter: some View {
+        VStack(spacing: 1) {
+            Text(tab.name)
+                .font(.system(size: uiFont, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+            HStack(spacing: 4) {
+                Circle().fill(statusColor).frame(width: 6, height: 6)
+                Text(status)
+                    .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if tab.isClaudePTY || tab.isCodexPTY || tab.isSDK {
+                    if let pct = store.contextPctByTab[tabId] {
+                        Text("· \(pct)%")
+                            .font(.system(size: max(11, uiFont - 2), weight: .semibold).monospacedDigit())
+                            .foregroundStyle(contextPctColor(pct))
+                    } else {
+                        Text("· –")
+                            .font(.system(size: max(11, uiFont - 2), weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 220)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button { showRename = true } label: { Label("Rename", systemImage: "pencil") }
+            Button { UIPasteboard.general.string = tab.name } label: { Label("Copy name", systemImage: "doc.on.doc") }
+            if !tab.isCodexPTY {
+                let thinkingOn = (store.paramsByTab[tabId]?.thinking ?? "adaptive") != "disabled"
+                Button {
+                    Task { await store.setParams(tabId: tabId, partial: ["thinking": thinkingOn ? "disabled" : "adaptive"]) }
+                } label: {
+                    Label(thinkingOn ? "Think: ON" : "Think: OFF", systemImage: thinkingOn ? "brain.head.profile.fill" : "brain")
+                }
+                .disabled(store.isTabTurnBusy(tabId))
+            }
+        }
+    }
+
     var body: some View {
+        VStack(spacing: 0) {
+            TerminalHeaderBar(onSettings: { router.openSettings() }) {
+                chatHeaderCenter
+            } trailing: {
+                Button { Task { await store.loadHistory(tabId: tabId) } } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .semibold)).ctGlassCircle()
+                }
+                .buttonStyle(.plain)
+            }
         ZStack {
             CTPageBackground.ignoresSafeArea()
             ScrollViewReader { proxy in
@@ -1235,6 +1758,7 @@ private struct TerminalChatDetailView: View {
                             } else {
                                 ForEach(entries) { entry in
                                     TerminalEntryView(entry: entry, chatFont: chatFont)
+                                        .equatable()   // Phase D: skip unchanged rows during streaming
                                 }
                             }
                             Color.clear.frame(height: 142 + bottomBarInset).id("BOTTOM")
@@ -1289,50 +1813,8 @@ private struct TerminalChatDetailView: View {
                 .onChange(of: entries.last?.text.count ?? 0) { _, _ in pin(proxy) }
             }
         }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onShowHistory) {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-            }
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(tab.name)
-                        .font(.system(size: uiFont, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-                    HStack(spacing: 4) {
-                        Circle().fill(statusColor).frame(width: 6, height: 6)
-                        Text(status)
-                            .font(.system(size: max(9, uiFont - 4)).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: 190)
-                .contentShape(Rectangle())
-                // Long-press the title for tab actions — the standard native
-                // contextMenu (instant lift/scale + haptic + dropdown). Rename
-                // mirrors the Gemini chat title; double-tap-copy stays as-is.
-                .contextMenu {
-                    Button { showRename = true } label: {
-                        Label("Rename", systemImage: "pencil")
-                    }
-                    Button { UIPasteboard.general.string = tab.name } label: {
-                        Label("Copy name", systemImage: "doc.on.doc")
-                    }
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button { Task { await store.loadHistory(tabId: tabId) } } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
         }
-        .toolbarBackground(CTHeaderBackground, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .navigationBarHidden(true)
         .onAppear {
             if !tabId.isEmpty {
                 voiceStore.setActiveComposerKey(voiceComposerKey)
@@ -1568,9 +2050,9 @@ private struct TerminalChatDetailView: View {
                     HStack(spacing: 6) {
                         TerminalModelMenuChip(tabId: tabId, isCodex: tab.isCodexPTY)
                         TerminalEffortMenuChip(tabId: tabId, isCodex: tab.isCodexPTY)
-                        if !tab.isCodexPTY {
-                            TerminalThinkingMenuChip(tabId: tabId)
-                        }
+                        // Think moved to the tab-title long-press menu (the brain
+                        // chip ate too much composer width); see the title
+                        // .contextMenu below.
                         Button { showVoicePrompts = true } label: {
                             terminalIconButton(active: false) {
                                 Image(systemName: "text.quote")
@@ -1922,15 +2404,38 @@ private struct TerminalModelMenuChip: View {
     private var params: CTParams {
         store.paramsByTab[tabId] ?? CTParams(tabId: tabId, model: isCodex ? "gpt-5.5" : "default", effort: "high", thinking: "adaptive")
     }
+    // Live catalog from `GET /api/agent-models` (codex via `codex debug models`,
+    // claude via desktop literal); falls back to static rows offline / old build.
+    // `default` is prepended for both agents — our "let the CLI decide" row, not
+    // part of the server catalog. The tab's current value is always kept present
+    // so a server-hidden model the tab already runs doesn't vanish from the menu.
     private var options: [(String, String)] {
+        let catalog = isCodex ? store.modelCatalog?.codex : store.modelCatalog?.claude
+        if let catalog, !catalog.isEmpty {
+            var values: [(String, String)] = [("default", isCodex ? "default" : "opus")]
+            // Claude: drop the explicit `opus` row — `/model default` already IS
+            // opus but with the full 1M context window, whereas `/model opus`
+            // caps context. One Opus entry only (user request).
+            for m in catalog where m.id != "default" && !(!isCodex && m.id == "opus") {
+                values.append((m.id, m.label))
+            }
+            let cur = params.model
+            if !cur.isEmpty, !values.contains(where: { $0.0 == cur }) { values.append((cur, cur)) }
+            return values
+        }
         if isCodex {
             let current = params.model.isEmpty ? "gpt-5.5" : params.model
             var values = [("default", "default"), ("gpt-5.5", "gpt-5.5")]
             if current != "default" && current != "gpt-5.5" { values.append((current, current)) }
             return values
         }
-        return [("default", "opus"), ("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]
+        // Claude fallback: `default` (= opus, 1M ctx) only — no separate `opus`.
+        return [("default", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")]
     }
+
+    // Lock while a turn is running: a live `/model` switch mid-answer is unsafe
+    // (fact-codex.md::Модели и effort). No toast — disabled is the affordance.
+    private var locked: Bool { applying != nil || store.isTabTurnBusy(tabId) }
 
     var body: some View {
         Menu {
@@ -1942,9 +2447,9 @@ private struct TerminalModelMenuChip: View {
                 }
             }
         } label: {
-            TerminalParamMenuLabel(icon: "cpu", text: terminalModelLabel(params.model, isCodex: isCodex), active: false, busy: applying != nil)
+            TerminalParamMenuLabel(text: terminalModelLabel(params.model, isCodex: isCodex), active: false, busy: applying != nil, dimmed: locked)
         }
-        .disabled(applying != nil)
+        .disabled(locked)
     }
 
     private func apply(_ value: String) {
@@ -1965,9 +2470,23 @@ private struct TerminalEffortMenuChip: View {
     private var params: CTParams {
         store.paramsByTab[tabId] ?? CTParams(tabId: tabId, model: isCodex ? "gpt-5.5" : "default", effort: "high", thinking: "adaptive")
     }
+    // Codex models advertise their own reasoning levels (`efforts` per model in
+    // the catalog) — use the selected model's list when present; otherwise the
+    // static per-agent fallback. Claude rows omit `efforts`, so Claude always
+    // uses the literal. Current value kept present so it never disappears.
     private var options: [String] {
-        isCodex ? ["minimal", "low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh", "max"]
+        let fallback = isCodex ? ["minimal", "low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh", "max"]
+        guard isCodex, let codex = store.modelCatalog?.codex else { return fallback }
+        let efforts = codex.first(where: { $0.id == params.model })?.efforts ?? []
+        guard !efforts.isEmpty else { return fallback }
+        var values = efforts
+        if !params.effort.isEmpty, !values.contains(params.effort) { values.append(params.effort) }
+        return values
     }
+
+    // Same turn-busy lock as the model chip: effort feeds the same `/model`
+    // picker on Codex, unsafe to apply mid-turn.
+    private var locked: Bool { applying != nil || store.isTabTurnBusy(tabId) }
 
     var body: some View {
         Menu {
@@ -1979,9 +2498,9 @@ private struct TerminalEffortMenuChip: View {
                 }
             }
         } label: {
-            TerminalParamMenuLabel(icon: "speedometer", text: params.effort, active: true, busy: applying != nil)
+            TerminalParamMenuLabel(text: params.effort, active: true, busy: applying != nil, dimmed: locked)
         }
-        .disabled(applying != nil)
+        .disabled(locked)
     }
 
     private func apply(_ value: String) {
@@ -1993,67 +2512,52 @@ private struct TerminalEffortMenuChip: View {
     }
 }
 
-private struct TerminalThinkingMenuChip: View {
-    let tabId: String
-    private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
-    @State private var applying: String?
-
-    private var params: CTParams {
-        store.paramsByTab[tabId] ?? CTParams(tabId: tabId, model: "default", effort: "high", thinking: "adaptive")
-    }
-    private var options: [(String, String)] {
-        [("adaptive", "Think ON"), ("disabled", "Think OFF")]
-    }
-
-    var body: some View {
-        Menu {
-            ForEach(options, id: \.0) { value, label in
-                Button {
-                    apply(value)
-                } label: {
-                    if params.thinking == value { Label(label, systemImage: "checkmark") } else { Text(label) }
-                }
-            }
-        } label: {
-            TerminalParamMenuLabel(icon: "brain", text: params.thinking == "disabled" ? "off" : "on", active: params.thinking != "disabled", busy: applying != nil)
-        }
-        .disabled(applying != nil)
-    }
-
-    private func apply(_ value: String) {
-        applying = value
-        Task {
-            await store.setParams(tabId: tabId, partial: ["thinking": value])
-            applying = nil
-        }
-    }
-}
+// (Think toggle moved to the tab-title long-press context menu — see
+// TerminalChatDetailView's title .contextMenu. The composer brain chip was
+// removed because it ate too much width.)
 
 private struct TerminalParamMenuLabel: View {
-    let icon: String
     let text: String
     let active: Bool
     let busy: Bool
+    // Explicit disabled affordance: a locked chip dims instead of just going
+    // unresponsive (user: "должно писаться явное затемнение"). Leading icon and
+    // chevron removed — the menu is obvious on tap, and both ate composer width.
+    var dimmed: Bool = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            if busy {
-                ProgressView().controlSize(.mini).tint(active ? CTViolet : Color(hex: "c9c9cf"))
-            } else {
-                Image(systemName: icon).font(.system(size: 11))
+        // The label text always occupies the layout (just hidden while busy), so
+        // the chip width is fixed by the model/effort name and never reflows. The
+        // spinner is a CENTERED OVERLAY — it adds no width, so switching model
+        // can't make the chip grow→shrink→jerk (user: "ширина должна быть
+        // фиксирована … недёргалось"). Mirrors desktop busy-overlay scar
+        // (fact-claude-control-bar.md::Busy-overlay вместо disabled).
+        Text(text)
+            .font(.system(size: 12.5, weight: .semibold))
+            .lineLimit(1)
+            .opacity(busy ? 0 : 1)
+            .foregroundStyle(active ? CTViolet : Color(hex: "c9c9cf"))
+            .padding(.horizontal, 11)
+            .frame(height: 34)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(white: 0.12)))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(active ? CTViolet : Color(white: 0.17)))
+            .overlay {
+                if busy {
+                    ProgressView().controlSize(.mini).tint(active ? CTViolet : Color(hex: "c9c9cf"))
+                }
             }
-            Text(text)
-                .font(.system(size: 12.5, weight: .semibold))
-                .lineLimit(1)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .opacity(0.6)
-        }
-        .foregroundStyle(active ? CTViolet : Color(hex: "c9c9cf"))
-        .padding(.horizontal, 9)
-        .frame(height: 34)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(white: 0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(active ? CTViolet : Color(white: 0.17)))
+            .opacity(dimmed ? 0.4 : 1)
+    }
+}
+
+// Context-fill color, green→red as the window fills (mirrors desktop meter).
+// <50% green, <75% yellow, <90% orange, else red.
+private func contextPctColor(_ pct: Int) -> Color {
+    switch pct {
+    case ..<50: return Color(hex: "4ade80")
+    case ..<75: return Color(hex: "fcd34d")
+    case ..<90: return Color(hex: "fb923c")
+    default:    return Color(hex: "f87171")
     }
 }
 
@@ -2113,17 +2617,36 @@ private struct TerminalFloatingControls: View {
     }
 }
 
-private struct TerminalEntryView: View {
+// Equatable (Phase D): the transcript ForEach applies `.equatable()` so SwiftUI
+// compares (entry, chatFont) and re-renders ONLY the row whose value changed.
+// During streaming the reducer republishes the whole array but mutates a single
+// tail entry; without this, every row's body re-evaluated each token. The view
+// is a pure function of these two inputs, so value-equality is a sound skip test.
+private struct TerminalEntryView: View, Equatable {
     let entry: CTEntry
     let chatFont: Double
 
+    nonisolated static func == (lhs: TerminalEntryView, rhs: TerminalEntryView) -> Bool {
+        lhs.entry == rhs.entry && lhs.chatFont == rhs.chatFont
+    }
+
     var body: some View {
+        // Render-churn probe (Phase D). Counts how many entry-row bodies actually
+        // evaluate; spikes here mean .equatable() isn't short-circuiting (e.g. a
+        // value that changes every frame leaked into CTEntry). Batched so the log
+        // itself never floods. Grep [term-render].
+        TerminalRenderProbe.tick(entry.id)
+        return bodyContent
+    }
+
+    @ViewBuilder
+    private var bodyContent: some View {
         switch entry.kind {
         case .user:
             HStack {
                 Spacer(minLength: 40)
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(entry.text)
+                    Text(vcClippedText(entry.text, maxCharacters: 12_000))
                         .font(.system(size: chatFont))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
@@ -2139,7 +2662,7 @@ private struct TerminalEntryView: View {
             }
         case .assistant:
             if !entry.text.isEmpty {
-                VCMarkdownView(messageId: entry.id, markdown: entry.text, fontSize: chatFont)
+                VCMarkdownView(messageId: entry.id, markdown: entry.text, fontSize: chatFont, maxCharacters: 16_000)
             }
         case .thinking:
             ThinkingCardView(text: entry.text, chatFont: chatFont)
@@ -2165,6 +2688,53 @@ private struct TerminalEntryView: View {
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: "7f1d1d").opacity(0.22)))
         }
+    }
+}
+
+// Batched render-churn probe for the terminal transcript (Phase D). Each row body
+// eval calls tick(); we accumulate and flush a compact summary at most ~3x/sec so
+// the log never floods. A healthy stream shows tiny counts (1-2 rows/flush — the
+// streaming tail + maybe a tool card); a regression shows counts ≈ visible-row
+// count every flush (whole ForEach re-rendering). Grep [term-render].
+@MainActor
+private enum TerminalRenderProbe {
+    private static var count = 0
+    private static var distinct = Set<String>()
+    private static var samples: [String] = []
+    private static var burstStart: Date?
+    private static var lastTickAt: Date?
+    private static let flushInterval: TimeInterval = 0.33
+    private static let idleResetInterval: TimeInterval = 1.0
+
+    static func tick(_ id: String) {
+        let now = Date()
+        if let lastTickAt, now.timeIntervalSince(lastTickAt) > idleResetInterval {
+            reset()
+        }
+        if burstStart == nil { burstStart = now }
+        lastTickAt = now
+        count += 1
+        if distinct.insert(id).inserted, samples.count < 4 {
+            samples.append(id)
+        }
+        guard let burstStart else { return }
+        if now.timeIntervalSince(burstStart) >= flushInterval {
+            if count > 0 {
+                VCLog.log(
+                    "term-render",
+                    "row bodies=\(count) distinct=\(distinct.count) burstMs=\(Int(now.timeIntervalSince(burstStart) * 1000)) sample=[\(samples.joined(separator: ","))] nav=\(TerminalPerfContext.shared.snapshot())"
+                )
+            }
+            reset()
+        }
+    }
+
+    private static func reset() {
+        count = 0
+        distinct.removeAll(keepingCapacity: true)
+        samples.removeAll(keepingCapacity: true)
+        burstStart = nil
+        lastTickAt = nil
     }
 }
 
@@ -2197,7 +2767,7 @@ private struct TerminalCompactSummaryView: View {
             }
             .buttonStyle(.plain)
             if open {
-                Text(String(entry.text.prefix(4000)))
+                Text(vcClippedText(entry.text, maxCharacters: 4_000))
                     .font(.system(size: chatFont - 3))
                     .foregroundStyle(Color(hex: "f4c7b3"))
                     .textSelection(.enabled)

@@ -25,6 +25,7 @@
 		A1B2C3D411 /* EditHabitSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EB /* EditHabitSheet.swift */; };
 		A1B2C3D412 /* EditGroupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EC /* EditGroupSheet.swift */; };
 		A1B2C3D413 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4ED /* SettingsSheet.swift */; };
+		A1B2C3D7A1 /* AppSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D7A2 /* AppSettingsSheet.swift */; };
 		A1B2C3D416 /* CalendarSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4EE /* CalendarSheet.swift */; };
 		A1B2C3D414 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4F0 /* Assets.xcassets */; };
 		A1B2C3D415 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4F1 /* Preview Assets.xcassets */; };
@@ -107,6 +108,7 @@
 		A1B2C3D4EB /* EditHabitSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditHabitSheet.swift; sourceTree = "<group>"; };
 		A1B2C3D4EC /* EditGroupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditGroupSheet.swift; sourceTree = "<group>"; };
 		A1B2C3D4ED /* SettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSheet.swift; sourceTree = "<group>"; };
+		A1B2C3D7A2 /* AppSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsSheet.swift; sourceTree = "<group>"; };
 		A1B2C3D4EE /* CalendarSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarSheet.swift; sourceTree = "<group>"; };
 		A1B2C3D4F0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1B2C3D4F1 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -327,6 +329,7 @@
 				A1B2C3D4EB /* EditHabitSheet.swift */,
 				A1B2C3D4EC /* EditGroupSheet.swift */,
 				A1B2C3D4ED /* SettingsSheet.swift */,
+				A1B2C3D7A2 /* AppSettingsSheet.swift */,
 				A1B2C3D4EE /* CalendarSheet.swift */,
 			);
 			path = Sheets;
@@ -460,6 +463,7 @@
 				A1B2C3D411 /* EditHabitSheet.swift in Sources */,
 				A1B2C3D412 /* EditGroupSheet.swift in Sources */,
 				A1B2C3D413 /* SettingsSheet.swift in Sources */,
+				A1B2C3D7A1 /* AppSettingsSheet.swift in Sources */,
 				A1B2C3D416 /* CalendarSheet.swift in Sources */,
 				A1B2C3D506 /* Secrets.swift in Sources */,
 				A1B2C3D50C /* VoiceRecordConfig.swift in Sources */,

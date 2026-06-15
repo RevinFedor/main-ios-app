@@ -1,8 +1,22 @@
 import SwiftUI
 
+// Thin wrapper kept for any standalone use / previews. The real content lives in
+// HabitsSettingsBody so AppSettingsSheet can host it under a shared segmented
+// NavigationStack without a nested stack/Done button.
 struct SettingsSheet: View {
-    @EnvironmentObject var store: HabitStore
     @Environment(\.dismiss) var dismiss
+    var body: some View {
+        NavigationStack {
+            HabitsSettingsBody()
+                .navigationTitle("Настройки")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { dismiss() } } }
+        }
+    }
+}
+
+struct HabitsSettingsBody: View {
+    @EnvironmentObject var store: HabitStore
 
     @State private var toastMessage: String?
     @State private var showToast = false
@@ -24,7 +38,6 @@ struct SettingsSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
             ZStack {
                 Form {
                     Section {
@@ -148,13 +161,6 @@ struct SettingsSheet: View {
                     .zIndex(100)
                 }
             }
-            .navigationTitle("Настройки")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") { dismiss() }
-                }
-            }
             .sheet(isPresented: $showLogs) {
                 DiagnosticsLogView()
             }
@@ -170,7 +176,6 @@ struct SettingsSheet: View {
                     Text(importConfirmMessage(preview: preview))
                 }
             }
-        }
     }
 
     private func dataRow(icon: String, tint: Color, title: String, subtitle: String) -> some View {

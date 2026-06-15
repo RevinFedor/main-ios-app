@@ -403,7 +403,6 @@ struct VoiceChatTabView: View {
     @State private var scrollLockedByDrawer = false
     @State private var drawerAnimationToken = UUID()
     @State private var showingAllChats = false
-    @State private var showSettings = false
     @State private var renameTarget: VCChatMeta? = nil
     @State private var chatComposerFocused = false
     @State private var terminalMode = false
@@ -493,7 +492,6 @@ struct VoiceChatTabView: View {
                 terminal.start()
             }
         }
-        .sheet(isPresented: $showSettings) { VoiceChatSettingsSheet() }
         .sheet(item: $renameTarget) { chat in
             VoiceChatTitleEditorSheet(
                 initialTitle: chat.title ?? "",
@@ -772,6 +770,20 @@ struct VoiceChatTabView: View {
         if let width { closeHistory(width: width) } else { resetDrawerClosed() }
     }
 
+    // Drawer Terminal row tap. Toggle: in Terminal → back to the chat surface
+    // (selectedChatId is preserved, so we land on the last open chat / new chat);
+    // otherwise enter Terminal mode.
+    private func toggleTerminal(closeWidth width: CGFloat?) {
+        if terminalMode {
+            dismissChatKeyboard()
+            terminalComposerFocused = false
+            terminalMode = false
+            if let width { closeHistory(width: width) } else { resetDrawerClosed() }
+        } else {
+            openTerminal(closeWidth: width)
+        }
+    }
+
     private func consumePending() {
         guard let req = router.pendingChatRequest, handledSeq != req.seq else { return }
         handledSeq = req.seq
@@ -790,9 +802,8 @@ struct VoiceChatTabView: View {
                     .font(.system(size: uiFont + 2, weight: .semibold))
                     .foregroundStyle(.white)
                 Spacer()
-                drawerSettingsButton {
-                    showSettings = true
-                }
+                // Settings moved out of the drawer to the tab's top-left gear
+                // (unified app-wide settings). Drawer header is title-only now.
             }
             .foregroundStyle(.white.opacity(0.9))
             .padding(.horizontal, 14)
@@ -809,11 +820,15 @@ struct VoiceChatTabView: View {
                         action: { showAllChats(closeWidth: width) }
                     )
 
+                    // Terminal row is a toggle: off → enter Terminal mode; on
+                    // (purple) → tapping again returns to the chat surface. Same
+                    // single entry point the user already knows, now bidirectional.
                     sidebarActionRow(
                         title: "Terminal",
                         subtitle: terminal.loadingProjects ? "…" : "\(terminal.projects.count)",
                         icon: "terminal",
-                        action: { openTerminal(closeWidth: width) }
+                        active: terminalMode,
+                        action: { toggleTerminal(closeWidth: width) }
                     )
 
                     Text("Recent")
@@ -871,32 +886,6 @@ struct VoiceChatTabView: View {
         }
     }
 
-    @ViewBuilder
-    private func drawerSettingsButton(action: @escaping () -> Void) -> some View {
-        if #available(iOS 26.0, *) {
-            Button(action: action) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 16, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .controlSize(.regular)
-            .accessibilityLabel("Settings")
-        } else {
-            Button(action: action) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 16, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .controlSize(.regular)
-            .accessibilityLabel("Settings")
-        }
-    }
 
     private func floatingNewChatButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -915,26 +904,30 @@ struct VoiceChatTabView: View {
         .buttonStyle(.plain)
     }
 
-    private func sidebarActionRow(title: String, subtitle: String? = nil, icon: String, action: @escaping () -> Void) -> some View {
+    // `active` paints the row in the accent (used by the Terminal row when Terminal
+    // mode is on — it's a toggle: tap again to return to chat). Inactive rows keep
+    // the neutral translucent surface.
+    private func sidebarActionRow(title: String, subtitle: String? = nil, icon: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 9) {
                 Image(systemName: icon)
                     .font(.system(size: 15, weight: .semibold))
                     .frame(width: 20)
+                    .foregroundStyle(active ? VCAccent : .white)
                 Text(title)
                     .font(.system(size: uiFont, weight: .semibold))
                 Spacer()
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: uiFont - 2).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(active ? VCAccent.opacity(0.9) : .secondary)
                 }
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.white.opacity(0.08)))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Color.white.opacity(0.1)))
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(active ? VCAccent.opacity(0.22) : Color.white.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(active ? VCAccent.opacity(0.55) : Color.white.opacity(0.1)))
         }
         .buttonStyle(.plain)
     }
@@ -1026,6 +1019,7 @@ private struct AllChatsView: View {
     var onSearchActiveChange: (Bool) -> Void = { _ in }
 
     @ObservedObject private var store = VoiceChatStore.shared
+    @EnvironmentObject private var router: TabRouter
     @State private var search = ""
     @FocusState private var searchFocused: Bool
     @Environment(\.bottomBarInset) private var bottomBarInset
@@ -1115,8 +1109,9 @@ private struct AllChatsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onShowSidebar) {
-                    Image(systemName: "line.3.horizontal")
+                // Settings gear (was the drawer hamburger). Drawer = swipe-only.
+                Button { router.openSettings() } label: {
+                    Image(systemName: "gearshape.fill")
                         .font(.system(size: 16, weight: .semibold))
                 }
             }
@@ -1419,8 +1414,12 @@ struct ChatDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button { onShowHistory() } label: {
-                    Image(systemName: "line.3.horizontal")
+                // Top-left is the unified Settings gear now (was the drawer
+                // hamburger). The history drawer opens ONLY by left→right swipe
+                // (see VoiceChatTabView pan) — the button slot is reused for the
+                // app-wide settings present on every tab.
+                Button { router.openSettings() } label: {
+                    Image(systemName: "gearshape.fill")
                         .font(.system(size: 16, weight: .semibold))
                 }
             }
@@ -2089,6 +2088,9 @@ private struct MessageView: View {
     let msg: VCMessage
     let chatFont: Double
     let onPreviewAttachment: (VCAttachment) -> Void
+    @State private var showFullUserMessage = false
+    private let userPreviewLimit = 12_000
+    private let assistantPreviewLimit = 16_000
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2130,23 +2132,33 @@ private struct MessageView: View {
                         // contextMenuPreview shape = the bubble's rounded rect so
                         // the lifted preview doesn't flash square corners (same
                         // scar as the history cards' cardCornerRadius).
-                        Text(msg.content)
-                            .font(.system(size: chatFont))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(RoundedRectangle(cornerRadius: 14).fill(VCAccent.opacity(0.28)))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(VCAccent.opacity(0.4)))
-                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .contextMenu {
-                                Button { UIPasteboard.general.string = msg.content } label: {
-                                    Label("Copy", systemImage: "doc.on.doc")
+                        VStack(alignment: .trailing, spacing: 6) {
+                            Text(vcClippedText(msg.content, maxCharacters: userPreviewLimit))
+                                .font(.system(size: chatFont))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(RoundedRectangle(cornerRadius: 14).fill(VCAccent.opacity(0.28)))
+                                .overlay(RoundedRectangle(cornerRadius: 14).stroke(VCAccent.opacity(0.4)))
+                                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .contextMenu {
+                                    Button { UIPasteboard.general.string = msg.content } label: {
+                                        Label("Copy", systemImage: "doc.on.doc")
+                                    }
                                 }
+                            if vcTextExceeds(msg.content, maxCharacters: userPreviewLimit) {
+                                Button { showFullUserMessage = true } label: {
+                                    Label("Full", systemImage: "doc.text.magnifyingglass")
+                                        .font(.system(size: max(11, chatFont - 3), weight: .semibold))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(VCAccent)
                             }
+                        }
                     }
                 }
             } else {
                 if !msg.content.isEmpty {
-                    VCMarkdownView(messageId: msg.id, markdown: msg.content, fontSize: chatFont)
+                    VCMarkdownView(messageId: msg.id, markdown: msg.content, fontSize: chatFont, maxCharacters: assistantPreviewLimit)
                         .contextMenu {
                             Button { UIPasteboard.general.string = msg.content } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
@@ -2163,6 +2175,9 @@ private struct MessageView: View {
                         .font(.system(size: chatFont - 4)).foregroundStyle(.secondary.opacity(0.6))
                 }
             }
+        }
+        .sheet(isPresented: $showFullUserMessage) {
+            VCLongTextSheet(title: "Message", text: msg.content, chatFont: chatFont)
         }
     }
 }
@@ -3143,6 +3158,9 @@ struct ThinkingCardView: View {
     let text: String
     let chatFont: Double
     @State private var open = false
+    @State private var showFull = false
+    private let previewLimit = 4_000
+    private var clipped: Bool { vcTextExceeds(text, maxCharacters: previewLimit) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3154,7 +3172,7 @@ struct ThinkingCardView: View {
                     Text("Thinking")
                         .font(.system(size: chatFont - 2, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.9))
-                    Text("\(text.count) симв.")
+                    Text("\(text.utf16.count) симв.")
                         .font(.system(size: chatFont - 3).monospacedDigit())
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 4)
@@ -3169,16 +3187,29 @@ struct ThinkingCardView: View {
             .buttonStyle(.plain)
 
             if open {
-                Text(text.prefix(4000))
+                Text(vcClippedText(text, maxCharacters: previewLimit))
                     .font(.system(size: chatFont - 3).monospaced())
                     .foregroundStyle(Color(hex: "c4b5fd"))
                     .textSelection(.enabled)
                     .lineLimit(80)
                     .padding(.horizontal, 10).padding(.bottom, 8)
+                if clipped {
+                    Button { showFull = true } label: {
+                        Label("Full", systemImage: "doc.text.magnifyingglass")
+                            .font(.system(size: chatFont - 3, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(VCAccent)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 9)
+                }
             }
         }
         .background(RoundedRectangle(cornerRadius: 10).fill(VCAccent.opacity(0.07)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(VCAccent.opacity(0.32)))
+        .sheet(isPresented: $showFull) {
+            VCLongTextSheet(title: "Thinking", text: text, chatFont: chatFont)
+        }
     }
 }
 
@@ -3187,6 +3218,8 @@ struct ToolCardView: View {
     let chatFont: Double
     let defaultOpen: Bool
     @State private var open: Bool? = nil   // nil → defaultOpen
+    @State private var showFull = false
+    private let previewLimit = 20_000
 
     private var isOpen: Bool { open ?? defaultOpen }
 
@@ -3230,10 +3263,10 @@ struct ToolCardView: View {
             .buttonStyle(.plain)
 
             if isOpen {
-                let text = tool.detailText
+                let text = tool.detailText(maxCharacters: previewLimit)
                 if !text.isEmpty {
                     ScrollView([.vertical, .horizontal], showsIndicators: true) {
-                        Text(String(text.prefix(20000)))
+                        Text(text)
                             .font(.system(size: chatFont - 3).monospaced())
                             .foregroundStyle(tool.isError ? Color(hex: "fca5a5") : Color(hex: "b6b6ba"))
                             .textSelection(.enabled)
@@ -3246,6 +3279,16 @@ struct ToolCardView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08)))
                     .padding(.horizontal, 8)
                     .padding(.bottom, 8)
+                    if text.utf16.count >= previewLimit {
+                        Button { showFull = true } label: {
+                            Label("Full", systemImage: "doc.text.magnifyingglass")
+                                .font(.system(size: chatFont - 3, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(VCAccent)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 9)
+                    }
                 } else if tool.isRunning {
                     Text("выполняется…")
                         .font(.system(size: chatFont - 3)).foregroundStyle(.secondary)
@@ -3255,6 +3298,101 @@ struct ToolCardView: View {
         }
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(white: 0.16)))
+        .sheet(isPresented: $showFull) {
+            VCToolDetailSheet(tool: tool, chatFont: chatFont)
+        }
+    }
+}
+
+struct VCLongTextSheet: View {
+    let title: String
+    let text: String
+    let chatFont: Double
+    @Environment(\.dismiss) private var dismiss
+    @State private var chunks: [String]?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let chunks {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+                                Text(chunk)
+                                    .font(.system(size: chatFont - 2).monospaced())
+                                    .foregroundStyle(Color(hex: "d4d4d8"))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(14)
+                    }
+                    .background(Color(hex: "101014").ignoresSafeArea())
+                } else {
+                    VStack(spacing: 12) {
+                        ProgressView().tint(.white)
+                        Text("Loading")
+                            .font(.system(size: chatFont - 2, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(hex: "101014").ignoresSafeArea())
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .task(id: text.utf16.count) {
+            chunks = nil
+            let source = text
+            chunks = await Task.detached(priority: .userInitiated) {
+                vcChunkText(source)
+            }.value
+        }
+    }
+}
+
+private struct VCToolDetailSheet: View {
+    let tool: VCToolCall
+    let chatFont: Double
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String?
+
+    var body: some View {
+        Group {
+            if let text {
+                VCLongTextSheet(title: tool.displayName, text: text, chatFont: chatFont)
+            } else {
+                NavigationStack {
+                    VStack(spacing: 12) {
+                        ProgressView().tint(.white)
+                        Text("Loading")
+                            .font(.system(size: chatFont - 2, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(hex: "101014").ignoresSafeArea())
+                    .navigationTitle(tool.displayName)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { dismiss() }
+                        }
+                    }
+                }
+            }
+        }
+        .task(id: tool.id) {
+            let value = tool
+            text = await Task.detached(priority: .userInitiated) {
+                value.detailText(maxCharacters: 500_000)
+            }.value
+        }
     }
 }
 
@@ -3514,7 +3652,7 @@ private struct BypassPill: View {
 
 // MARK: - Markdown (cached per message id — never re-parsed on scroll)
 
-private enum MDBlock {
+private enum MDBlock: Sendable {
     case text(AttributedString)
     case code(String)
 }
@@ -3536,8 +3674,19 @@ private enum VCMarkdownCache {
         options: [.caseInsensitive]
     )
 
+    static func cacheKey(messageId: String, fontSize: Double) -> String {
+        messageId + ":" + String(Int(fontSize))
+    }
+
+    static func cached(key: String) -> [MDBlock]? { cache[key] }
+
+    static func store(_ blocks: [MDBlock], key: String) {
+        if cache.count > 400 { cache.removeAll() }
+        cache[key] = blocks
+    }
+
     static func blocks(messageId: String, markdown: String, fontSize: Double) -> [MDBlock] {
-        let key = messageId + ":" + String(Int(fontSize))
+        let key = cacheKey(messageId: messageId, fontSize: fontSize)
         if let hit = cache[key] { return hit }
         if cache.count > 400 { cache.removeAll() }
         let built = build(markdown, fontSize: fontSize)
@@ -3545,7 +3694,14 @@ private enum VCMarkdownCache {
         return built
     }
 
-    private static func build(_ md: String, fontSize: Double) -> [MDBlock] {
+    // Pure, main-actor-independent build for off-main rendering. Same logic as
+    // build(); split out so a Task.detached can call it without touching the cache
+    // (the caller stores the result back on the main actor).
+    nonisolated static func buildDetached(_ md: String, fontSize: Double) -> [MDBlock] {
+        build(md, fontSize: fontSize)
+    }
+
+    nonisolated private static func build(_ md: String, fontSize: Double) -> [MDBlock] {
         var blocks: [MDBlock] = []
         var textRun: [String] = []
 
@@ -3577,7 +3733,7 @@ private enum VCMarkdownCache {
 
     // Line-oriented renderer: headers/bullets handled manually, inline markdown
     // (bold/italic/code/links) via Foundation's parser per line.
-    private static func renderText(_ text: String, fontSize: Double) -> AttributedString {
+    nonisolated private static func renderText(_ text: String, fontSize: Double) -> AttributedString {
         var out = AttributedString()
         var first = true
         for raw in text.components(separatedBy: "\n") {
@@ -3612,30 +3768,40 @@ private enum VCMarkdownCache {
         return out
     }
 
-    private static func applyColorChips(_ seg: inout AttributedString) {
+    // Hex/rgb color literals only appear in short snippets ("background: #ff0"). For
+    // very long segments (a minified blob, a giant JSON/log line dumped by a tool)
+    // the chip pass is pure cost — and it was the 12-SECOND main-thread hang on a
+    // 546 KB assistant entry: the old code called visible.distance(...) +
+    // chars.index(...offsetBy:) per match, each O(n) over AttributedString's
+    // CharacterView → O(n²). Skip it past this length; nobody color-codes a 20 KB line.
+    private static let colorChipMaxSegmentChars = 20_000
+
+    nonisolated private static func applyColorChips(_ seg: inout AttributedString) {
         let visible = String(seg.characters)
-        guard !visible.isEmpty else { return }
+        guard !visible.isEmpty, visible.utf16.count <= colorChipMaxSegmentChars else { return }
 
         let fullRange = NSRange(visible.startIndex..<visible.endIndex, in: visible)
-        for match in colorTokenRegex.matches(in: visible, range: fullRange) {
+        let matches = colorTokenRegex.matches(in: visible, range: fullRange)
+        guard !matches.isEmpty else { return }
+
+        // Map each match's String range to the AttributedString index space ONCE via
+        // AttributedString's own UTF-8 view (O(1) per endpoint), instead of re-walking
+        // the character view per match (the old O(n²)). Apply back-to-front so earlier
+        // ranges stay valid after styling.
+        for match in matches.reversed() {
             guard let stringRange = Range(match.range, in: visible) else { continue }
             let token = String(visible[stringRange])
             guard let style = chipStyle(for: token) else { continue }
-
-            let lowerOffset = visible.distance(from: visible.startIndex, to: stringRange.lowerBound)
-            let upperOffset = visible.distance(from: visible.startIndex, to: stringRange.upperBound)
-            let chars = seg.characters
             guard
-                let attrStart = chars.index(chars.startIndex, offsetBy: lowerOffset, limitedBy: chars.endIndex),
-                let attrEnd = chars.index(chars.startIndex, offsetBy: upperOffset, limitedBy: chars.endIndex)
+                let lo = AttributedString.Index(stringRange.lowerBound, within: seg),
+                let hi = AttributedString.Index(stringRange.upperBound, within: seg)
             else { continue }
-
-            seg[attrStart..<attrEnd].backgroundColor = style.background
-            seg[attrStart..<attrEnd].foregroundColor = style.foreground
+            seg[lo..<hi].backgroundColor = style.background
+            seg[lo..<hi].foregroundColor = style.foreground
         }
     }
 
-    private static func chipStyle(for raw: String) -> ColorChipStyle? {
+    nonisolated private static func chipStyle(for raw: String) -> ColorChipStyle? {
         let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.hasPrefix("#") {
             let hex = String(token.dropFirst())
@@ -3669,7 +3835,7 @@ private enum VCMarkdownCache {
         return chipStyle(red: r, green: g, blue: b, alpha: alpha)
     }
 
-    private static func chipStyle(red: Int, green: Int, blue: Int, alpha: Double) -> ColorChipStyle {
+    nonisolated private static func chipStyle(red: Int, green: Int, blue: Int, alpha: Double) -> ColorChipStyle {
         let opacity = min(1, max(0, alpha))
         let background = Color(.sRGB, red: Double(red) / 255, green: Double(green) / 255, blue: Double(blue) / 255, opacity: opacity)
 
@@ -3691,9 +3857,98 @@ struct VCMarkdownView: View {
     let messageId: String
     let markdown: String
     let fontSize: Double
+    var maxCharacters: Int? = nil
+
+    // Rendered blocks. Cache hit → set synchronously in init-time read (the common
+    // scroll case stays instant). Cache miss → built in Task.detached. For huge
+    // terminal artifacts, callers pass maxCharacters so SwiftUI never lays out
+    // the whole 500KB+ AttributedString in the current chat row.
+    @State private var blocks: [MDBlock]?
+
+    // Threshold above which we DON'T even attempt the synchronous path — always go
+    // off-main. Small messages render in-place (no placeholder flash).
+    private static let asyncThreshold = 2_000
+    @State private var showFull = false
+
+    private var renderedMarkdown: String {
+        if let maxCharacters {
+            return vcClippedText(markdown, maxCharacters: maxCharacters)
+        }
+        return markdown
+    }
+
+    private var markdownClipped: Bool {
+        guard let maxCharacters else { return false }
+        return vcTextExceeds(markdown, maxCharacters: maxCharacters)
+    }
+
+    private var cacheIdentity: String {
+        let md = renderedMarkdown
+        return VCMarkdownCache.cacheKey(messageId: messageId, fontSize: fontSize)
+            + ":limit=\(maxCharacters ?? -1):len=\(md.utf16.count):hash=\(md.hashValue)"
+    }
 
     var body: some View {
-        let blocks = VCMarkdownCache.blocks(messageId: messageId, markdown: markdown, fontSize: fontSize)
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let blocks {
+                    rendered(blocks)
+                } else {
+                    // Placeholder while the off-main build runs: raw text, capped so the
+                    // placeholder itself is cheap. Real markdown swaps in when ready.
+                    Text(vcClippedText(renderedMarkdown, maxCharacters: 8_000))
+                        .font(.system(size: fontSize))
+                        .foregroundStyle(Color(hex: "e6e6e6"))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineSpacing(3)
+                        .padding(.horizontal, 2)
+                }
+            }
+            if markdownClipped {
+                Button { showFull = true } label: {
+                    Label("Full", systemImage: "doc.text.magnifyingglass")
+                        .font(.system(size: fontSize - 2, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(VCAccent)
+            }
+        }
+        .task(id: cacheIdentity) {
+            await loadBlocks()
+        }
+        .sheet(isPresented: $showFull) {
+            VCLongTextSheet(title: "Message", text: markdown, chatFont: fontSize)
+        }
+    }
+
+    private func loadBlocks() async {
+        let key = cacheIdentity
+        if let hit = VCMarkdownCache.cached(key: key) {
+            blocks = hit
+            return
+        }
+        blocks = nil
+        let source = renderedMarkdown
+        // Small messages: build synchronously (no flash). Big ones: off-main.
+        if source.utf16.count <= Self.asyncThreshold {
+            let built = VCMarkdownCache.buildDetached(source, fontSize: fontSize)
+            VCMarkdownCache.store(built, key: key)
+            blocks = built
+            return
+        }
+        let md = source
+        let fs = fontSize
+        let built = await Task.detached(priority: .userInitiated) {
+            VCMarkdownCache.buildDetached(md, fontSize: fs)
+        }.value
+        guard !Task.isCancelled else { return }
+        VCMarkdownCache.store(built, key: key)
+        blocks = built
+    }
+
+    @ViewBuilder
+    private func rendered(_ blocks: [MDBlock]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
@@ -3726,8 +3981,22 @@ struct VCMarkdownView: View {
 
 // MARK: - Settings (fonts FIRST, then source)
 
+// Thin wrapper kept for standalone use / previews. Content lives in
+// VoiceChatSettingsBody so AppSettingsSheet can host it under a shared segmented stack.
 struct VoiceChatSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            VoiceChatSettingsBody()
+                .navigationTitle("AI Chat")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct VoiceChatSettingsBody: View {
     @State private var showLogs = false
 
     @AppStorage(VoiceChatConfig.Keys.model,
@@ -3762,7 +4031,6 @@ struct VoiceChatSettingsSheet: View {
     private var chatFont: Double = 15
 
     var body: some View {
-        NavigationStack {
             Form {
                 // ── Шрифт — two compact steppers on one row. The Prod/Dev source
                 // picker + dev host were removed: the native client always talks
@@ -3856,15 +4124,10 @@ struct VoiceChatSettingsSheet: View {
                     Text("Keyboard/composer diagnostics live here. Reproduce the bug, then copy this log.")
                 }
             }
-            .navigationTitle("AI Chat")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $showLogs) {
                 VoiceChatLogViewerSheet()
             }
-        }
-        .preferredColorScheme(.dark)
-        .onAppear { VoiceChatConfig.ensureMobileModelPresetDefaults() }
+            .onAppear { VoiceChatConfig.ensureMobileModelPresetDefaults() }
     }
 }
 

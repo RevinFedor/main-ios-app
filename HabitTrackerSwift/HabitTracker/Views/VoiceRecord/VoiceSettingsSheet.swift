@@ -1,8 +1,21 @@
 import AVFoundation
 import SwiftUI
 
+// Thin wrapper kept for standalone use / previews. Content lives in
+// VoiceSettingsBody so AppSettingsSheet can host it under a shared segmented stack.
 struct VoiceSettingsSheet: View {
     @Environment(\.dismiss) var dismiss
+    var body: some View {
+        NavigationStack {
+            VoiceSettingsBody()
+                .navigationTitle("Voice Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+struct VoiceSettingsBody: View {
     @State private var availableInputs: [AVAudioSessionPortDescription] = []
     @State private var currentPortType: AVAudioSession.Port? = nil
     @State private var showLogs = false
@@ -34,7 +47,6 @@ struct VoiceSettingsSheet: View {
     }()
 
     var body: some View {
-        NavigationStack {
             Form {
                 Section {
                     ProvisioningExpiryView()
@@ -171,18 +183,10 @@ struct VoiceSettingsSheet: View {
                     Text("Tap the log icon to open the full viewer. Use the icons on the right to copy the recent log or clear it without opening.")
                 }
             }
-            .navigationTitle("Voice Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
             .onAppear { refresh() }
             .sheet(isPresented: $showLogs) {
                 LogViewerSheet()
             }
-        }
     }
 
     private func refresh() {

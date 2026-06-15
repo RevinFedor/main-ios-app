@@ -52,6 +52,7 @@ struct HabitTrackerApp: App {
                 .preferredColorScheme(.dark)
                 .onOpenURL { url in router.handle(url: url) }
                 .task {
+                    MainThreadWatchdog.start()
                     router.consumeVoiceTabFlagIfSet()
                     TerminalControlStore.shared.start()
                 }
@@ -91,6 +92,9 @@ struct RootTabView: View {
 
     @State private var scrollIndex: Int? = 0
     @State private var barHeight: CGFloat = 0
+    // Latch for the [pager-leak] diagnostic: log the leading-overscroll-on-chat-page
+    // event once per gesture, re-armed when the offset recovers. Diagnostic only.
+    @State private var pagerLeakLatched = false
     // Keyboard visibility drives the bar hide. On the chat page (composer docked
     // at the very bottom), when the keyboard rises the floating glass bar would
     // stack just above it in a messy double-bar (user's Image #3). Instagram /
@@ -139,6 +143,31 @@ struct RootTabView: View {
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $scrollIndex, anchor: .center)
             .scrollIndicators(.hidden)
+            // DIAGNOSTIC (no behavior change): catch the "1-in-10 black overscroll".
+            // AI Chat is the leftmost page (index 0); a rightward swipe there has
+            // nowhere to page, so the pager rubber-bands into empty space = black.
+            // That ONLY looks like a bug when the user actually meant "go back a
+            // Terminal level" (terminal in a sub-level → canStepBack). When the
+            // pager develops a LEADING overscroll (contentOffset.x < 0) on page 0
+            // while Terminal could have stepped back, the back-swipe leaked to the
+            // pager. Pair this [pager-leak] with [term-swipe-miss] next session to
+            // confirm the threshold is the cause and tune it. Only logs the first
+            // crossing per gesture (latch) so it can't flood.
+            .onScrollGeometryChange(for: Double.self) { geo in
+                geo.contentOffset.x
+            } action: { _, x in
+                let leadingOverscroll = x < -8
+                let onChatPage = router.selected == .chat
+                let terminalCouldGoBack = TerminalControlStore.shared.canStepBack
+                if leadingOverscroll && onChatPage && terminalCouldGoBack {
+                    if !pagerLeakLatched {
+                        pagerLeakLatched = true
+                        VCLog.log("pager-leak", "LEADING overscroll on chat page while terminal canStepBack=true — back-swipe leaked to pager (black area) offsetX=\(Int(x))")
+                    }
+                } else if x >= -1 {
+                    pagerLeakLatched = false   // re-arm once the overscroll recovers
+                }
+            }
             // Paging-offset fix: ignore ONLY horizontal safe area (the bottom
             // region stays intact for the bar clearance). Both research sources.
             .ignoresSafeArea(.container, edges: .horizontal)
@@ -213,6 +242,13 @@ struct RootTabView: View {
         .alert("Не удалось создать чат", isPresented: Binding(get: { router.chatCreateError != nil }, set: { if !$0 { router.chatCreateError = nil } })) {
             Button("OK", role: .cancel) { router.chatCreateError = nil }
         } message: { Text(router.chatCreateError ?? "") }
+        // Unified settings over the WHOLE app (fullScreenCover, not a per-tab
+        // sheet): one component, segmented + swipeable AI Chat·Voice·Habits. The
+        // gear on each tab's top-left flips router.showSettings; the visible
+        // section is router.settingsSection (seeded from the current tab).
+        .fullScreenCover(isPresented: $router.showSettings) {
+            AppSettingsSheet()
+        }
         .onAppear {
             // Jump from the bug-dodging start index (0) to the real default tab.
             if scrollIndex != router.selectedIndex {

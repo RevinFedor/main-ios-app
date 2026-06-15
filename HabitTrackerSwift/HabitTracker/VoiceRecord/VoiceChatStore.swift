@@ -15,7 +15,7 @@ import SwiftUI
 
 // MARK: - Loose JSON (tool args/results are arbitrary shapes)
 
-enum VCJSON: Decodable, Sendable {
+enum VCJSON: Decodable, Sendable, Equatable {
     case string(String), number(Double), bool(Bool), null
     case array([VCJSON]), object([String: VCJSON])
 
@@ -87,11 +87,91 @@ enum VCJSON: Decodable, Sendable {
             }.joined(separator: "\n")
         }
     }
+
+    func prettyDescription(maxCharacters: Int) -> String {
+        var remaining = max(0, maxCharacters)
+        return prettyDescription(level: 0, remaining: &remaining)
+    }
+
+    private func prettyDescription(level: Int, remaining: inout Int) -> String {
+        guard remaining > 0 else { return "…" }
+        let pad = String(repeating: "  ", count: level)
+        switch self {
+        case .string(let s):
+            return vcConsumeTextBudget(s, remaining: &remaining)
+        case .number(let n):
+            return vcConsumeTextBudget(n == n.rounded() ? String(Int(n)) : String(n), remaining: &remaining)
+        case .bool(let b):
+            return vcConsumeTextBudget(String(b), remaining: &remaining)
+        case .null:
+            return vcConsumeTextBudget("null", remaining: &remaining)
+        case .array(let a):
+            guard !a.isEmpty else { return vcConsumeTextBudget("[]", remaining: &remaining) }
+            var lines: [String] = []
+            for item in a {
+                guard remaining > 0 else { break }
+                let value = item.prettyDescription(level: level + 1, remaining: &remaining)
+                    .replacingOccurrences(of: "\n", with: "\n" + pad + "  ")
+                lines.append(pad + "- " + value)
+            }
+            if lines.count < a.count { lines.append(pad + "…") }
+            return lines.joined(separator: "\n")
+        case .object(let o):
+            guard !o.isEmpty else { return vcConsumeTextBudget("{}", remaining: &remaining) }
+            var lines: [String] = []
+            let keys = o.keys.sorted()
+            for key in keys {
+                guard remaining > 0 else { break }
+                let value = o[key]?.prettyDescription(level: level + 1, remaining: &remaining) ?? "null"
+                if value.contains("\n") {
+                    lines.append(pad + key + ":\n" + value)
+                } else {
+                    lines.append(pad + key + ": " + value)
+                }
+            }
+            if lines.count < keys.count { lines.append(pad + "…") }
+            return lines.joined(separator: "\n")
+        }
+    }
+}
+
+func vcTextExceeds(_ text: String, maxCharacters: Int) -> Bool {
+    text.utf16.count > maxCharacters
+}
+
+func vcClippedText(_ text: String, maxCharacters: Int, ellipsis: Bool = true) -> String {
+    guard maxCharacters >= 0 else { return text }
+    guard vcTextExceeds(text, maxCharacters: maxCharacters) else { return text }
+    return String(text.prefix(maxCharacters)) + (ellipsis ? "…" : "")
+}
+
+func vcChunkText(_ text: String, chunkSize: Int = 2_000) -> [String] {
+    guard !text.isEmpty else { return [] }
+    let step = max(256, chunkSize)
+    var chunks: [String] = []
+    var idx = text.startIndex
+    while idx < text.endIndex {
+        let next = text.index(idx, offsetBy: step, limitedBy: text.endIndex) ?? text.endIndex
+        chunks.append(String(text[idx..<next]))
+        idx = next
+    }
+    return chunks
+}
+
+private func vcConsumeTextBudget(_ text: String, remaining: inout Int) -> String {
+    guard remaining > 0 else { return "…" }
+    if text.utf16.count <= remaining {
+        remaining -= text.utf16.count
+        return text
+    }
+    let out = vcClippedText(text, maxCharacters: remaining)
+    remaining = 0
+    return out
 }
 
 // MARK: - Models (mirror web-server.js shapes)
 
-struct VCToolCall: Identifiable, Decodable {
+struct VCToolCall: Identifiable, Decodable, Sendable {
     let id: String
     let name: String
     var args: VCJSON?
@@ -119,35 +199,51 @@ struct VCToolCall: Identifiable, Decodable {
     // One-line preview for the collapsed card header.
     var preview: String {
         let a = args
+        func clipped(_ value: String) -> String {
+            vcClippedText(value, maxCharacters: 180)
+        }
         switch name {
-        case "bash": return a?["command"]?.stringValue ?? ""
+        case "bash": return clipped(a?["command"]?.stringValue ?? "")
         case "read_file", "edit_file", "write_file":
             let p = a?["path"]?.stringValue ?? ""
             return (p as NSString).lastPathComponent
         default:
-            if let q = a?["query"]?.stringValue { return q }
-            if let p = a?["pattern"]?.stringValue { return p }
-            if case .object(let o)? = a, let first = o.first?.value.stringValue { return first }
+            if let q = a?["query"]?.stringValue { return clipped(q) }
+            if let p = a?["pattern"]?.stringValue { return clipped(p) }
+            if case .object(let o)? = a, let first = o.first?.value.stringValue { return clipped(first) }
             return ""
         }
     }
-    var resultText: String {
+    var resultText: String { resultText(maxCharacters: 20_000) }
+
+    func resultText(maxCharacters: Int) -> String {
         guard let r = result else { return "" }
-        if isError { return r["error"]?.stringValue ?? r["content"]?.stringValue ?? "error" }
-        if let c = r["content"]?.stringValue { return c }
-        if case .string(let s) = r { return s }
-        return r.compactDescription
+        if isError {
+            let raw = r["error"]?.stringValue ?? r["content"]?.stringValue ?? "error"
+            return vcClippedText(raw, maxCharacters: maxCharacters)
+        }
+        if let c = r["content"]?.stringValue { return vcClippedText(c, maxCharacters: maxCharacters) }
+        if case .string(let s) = r { return vcClippedText(s, maxCharacters: maxCharacters) }
+        return r.prettyDescription(maxCharacters: maxCharacters)
     }
 
-    var detailText: String {
+    var detailText: String { detailText(maxCharacters: 20_000) }
+
+    func detailText(maxCharacters: Int) -> String {
         var parts: [String] = []
+        var remaining = max(0, maxCharacters)
         if let args {
-            parts.append("args\n" + args.prettyDescription())
+            let budget = min(remaining, max(1_000, maxCharacters / 3))
+            let body = args.prettyDescription(maxCharacters: budget)
+            remaining = max(0, remaining - body.utf16.count)
+            parts.append("args\n" + body)
         }
-        if let result {
-            let body = resultText.isEmpty ? result.prettyDescription() : resultText
+        if result != nil, remaining > 0 {
+            let body = resultText(maxCharacters: remaining)
+            remaining = max(0, remaining - body.utf16.count)
             parts.append("result\n" + body)
         }
+        if remaining == 0 { parts.append("…") }
         return parts.joined(separator: "\n\n")
     }
 }

@@ -1,2 +1,138 @@
-=== Indexer started: Sun Jun 14 17:03:05 MSK 2026 ===
-RESPONSE for docs/knowledge/fact-voice-chat-tab.md: {"path": "docs/knowledge/fact-voice-chat-tab.md", "type": "fact", "explicit": ["Voice Chat Tab", "Terminal mode inside AI Chat", "VoiceChatStore", "TerminalControlStore", "SwiftUI native view", "Keybo
+=== Indexer started: Mon Jun 15 17:14:38 MSK 2026 ===
+RESPONSE for docs/methodology/сценарии-использования.md: ```json
+{
+  "path": "docs/methodology/сценарии-использования.md",
+  "type": "fact",
+  "explicit": [
+    "Action Button lifecycle killed vs foreground vs background",
+    "Audio se
+RESPONSE for docs/knowledge/fact-habit-widget.md: ```json
+{
+  "path": "docs/knowledge/fact-habit-widget.md",
+  "type": "fact",
+  "explicit": [
+    "iOS 26 Liquid Glass styling",
+    ".widgetAccentable tinted mode rendering",
+    "contentMarginsDisabl
+RESPONSE for docs/knowledge/fix-пробуждение-mac.md: ```json
+{
+  "path": "docs/knowledge/fix-пробуждение-mac.md",
+  "type": "fix",
+  "explicit": [
+    "Wake-on-LAN (WoL)",
+    "Magic packet networking",
+    "iOS-to-Mac remote waking",
+    "AR
+RESPONSE for docs/methodology/диагностика-apple.md: ```json
+{
+  "path": "docs/methodology/диагностика-apple.md",
+  "type": "fact",
+  "explicit": [
+    "deterministic_diagnosis",
+    "diagnostic_scripts",
+    "error_categorization",
+    "Xcod
+RESPONSE for docs/methodology/переносимый-дизайн.md: ```json
+{
+  "path": "docs/methodology/переносимый-дизайн.md",
+  "type": "fact",
+  "explicit": [
+    "UX design principles",
+    "interaction patterns",
+    "platform constraints",
+   
+RESPONSE for docs/knowledge/fact-audio-session.md: ```json
+{
+  "path": "docs/knowledge/fact-audio-session.md",
+  "type": "fact",
+  "explicit": [
+    "AVAudioSession lifecycle and always-active pattern",
+    "setActive(true) idempotency guard",
+    "Mi
+RESPONSE for docs/knowledge/fix-dynamic-island.md: ```json
+{
+  "path": "docs/knowledge/fix-dynamic-island.md",
+  "type": "fix",
+  "explicit": [
+    "Live Activities",
+    "Dynamic Island",
+    "ActivityKit",
+    "AlertConfiguration",
+    "Activity ado
+RESPONSE for docs/knowledge/fix-ios-stability.md: ```json
+{
+  "path": "docs/knowledge/fix-ios-stability.md",
+  "type": "fix",
+  "explicit": [
+    "Widget SDK deployment target version constraints",
+    "Liquid Glass dynamic background rendering",
+   
+RESPONSE for docs/knowledge/fact-remote-tab.md: ```json
+{
+  "path": "docs/knowledge/fact-remote-tab.md",
+  "type": "fact",
+  "explicit": [
+    "WKWebView remote access",
+    "Bearer token authentication",
+    "Prod/Dev source toggle",
+    "Data per
+RESPONSE for docs/knowledge/fact-habit-tracker.md: ```json
+{
+  "path": "docs/knowledge/fact-habit-tracker.md",
+  "type": "fact",
+  "explicit": [
+    "gesture_tap_vs_press_timing",
+    "long_press_drag_distinction",
+    "habit_row_view",
+    "group_row
+RESPONSE for docs/knowledge/fact-wireless-deploy.md: ```json
+{
+  "path": "docs/knowledge/fact-wireless-deploy.md",
+  "type": "fact",
+  "explicit": [
+    "Wireless iOS deployment via WiFi with CoreDevice",
+    "Provisioning profile lifecycle and 7-day ex
+RESPONSE for docs/knowledge/fact-live-activity.md: I need to create a semantic JSON passport for the file `docs/knowledge/fact-live-activity.md`. Let me analyze the content and produce the required JSON structure.
+
+Based on the file content, this is a
+RESPONSE for docs/knowledge/fact-xcode-disk-usage.md: ```json
+{
+  "path": "docs/knowledge/fact-xcode-disk-usage.md",
+  "type": "fact",
+  "explicit": [
+    "Xcode disk usage breakdown",
+    "iOS DeviceSupport caching",
+    "Simulator runtimes (APFS volume
+RESPONSE for docs/knowledge/fix-background-intent-crashes.md: ```json
+{
+  "path": "docs/knowledge/fix-background-intent-crashes.md",
+  "type": "fix",
+  "explicit": [
+    "iOS 18+ Jetsam 0x8badf00d watchdog",
+    "AVAudioSession background deactivation penalty",
+RESPONSE for docs/knowledge/fix-coredevice-no-provider.md: ```json
+{
+  "path": "docs/knowledge/fix-coredevice-no-provider.md",
+  "type": "fix",
+  "explicit": [
+    "CoreDevice error",
+    "Xcode provisioning",
+    "iOS DDI mounting",
+    "wireless deployment"
+RESPONSE for docs/knowledge/fact-voice-chat-tab.md: ```json
+{
+  "path": "docs/knowledge/fact-voice-chat-tab.md",
+  "type": "fact",
+  "explicit": [
+    "iOS Voice Record native SwiftUI client",
+    "Terminal mode in AI Chat",
+    "SSE live updates",
+   
+RESPONSE for docs/knowledge/fact-voice-record.md: ```json
+{
+  "path": "docs/knowledge/fact-voice-record.md",
+  "type": "fact",
+  "explicit": [
+    "Voice Record subsystem architecture",
+    "RecordingCoordinator dual recording slots",
+    "Parallel r

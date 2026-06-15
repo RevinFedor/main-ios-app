@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import os
 
 // Native remote control for Noted Terminal (custom-terminal). This mirrors the
 // existing mobile-web protocol but keeps Terminal project/tab state separate
@@ -46,6 +47,7 @@ struct CTTabInfo: Identifiable, Decodable, Equatable {
     var name: String   // var: optimistic update on rename
     let tabType: String
     var commandType: String?
+    var toolType: String?
     var color: String?
     let cwd: String
     var claudeSessionId: String?
@@ -56,15 +58,22 @@ struct CTTabInfo: Identifiable, Decodable, Equatable {
     var awaiting: Bool?
     var statusId: String?
     var statusColor: String?
+    var contextPct: Double?   // last-known context fill %, seed for the header pill
 
     var id: String { tabId ?? name + cwd }
-    var isClaudePTY: Bool { commandType == "claude" && tabType != "claude-sdk" }
-    var isCodexPTY: Bool { commandType == "codex" && tabType != "claude-sdk" }
+    var effectiveToolType: String? {
+        if toolType == "codex" || commandType == "codex" || codexSessionId != nil { return "codex" }
+        if toolType == "gemini" || commandType == "gemini" || geminiSessionId != nil { return "gemini" }
+        if toolType == "claude" || commandType == "claude" || claudeSessionId != nil || tabType == "claude-sdk" { return "claude" }
+        return nil
+    }
+    var isClaudePTY: Bool { effectiveToolType == "claude" && tabType != "claude-sdk" }
+    var isCodexPTY: Bool { effectiveToolType == "codex" && tabType != "claude-sdk" }
     var isSDK: Bool { tabType == "claude-sdk" }
     var isInteractiveAI: Bool { isClaudePTY || isCodexPTY || isSDK }
     var activeSessionId: String? {
         if isCodexPTY { return codexSessionId }
-        if commandType == "gemini" { return geminiSessionId }
+        if effectiveToolType == "gemini" { return geminiSessionId }
         return claudeSessionId
     }
 }
@@ -144,6 +153,28 @@ struct CTParams: Decodable, Equatable {
     var model: String
     var effort: String
     var thinking: String
+    // Context fill % travels in the SAME params bundle as model/effort, so one
+    // on-open `/params` fetch seeds the whole runtime snapshot (model + ctx)
+    // together instead of ctx arriving ~30s later on the next SSE bridge-update.
+    var contextPct: Double?
+}
+
+// Live model catalog served by custom-terminal `GET /api/agent-models`. The
+// desktop builds the Codex list from `codex debug models` (the bundled catalog
+// is fallback-only and can carry hidden/upgrade-only rows the TUI rejects), so
+// the phone must read the same source instead of hardcoding a stale subset —
+// the symptom this fixes is "у Codex отображаются не все модели". `efforts` is
+// per-model (Codex models advertise their own reasoning levels); Claude rows
+// omit it. See custom-terminal `fact-codex.md::Модели и effort`.
+struct CTModelOption: Decodable, Equatable, Identifiable {
+    let id: String
+    var label: String
+    var efforts: [String]?
+}
+
+struct CTAgentModelCatalog: Decodable, Equatable {
+    var codex: [CTModelOption]
+    var claude: [CTModelOption]
 }
 
 struct CTQueueItem: Identifiable, Decodable, Equatable {
@@ -332,7 +363,10 @@ enum CTEntryKind: String, Equatable, Sendable {
 
 // Sendable so a finished [CTEntry] can be built off the main actor (heavy decode
 // + normalize of 1000+ msg histories) and handed back to @MainActor for publish.
-struct CTEntry: Identifiable, Sendable {
+// Equatable (Phase D) so each transcript row can be `.equatable()` — a streaming
+// token mutates only the tail entry, so only that row's value differs and SwiftUI
+// skips re-rendering the other ~250 rows instead of rebuilding the whole ForEach.
+struct CTEntry: Identifiable, Sendable, Equatable {
     var id: String
     var kind: CTEntryKind
     var text: String = ""
@@ -350,6 +384,25 @@ struct CTEntry: Identifiable, Sendable {
         }
         return VCToolCall(id: id, name: toolName ?? "tool", args: toolInput, result: result)
     }
+
+    var payloadUTF16Length: Int {
+        text.utf16.count
+            + (toolResult?.utf16.count ?? 0)
+            + (toolName?.utf16.count ?? 0)
+            + (toolInput?.compactDescription.utf16.count ?? 0)
+    }
+}
+
+private func ctHistoryPayloadSummary(_ entries: [CTEntry]) -> String {
+    guard let maxEntry = entries.max(by: { $0.payloadUTF16Length < $1.payloadUTF16Length }) else {
+        return "maxEntry=none"
+    }
+    let top = entries
+        .sorted { $0.payloadUTF16Length > $1.payloadUTF16Length }
+        .prefix(3)
+        .map { "\($0.kind.rawValue):\($0.id.prefix(8)):\($0.payloadUTF16Length)" }
+        .joined(separator: ",")
+    return "maxEntry=\(maxEntry.kind.rawValue):\(maxEntry.id.prefix(12)):\(maxEntry.payloadUTF16Length) top=[\(top)]"
 }
 
 private final class CTMessageReducer {
@@ -682,6 +735,8 @@ enum TerminalAPI {
         req.timeoutInterval = 20
         authed(&req)
         let started = Date()
+        let opToken = OpsRegistry.shared.begin("url", op: path)
+        defer { OpsRegistry.shared.end(opToken) }
         VCLog.log("TerminalHTTP", "GET start path=\(path) host=\(safeHost(url)) timeout=20")
         let data: Data
         let resp: URLResponse
@@ -718,6 +773,8 @@ enum TerminalAPI {
         authed(&req)
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let started = Date()
+        let opToken = OpsRegistry.shared.begin("url", op: "POST " + path)
+        defer { OpsRegistry.shared.end(opToken) }
         VCLog.log("TerminalHTTP", "POST start path=\(path) host=\(safeHost(url)) bodyKeys=\(body.keys.sorted().joined(separator: ",")) timeout=25")
         let data: Data
         let resp: URLResponse
@@ -778,6 +835,7 @@ enum TerminalAPI {
             name: r.name,
             tabType: "terminal",
             commandType: r.commandType ?? agent,
+            toolType: r.toolType ?? agent,
             color: r.color ?? agent,
             cwd: r.cwd,
             claudeSessionId: nil,
@@ -787,14 +845,15 @@ enum TerminalAPI {
             sessionStatus: "starting",
             awaiting: false,
             statusId: nil,
-            statusColor: nil
+            statusColor: nil,
+            contextPct: nil
         )
     }
 
     static func createSDKTab(projectId: String) async throws -> CTTabInfo {
         struct Created: Decodable { let tabId: String; let name: String?; let cwd: String?; let projectId: String? }
         let r: Created = try await postJSON("/api/projects/" + vcPathComponent(projectId) + "/sdk-tabs")
-        return CTTabInfo(tabId: r.tabId, name: r.name ?? "SDK chat", tabType: "claude-sdk", commandType: "claude", color: "purple", cwd: r.cwd ?? "", claudeSessionId: nil, codexSessionId: nil, geminiSessionId: nil, timelineCount: nil, sessionStatus: "active", awaiting: false, statusId: nil, statusColor: nil)
+        return CTTabInfo(tabId: r.tabId, name: r.name ?? "SDK chat", tabType: "claude-sdk", commandType: "claude", toolType: "claude", color: "purple", cwd: r.cwd ?? "", claudeSessionId: nil, codexSessionId: nil, geminiSessionId: nil, timelineCount: nil, sessionStatus: "active", awaiting: false, statusId: nil, statusColor: nil, contextPct: nil)
     }
 
     static func history(tabId: String, last: Int = 250) async throws -> CTHistoryResponse {
@@ -811,6 +870,12 @@ enum TerminalAPI {
 
     static func setParams(tabId: String, body: [String: Any]) async throws -> CTParamsStatus {
         try await postJSON("/api/sdk-tabs/" + vcPathComponent(tabId) + "/params", body: body)
+    }
+
+    // Live codex/claude model catalog. Server-wide (not per-tab) — `{success,
+    // codex:[…], claude:[…]}`. The extra `success` key is ignored by the decoder.
+    static func agentModels() async throws -> CTAgentModelCatalog {
+        try await getJSON("/api/agent-models")
     }
 
     static func send(tabId: String, prompt: String, params: CTParams?) async throws {
@@ -1055,6 +1120,16 @@ final class TerminalControlStore {
     var runningTabs: Set<String> = []
     var turnStartedAt: [String: Date] = [:]
     var paramsByTab: [String: CTParams] = [:]
+    // Context used %, mirrored from the desktop StatusLine bridge (Claude) / Codex
+    // rollout token_count via SSE `bridge-update.contextPct`. The number is the
+    // source's own value, not recomputed on the phone (same contract as desktop:
+    // fact-claude-control-bar.md::Context % bridge). Shown in the header next to
+    // the runtime status. Absent until the first bridge frame for the tab.
+    var contextPctByTab: [String: Int] = [:]
+    // Live agent model catalog (codex/claude) fetched once per warm-cache cycle.
+    // nil until the first successful fetch; chips fall back to static literals
+    // so the picker is never empty even offline or against an old desktop build.
+    var modelCatalog: CTAgentModelCatalog?
     var queueByTab: [String: CTQueueCore] = [:]
     var timelineByTab: [String: [CTTimelineEntry]] = [:]
     var timelineLoading: Set<String> = []
@@ -1065,6 +1140,12 @@ final class TerminalControlStore {
     var tabsScrollAnchorByProject: [String: String] = [:]
     var loadingProjects = false
     var loadingTabs: Set<String> = []
+    // Projects with a /tabs GET in flight. selectProject's deferred reload AND
+    // backToTabs both fire loadTabs for the same project during a rapid burst;
+    // both pass the freshness check before either stamps tabsRefreshedAt, then both
+    // publish when the prefetch window opens → the dual ms=1701/ms=736 publish that
+    // spiked one commit frame. This dedups concurrent loads per project.
+    @ObservationIgnored private var tabsLoadInFlight: Set<String> = []
     var historyLoading: Set<String> = []
     var offline = false
     var sseConnected = false
@@ -1087,11 +1168,52 @@ final class TerminalControlStore {
     @ObservationIgnored private var sseAttemptByTab: [String: Int] = [:]
     @ObservationIgnored private var sseEventSeqByTab: [String: Int] = [:]
     @ObservationIgnored private var lastProjectsRefreshAt: Date?
+    // Per-project freshness stamp for the tabs cache, so selectProject can skip a
+    // redundant /tabs reload on a rapid re-visit (the churn that hitched the slide).
+    @ObservationIgnored private var tabsRefreshedAt: [String: Date] = [:]
     @ObservationIgnored private var pendingPromptRecoveryByTab: [String: Date] = [:]
     @ObservationIgnored private var draftRecoveryTasks: [String: Task<Void, Never>] = [:]
+    // The model the user just picked, with the moment it was picked. A PTY-Claude
+    // `/model` switch lands in `bridgeMetadata.model` only after the next status
+    // line, so an in-flight `bridge-update` (or a /params readback) can carry the
+    // PREVIOUS model for a second or two. Without this guard the chip flickered
+    // opus → haiku → opus (user report). While a pick is pending we refuse any
+    // bridge model that disagrees, until the bridge confirms the chosen value or
+    // the short window elapses.
+    @ObservationIgnored private var pendingModelByTab: [String: (model: String, at: Date)] = [:]
+
+    // True while the user is actively navigating (drag / push / back slide). The
+    // tabs prefetch loop PARKS while this is set: the watchdog proved the
+    // tabs→projects stutter is a HITCH (no [hang] gap ≥250ms — many sub-frame
+    // mutations), caused by background prefetch GETs (one took 1622ms over the
+    // tunnel) landing their @Published tabsByProject writes mid-slide and
+    // re-rendering the projects back-preview each frame. Pausing prefetch during
+    // interaction removes the mutations that drive the hitch. @ObservationIgnored:
+    // pure coordination, never read in a view body. Set by the UK gesture layer.
+    @ObservationIgnored private(set) var interactionActive = false
+    @ObservationIgnored private var interactionEndedAt = Date.distantPast
+
+    func setInteractionActive(_ active: Bool) {
+        interactionActive = active
+        if !active { interactionEndedAt = Date() }
+    }
+
+    // Prefetch waits until interaction has been idle for this long before each
+    // network fetch, so a write never lands on the tail of a settling animation.
+    @ObservationIgnored private let prefetchIdleGraceMs: Double = 250
 
     var canStepBack: Bool {
         selectedTab != nil || selectedProject != nil
+    }
+
+    // A turn is in flight for this tab. Single source of truth for "controls
+    // that change the running agent must be locked" — model/effort/think pickers
+    // read this so they can't fire a live `/model` switch mid-answer. Mirrors the
+    // desktop `controlsLocked` (HistoryPanel) and `fact-codex.md::Модели и effort`
+    // ("во время активного turn'а controls disabled/ignored без toast"). Same
+    // signal the composer Send↔Stop swap already trusts (TerminalControlUI).
+    func isTabTurnBusy(_ tabId: String) -> Bool {
+        runningTabs.contains(tabId) || statusByTab[tabId] == "busy"
     }
 
     func stepBackOneLevel() {
@@ -1193,7 +1315,24 @@ final class TerminalControlStore {
         VCLog.log("TerminalCache", "start warm cache cold=\(cold) projects=\(projects.count) host=\(TerminalControlConfig.displayHost()) prefetchTabs=true")
         warmCacheTask = Task { [weak self] in
             await self?.refreshProjects(showLoader: cold, prefetchTabs: true)
+            await self?.refreshModelCatalog()
             await MainActor.run { self?.warmCacheTask = nil }
+        }
+    }
+
+    // Pull the live codex/claude model catalog. Best-effort: a failure (offline,
+    // old desktop build without the route) leaves `modelCatalog` as-is, so chips
+    // keep their static fallback. Only published when the value actually changes,
+    // to avoid a redundant @Observable invalidation on every warm-cache cycle.
+    func refreshModelCatalog() async {
+        do {
+            let catalog: CTAgentModelCatalog = try await TerminalAPI.agentModels()
+            if modelCatalog != catalog {
+                modelCatalog = catalog
+                VCLog.log("TerminalCache", "model catalog codex=\(catalog.codex.count) claude=\(catalog.claude.count)")
+            }
+        } catch {
+            VCLog.log("TerminalCache", "model catalog fetch failed (keeping fallback): \(error.localizedDescription)")
         }
     }
 
@@ -1331,20 +1470,50 @@ final class TerminalControlStore {
     }
 
     func selectProject(_ project: CTProject) {
+        // Tear down the previous tab's live channels. Forward navigation never did
+        // this (only back did) — so after chat→tabs→another project, the OLD tab's
+        // 4s status poll + SSE stream stayed alive and kept mutating statusByTab /
+        // tabsByProject / selectedTab, re-rendering the freshly-shown tabs list for
+        // the next 5-10s. That is exactly the "lag right after opening a project
+        // that disappears once it settles" the user bisected. The destination tab,
+        // if any, re-arms its own channel via the view's .task(id:).
+        stopLiveChannel()
         selectedProject = project
         selectedTab = nil
         let hasCachedTabs = !(tabsByProject[project.id]?.isEmpty ?? true)
-        VCLog.log("TerminalNav", "select project id=\(shortID(project.id)) name=\(project.name) cachedTabs=\(hasCachedTabs) tabCount=\(project.tabCount ?? -1) open=\(project.isOpen == true)")
+        // Skip the network reload entirely when the cache is FRESH. The user
+        // rapid-taps projects; each tap was firing a redundant /tabs GET even
+        // though the tabs were prefetched seconds ago, and the response landed
+        // mid-slide rewriting tabsByProject → re-running the live forward view's
+        // body every frame (128 dropped frames, no main-thread hang — the
+        // AttributeGraph churn the research flagged). Live tab status still arrives
+        // via SSE on the OPEN tab; the project-tabs list doesn't need a refresh on
+        // every visit. 15s freshness = re-fetch only if genuinely stale.
+        let fresh = (tabsRefreshedAt[project.id]).map { Date().timeIntervalSince($0) < 15 } ?? false
+        VCLog.log("TerminalNav", "select project id=\(shortID(project.id)) name=\(project.name) cachedTabs=\(hasCachedTabs) fresh=\(fresh) tabCount=\(project.tabCount ?? -1) open=\(project.isOpen == true) nav=\(TerminalPerfContext.shared.snapshot())")
         if hasCachedTabs {
-            // Cached: the slide renders from cache instantly. DEFER the network
-            // refresh until the push/back animation has settled (~0.35s) so its
-            // @Published tabsByProject write can't land mid-slide and stutter it
-            // (logs showed a 100-300ms GET response rewriting the array right on
-            // top of the animation). updateSelectedProject:false so it can't swap
-            // selectedProject out from under the in-flight transition either.
+            if fresh {
+                VCLog.log("TerminalNav", "skip tabs reload (cache fresh) project=\(shortID(project.id)) nav=\(TerminalPerfContext.shared.snapshot())")
+                return
+            }
+            // Cached but stale: DEFER the network refresh until the user genuinely
+            // PAUSES navigating, not just a fixed 360ms. During rapid project-to-
+            // project tapping each visit fired a /tabs GET whose ~400ms response
+            // landed in the gap between two slides (interactionActive already false,
+            // next push not yet begun) → it dirtied tabsByProject right as the next
+            // slide's first frame rendered (the `animate=52/50ms` dirtiness). Awaiting
+            // the prefetch window coalesces: the reload fires once, after the burst
+            // settles. The publish is interaction-gated in loadTabs as a second guard.
             Task {
-                try? await Task.sleep(for: .milliseconds(360))
+                await awaitPrefetchWindow()
                 guard selectedProject?.id == project.id else { return }
+                // Re-check freshness: an earlier deferred reload (or prefetch) for
+                // this project during the burst may have already refreshed it.
+                let stillStale = (tabsRefreshedAt[project.id]).map { Date().timeIntervalSince($0) >= 15 } ?? true
+                guard stillStale else {
+                    VCLog.log("TerminalNav", "deferred reload skip (refreshed during burst) project=\(shortID(project.id))")
+                    return
+                }
                 await loadTabs(projectId: project.id, showLoader: false, updateSelectedProject: true)
             }
         } else {
@@ -1353,19 +1522,58 @@ final class TerminalControlStore {
     }
 
     func loadTabs(projectId: String, showLoader: Bool = true, updateSelectedProject: Bool = true) async {
+        // Drop a concurrent reload for the same project: it hits the identical
+        // endpoint and would publish the same tabs. Without this, selectProject's
+        // deferred reload and backToTabs both ran for the project mid-burst and
+        // published as a duplet at window-open (ms=1701 + ms=736 on one frame).
+        // The in-flight load refreshes tabsByProject for everyone.
+        guard !tabsLoadInFlight.contains(projectId) else {
+            VCLog.log("TerminalCache", "tabs load skip (already in flight) project=\(shortID(projectId))")
+            return
+        }
+        tabsLoadInFlight.insert(projectId)
+        defer { tabsLoadInFlight.remove(projectId) }
         if showLoader { loadingTabs.insert(projectId) }
         let started = Date()
         let cachedCount = tabsByProject[projectId]?.count ?? 0
-        VCLog.log("TerminalCache", "tabs load start project=\(shortID(projectId)) showLoader=\(showLoader) updateSelected=\(updateSelectedProject) cached=\(cachedCount)")
+        VCLog.log("TerminalCache", "tabs load start project=\(shortID(projectId)) showLoader=\(showLoader) updateSelected=\(updateSelectedProject) cached=\(cachedCount) nav=\(TerminalPerfContext.shared.snapshot())")
         do {
             let r = try await TerminalAPI.tabs(projectId: projectId)
+            // If a navigation animation is in flight when this response lands, hold
+            // the @Published writes until it settles. A tabs reload that mutates
+            // tabsByProject mid-slide re-renders the projects/tabs list each frame
+            // → the hitch the watchdog flagged (no hang gap, just dropped frames).
+            // This covers prefetch, the deferred selectProject reload, AND
+            // pull-to-refresh in one place.
+            if interactionActive || Date().timeIntervalSince(interactionEndedAt) * 1000 < prefetchIdleGraceMs {
+                await awaitPrefetchWindow()
+            }
             if updateSelectedProject && selectedProject?.id == projectId, selectedProject != r.project {
                 selectedProject = r.project
             }
-            // Change-guard the @Published writes: a deferred/prefetch reload that
-            // returns identical tabs must not re-render the list (esp. mid-slide).
-            if tabsByProject[projectId] != r.tabs {
+            tabsRefreshedAt[projectId] = Date()   // stamp freshness for selectProject skip
+            // Publish guard. For the project the user is CURRENTLY viewing, a
+            // background reload (deferred selectProject / pull-refresh) lands ~600ms
+            // after the list mounted and, over the tunnel, almost always differs in
+            // some field (sessionId/timelineCount/status) → the plain `!=` guard
+            // passed and re-rendered the whole live list right after it appeared
+            // (the post-open lag). Live status for these tabs already arrives via
+            // SSE on the OPEN tab, so for the visible project only re-publish on a
+            // STRUCTURAL change (tab set differs by id/order), not any field churn.
+            // For non-visible projects (prefetch) keep the exact change-guard.
+            let isVisibleProject = selectedProject?.id == projectId && selectedTab == nil
+            let changed: Bool = {
+                guard let existing = tabsByProject[projectId] else { return true }
+                if isVisibleProject {
+                    return existing.map(\.tabId) != r.tabs.map(\.tabId)   // structural only
+                }
+                return existing != r.tabs
+            }()
+            if changed {
+                MainThreadWatchdog.mark("tabs-publish project=\(shortID(projectId)) n=\(r.tabs.count) visible=\(isVisibleProject)")
+                let publishStarted = Date()
                 tabsByProject[projectId] = r.tabs
+                VCLog.log("TerminalCache", "tabs publish project=\(shortID(projectId)) changed=true visible=\(isVisibleProject) tabs=\(r.tabs.count) publishMs=\(elapsedMs(since: publishStarted)) nav=\(TerminalPerfContext.shared.snapshot())")
             }
             let newMarker = r.statusMarker ?? .fallback
             if statusMarkerByProject[projectId] != newMarker {
@@ -1373,15 +1581,27 @@ final class TerminalControlStore {
             }
             for tab in r.tabs {
                 guard let id = tab.tabId else { continue }
-                if let status = tab.sessionStatus { statusByTab[id] = status }
+                if let status = tab.sessionStatus, statusByTab[id] != status { statusByTab[id] = status }
                 if tab.sessionStatus == "busy" || tab.sessionStatus == "running" {
                     runningTabs.insert(id)
                 } else if tab.sessionStatus != nil {
                     runningTabs.remove(id)
                 }
+                // Seed the header context % from the tab list ONLY when we have no
+                // value yet — a live bridge-update always wins over this last-known
+                // seed. Lets the pill show on open before the first turn.
+                if let pct = tab.contextPct, pct > 0, contextPctByTab[id] == nil {
+                    contextPctByTab[id] = Int(pct)
+                }
             }
+            // Refresh the selected tab from the reloaded list ONLY if it actually
+            // changed. Unguarded, every prefetch / deferred / pull-to-refresh
+            // loadTabs reassigned selectedTab even when identical — and while the
+            // chat detail is open that churns its whole subtree (toolbar, status)
+            // on each background reload. Change-guarded like the Phase-C writes.
             if let selectedId = selectedTab?.tabId,
-               let fresh = r.tabs.first(where: { $0.tabId == selectedId }) {
+               let fresh = r.tabs.first(where: { $0.tabId == selectedId }),
+               fresh != selectedTab {
                 selectedTab = fresh
             }
             offline = false
@@ -1397,7 +1617,7 @@ final class TerminalControlStore {
             let markerSize = r.statusMarker?.sizePx.map { String(format: "%.0f", $0) } ?? "-"
             VCLog.log(
                 "TerminalCache",
-                "tabs load done project=\(shortID(projectId)) tabs=\(r.tabs.count) ai=\(r.tabs.filter { $0.isInteractiveAI }.count) statuses=\(statusSummary) \(activityDebug(projectId: projectId)) marker=\(r.statusMarker?.shape ?? "-")/\(markerSize) ms=\(elapsedMs(since: started))"
+                "tabs load done project=\(shortID(projectId)) tabs=\(r.tabs.count) ai=\(r.tabs.filter { $0.isInteractiveAI }.count) statuses=\(statusSummary) changed=\(changed) visible=\(isVisibleProject) \(activityDebug(projectId: projectId)) marker=\(r.statusMarker?.shape ?? "-")/\(markerSize) ms=\(elapsedMs(since: started)) nav=\(TerminalPerfContext.shared.snapshot())"
             )
         } catch {
             VCLog.log("TerminalCache", "tabs load failed project=\(shortID(projectId)) ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
@@ -1503,7 +1723,7 @@ final class TerminalControlStore {
     func loadHistory(tabId: String) async {
         let started = Date()
         historyLoading.insert(tabId)
-        VCLog.log("TerminalSSE", "history load start tab=\(shortID(tabId))")
+        VCLog.log("TerminalSSE", "history load start tab=\(shortID(tabId)) nav=\(TerminalPerfContext.shared.snapshot())")
         do {
             // Network on the shared session (the GET itself isn't main-bound).
             let netStarted = Date()
@@ -1530,12 +1750,35 @@ final class TerminalControlStore {
             }.value
             let normMs = elapsedMs(since: normStarted)
 
-            // Identity guard: the user may have navigated away during the bg work
-            // (Phase B owns view-side cancellation; this guards the store too).
-            guard selectedTab?.tabId == tabId || entriesByTab[tabId] != nil || historyLoading.contains(tabId) else {
-                VCLog.log("TerminalSSE", "history load DROP (navigated away) tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs)")
+            // Identity guard. The OLD guard had `|| historyLoading.contains(tabId)`
+            // which is ALWAYS true (we inserted it at the top), so it never dropped:
+            // a 250-entry publish (~143ms on main, caught by the watchdog) still ran
+            // for a tab the user already swiped away from, hitching the back-slide
+            // of the NEXT screen. The frame monitor showed 60 dropped frames here.
+            // Correct rule: only publish if this tab is STILL selected. If the user
+            // left, drop the publish — the data isn't needed on screen now, and a
+            // fresh load runs when they return. We still cache it (cheap, no render)
+            // so a quick re-entry is instant.
+            guard selectedTab?.tabId == tabId else {
+                // Don't touch entriesByTab during an active interaction even as a
+                // "cache": the array write itself is the 143ms main-thread cost.
+                // A re-entry reloads from network anyway (fast for small histories).
+                if !interactionActive { entriesByTab[tabId] = built }
+                VCLog.log("TerminalSSE", "history publish DROP (tab no longer selected) tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs) built=\(built.count) cached=\(!interactionActive) nav=\(TerminalPerfContext.shared.snapshot())")
                 historyLoading.remove(tabId)
                 return
+            }
+            // Even when still selected, if a slide is in flight hold the publish
+            // until it settles, so the entries array write doesn't land on the
+            // animation (same reason loadTabs defers its publish).
+            if interactionActive || Date().timeIntervalSince(interactionEndedAt) * 1000 < prefetchIdleGraceMs {
+                VCLog.log("TerminalSSE", "history publish WAIT interaction tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs) built=\(built.count) nav=\(TerminalPerfContext.shared.snapshot())")
+                await awaitPrefetchWindow()
+                guard selectedTab?.tabId == tabId else {
+                    VCLog.log("TerminalSSE", "history publish DROP after wait (tab no longer selected) tab=\(shortID(tabId)) netMs=\(netMs) normMs=\(normMs) built=\(built.count) nav=\(TerminalPerfContext.shared.snapshot())")
+                    historyLoading.remove(tabId)
+                    return
+                }
             }
 
             // Reducer must live on the actor for subsequent SSE deltas. For the
@@ -1549,12 +1792,15 @@ final class TerminalControlStore {
                 reducer.seed(built)
                 reducers[tabId] = reducer
             }
+            MainThreadWatchdog.mark("history-publish tab=\(shortID(tabId)) n=\(built.count)")
+            let publishStarted = Date()
             entriesByTab[tabId] = built
+            let publishMs = elapsedMs(since: publishStarted)
             offline = false
             lastError = nil
             VCLog.log(
                 "TerminalSSE",
-                "history load done tab=\(shortID(tabId)) mode=\(mode) entries=\(built.count) total=\(r.total ?? built.count) session=\(shortID(r.sessionId)) netMs=\(netMs) normMs=\(normMs) totalMs=\(elapsedMs(since: started)) [normalize off-main]"
+                "history load done tab=\(shortID(tabId)) mode=\(mode) entries=\(built.count) total=\(r.total ?? built.count) session=\(shortID(r.sessionId)) netMs=\(netMs) normMs=\(normMs) publishMs=\(publishMs) totalMs=\(elapsedMs(since: started)) \(ctHistoryPayloadSummary(built)) nav=\(TerminalPerfContext.shared.snapshot()) [normalize off-main]"
             )
         } catch {
             VCLog.log("TerminalSSE", "history load failed tab=\(shortID(tabId)) ms=\(elapsedMs(since: started)): \(error.localizedDescription)")
@@ -1569,23 +1815,31 @@ final class TerminalControlStore {
             let status = s.status ?? "inactive"
             let oldStatus = statusByTab[tabId]
             let oldRunning = runningTabs.contains(tabId)
-            statusByTab[tabId] = status
+            // Change-guard: the poll fires every few seconds; an unchanged status
+            // must not trigger an @Observable mutation (which re-runs views reading
+            // statusByTab/runningTabs). Most polls return the SAME status.
+            if oldStatus != status { statusByTab[tabId] = status }
             if status == "busy" {
-                runningTabs.insert(tabId)
+                if !oldRunning { runningTabs.insert(tabId) }
                 if turnStartedAt[tabId] == nil { turnStartedAt[tabId] = Date() }
             } else {
-                runningTabs.remove(tabId)
-                turnStartedAt[tabId] = nil
+                if oldRunning { runningTabs.remove(tabId) }
+                if turnStartedAt[tabId] != nil { turnStartedAt[tabId] = nil }
             }
+            let statusTool = s.toolType ?? s.commandType
             if let sid = s.sessionId, var tab = selectedTab, tab.tabId == tabId {
-                if s.commandType == "codex" {
+                tab.commandType = s.commandType ?? tab.commandType
+                tab.toolType = s.toolType ?? tab.toolType
+                if statusTool == "codex" {
                     tab.codexSessionId = sid
                 } else {
                     tab.claudeSessionId = sid
                 }
                 selectedTab = tab
                 updateTabInfo(tabId: tabId) { current in
-                    if s.commandType == "codex" {
+                    current.commandType = s.commandType ?? current.commandType
+                    current.toolType = s.toolType ?? current.toolType
+                    if statusTool == "codex" {
                         current.codexSessionId = sid
                     } else {
                         current.claudeSessionId = sid
@@ -1606,16 +1860,40 @@ final class TerminalControlStore {
 
     func refreshParams(tabId: String) async {
         do {
-            paramsByTab[tabId] = try await TerminalAPI.params(tabId: tabId)
+            let p = try await TerminalAPI.params(tabId: tabId)
+            paramsByTab[tabId] = p
+            // Seed the header context % from the SAME on-open fetch as model/effort
+            // — this is the pull path that makes % appear immediately instead of
+            // waiting ~30s for the next live bridge-update. A later live frame
+            // overwrites it. Don't clobber an existing value with nil/0.
+            if let pct = p.contextPct, pct > 0 {
+                let v = Int(pct)
+                if contextPctByTab[tabId] != v { contextPctByTab[tabId] = v }
+            }
+            VCLog.log("Terminal", "params tab=\(shortID(tabId)) model=\(p.model) effort=\(p.effort) think=\(p.thinking) ctx=\(p.contextPct.map { String(format: "%.0f", $0) } ?? "-")")
         } catch {
             VCLog.log("Terminal", "params failed tab=\(tabId.suffix(8)): \(error.localizedDescription)")
         }
     }
 
     func setParams(tabId: String, partial: [String: Any]) async {
+        // Apply the user's choice to the visible chip IMMEDIATELY and keep it.
+        // Do NOT read it back via `/params`: for PTY-Claude that returns the
+        // lagging `bridgeMetadata.model`, which is still the PREVIOUS model for a
+        // beat after `/model`, so the readback bounced the chip to the old value
+        // (opus → haiku → opus). The user's selection is authoritative for the UI;
+        // the live `/model` apply on the desktop is fire-and-forget.
+        let base = paramsByTab[tabId] ?? CTParams(tabId: tabId, model: "default", effort: "high", thinking: "adaptive")
+        var next = base
+        if let m = partial["model"] as? String {
+            next.model = m
+            pendingModelByTab[tabId] = (model: m, at: Date())
+        }
+        if let e = partial["effort"] as? String { next.effort = e }
+        if let t = partial["thinking"] as? String { next.thinking = t }
+        if next != base { paramsByTab[tabId] = next }
         do {
             _ = try await TerminalAPI.setParams(tabId: tabId, body: partial)
-            await refreshParams(tabId: tabId)
         } catch {
             mark(error)
         }
@@ -1930,11 +2208,24 @@ final class TerminalControlStore {
     }
 
     private func updateTabInfo(tabId: String, mutate: (inout CTTabInfo) -> Void) {
+        // Change-guarded + early-exit. This is called by the status poll AND every
+        // SSE snapshot, so during the 5-10s after opening a tab it fires
+        // repeatedly. The OLD version rewrote the WHOLE tabsByProject[key] array
+        // every call even when the mutation changed nothing — and that array write
+        // re-runs TerminalProjectTabsView.body (all ~15 rows) each time. That is the
+        // "lag right after opening a project that disappears once status settles"
+        // the user reported (the slide overlaps these post-nav status writes; once
+        // they stop, swiping back is smooth). Now: find the one project, apply,
+        // and publish ONLY if the tab actually changed; stop after the first match.
         for key in Array(tabsByProject.keys) {
             guard var tabs = tabsByProject[key],
                   let idx = tabs.firstIndex(where: { $0.tabId == tabId }) else { continue }
+            let before = tabs[idx]
             mutate(&tabs[idx])
-            tabsByProject[key] = tabs
+            if tabs[idx] != before {
+                tabsByProject[key] = tabs
+            }
+            return   // a tabId lives in exactly one project — no need to scan the rest
         }
     }
 
@@ -1946,26 +2237,35 @@ final class TerminalControlStore {
         }
         let tabId = event.tabId ?? fallbackTabId
         let seq = nextSSEEventSeq(tabId: tabId)
+        MainThreadWatchdog.mark("sse-event type=\(event.type) tab=\(shortID(tabId))")
         switch event.type {
         case "snapshot":
             let oldStatus = statusByTab[tabId]
             let oldRunning = runningTabs.contains(tabId)
+            // Change-guarded (same reason as the poll path): SSE snapshots repeat
+            // the current status; an equal write must not churn observers.
             if let status = event.sessionStatus {
-                statusByTab[tabId] = status
-                if status == "busy" { runningTabs.insert(tabId) } else { runningTabs.remove(tabId) }
+                if oldStatus != status { statusByTab[tabId] = status }
+                let shouldRun = status == "busy"
+                if shouldRun != oldRunning { if shouldRun { runningTabs.insert(tabId) } else { runningTabs.remove(tabId) } }
             } else if event.busy == true {
-                statusByTab[tabId] = "busy"
-                runningTabs.insert(tabId)
+                if oldStatus != "busy" { statusByTab[tabId] = "busy" }
+                if !oldRunning { runningTabs.insert(tabId) }
             }
+            let eventTool = event.toolType ?? event.commandType
             if let sid = event.sessionId, var tab = selectedTab, tab.tabId == tabId {
-                if event.commandType == "codex" || event.toolType == "codex" {
+                tab.commandType = event.commandType ?? tab.commandType
+                tab.toolType = event.toolType ?? tab.toolType
+                if eventTool == "codex" {
                     tab.codexSessionId = sid
                 } else {
                     tab.claudeSessionId = sid
                 }
                 selectedTab = tab
                 updateTabInfo(tabId: tabId) { current in
-                    if event.commandType == "codex" || event.toolType == "codex" {
+                    current.commandType = event.commandType ?? current.commandType
+                    current.toolType = event.toolType ?? current.toolType
+                    if eventTool == "codex" {
                         current.codexSessionId = sid
                     } else {
                         current.claudeSessionId = sid
@@ -1987,7 +2287,7 @@ final class TerminalControlStore {
         case "message":
             if let msg = event.message {
                 let beforeEntries = entriesByTab[tabId]?.count ?? 0
-                let beforeTailChars = entriesByTab[tabId]?.last?.text.count ?? 0
+                let beforeTailChars = entriesByTab[tabId]?.last?.text.utf16.count ?? 0
                 let reducerMode: String
                 if let reducer = reducers[tabId] {
                     reducerMode = "existing"
@@ -2000,7 +2300,7 @@ final class TerminalControlStore {
                     entriesByTab[tabId] = reducer.apply(msg)
                 }
                 let afterEntries = entriesByTab[tabId]?.count ?? 0
-                let afterTailChars = entriesByTab[tabId]?.last?.text.count ?? 0
+                let afterTailChars = entriesByTab[tabId]?.last?.text.utf16.count ?? 0
                 VCLog.log(
                     "TerminalSSE",
                     "event#\(seq) message tab=\(shortID(tabId)) reducer=\(reducerMode) before=\(beforeEntries)/\(beforeTailChars) after=\(afterEntries)/\(afterTailChars) \(messageDebugSummary(msg))"
@@ -2027,8 +2327,36 @@ final class TerminalControlStore {
             VCLog.log("TerminalSSE", "event#\(seq) done tab=\(shortID(tabId)) reason=\(event.reason ?? "-")")
         case "bridge-update":
             if let model = event.model {
-                let old = paramsByTab[tabId] ?? CTParams(tabId: tabId, model: model, effort: "?", thinking: "adaptive")
-                paramsByTab[tabId] = CTParams(tabId: tabId, model: model, effort: old.effort, thinking: old.thinking)
+                // Stale-model guard: right after the user picks a model, the
+                // bridge can still emit the PREVIOUS one for a beat. While a pick
+                // is pending and unconfirmed, ignore a disagreeing frame (the
+                // flicker source). Drop the pending once the bridge confirms the
+                // chosen value, or after a short window so a genuine external
+                // change isn't blocked forever.
+                var accept = true
+                if let pending = pendingModelByTab[tabId] {
+                    if model == pending.model {
+                        pendingModelByTab[tabId] = nil
+                    } else if Date().timeIntervalSince(pending.at) < 8 {
+                        accept = false
+                        VCLog.log("TerminalSSE", "event#\(seq) bridge-update IGNORE stale model=\(model) pending=\(pending.model) tab=\(shortID(tabId))")
+                    } else {
+                        pendingModelByTab[tabId] = nil
+                    }
+                }
+                if accept {
+                    let old = paramsByTab[tabId] ?? CTParams(tabId: tabId, model: model, effort: "?", thinking: "adaptive")
+                    let updated = CTParams(tabId: tabId, model: model, effort: old.effort, thinking: old.thinking)
+                    if updated != old { paramsByTab[tabId] = updated }
+                }
+            }
+            // Context used %: store the source's own number (floored to int, same
+            // as desktop). A live 0 frame doesn't wipe a real last-known value —
+            // sub-1% floors to 0 and would blank the header otherwise (mirrors
+            // fact-claude-control-bar.md::live-0 не затирает seed).
+            if let pct = event.contextPct, pct > 0 {
+                let v = Int(pct)
+                if contextPctByTab[tabId] != v { contextPctByTab[tabId] = v }
             }
             VCLog.log("TerminalSSE", "event#\(seq) bridge-update tab=\(shortID(tabId)) model=\(event.model ?? "-") context=\(event.contextPct.map { String(format: "%.1f", $0) } ?? "-")")
         case "queue-update":
@@ -2113,20 +2441,20 @@ final class TerminalControlStore {
             guard let obj = object(block) else { continue }
             switch obj["type"]?.stringValue {
             case "text":
-                textLen += obj["text"]?.stringValue?.count ?? 0
+                textLen += obj["text"]?.stringValue?.utf16.count ?? 0
             case "thinking":
-                thinkingLen += obj["thinking"]?.stringValue?.count ?? 0
+                thinkingLen += obj["thinking"]?.stringValue?.utf16.count ?? 0
             case "tool_use":
                 toolUses += 1
             case "tool_result":
                 toolResults += 1
-                toolResultLen += jsonText(obj["content"])?.count ?? 0
+                toolResultLen += jsonText(obj["content"])?.utf16.count ?? 0
             default:
                 break
             }
         }
 
-        let resultLen = jsonText(raw.result)?.count ?? 0
+        let resultLen = jsonText(raw.result)?.utf16.count ?? 0
         return "record=\(raw.type ?? "-") subtype=\(raw.subtype ?? "-") uuid=\(shortID(raw.uuid)) msg=\(shortID(msgObject?["id"]?.stringValue)) session=\(shortID(raw.sessionId)) blocks=\(blocks.count) textLen=\(textLen) thinkingLen=\(thinkingLen) tools=\(toolUses) toolResults=\(toolResults) toolResultLen=\(toolResultLen) resultLen=\(resultLen) synthetic=\(raw.__webSynthetic == true) queued=\(raw.__wasQueued == true)"
     }
 
@@ -2152,6 +2480,27 @@ final class TerminalControlStore {
         sseConnected = false
     }
 
+    // Suspend the calling prefetch step until the user is NOT interacting and a
+    // grace window has passed since the last interaction ended. Polls cheaply
+    // (50ms) — this runs on the prefetch task, not main; it only awaits, never
+    // blocks main. Bounded by a max wait so a stuck flag can't stall prefetch
+    // forever.
+    private func awaitPrefetchWindow() async {
+        let maxWaits = 80   // 80 * 50ms = 4s hard cap
+        var waits = 0
+        while waits < maxWaits {
+            let blocked = interactionActive
+                || Date().timeIntervalSince(interactionEndedAt) * 1000 < prefetchIdleGraceMs
+            if !blocked { return }
+            if waits == 0 {
+                VCLog.log("TerminalCache", "prefetch park (interaction active)")
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+            waits += 1
+        }
+        VCLog.log("TerminalCache", "prefetch park timeout — proceeding")
+    }
+
     private func scheduleTabsPrefetch(for loadedProjects: [CTProject]) {
         tabsPrefetchTask?.cancel()
         let ids = loadedProjects
@@ -2162,6 +2511,10 @@ final class TerminalControlStore {
 
         tabsPrefetchTask = Task { [weak self] in
             for projectId in ids {
+                guard !Task.isCancelled else { return }
+                // Park while the user is navigating, then for a short grace after
+                // it settles — so this project's tabs write never lands mid-slide.
+                await self?.awaitPrefetchWindow()
                 guard !Task.isCancelled else { return }
                 let alreadyCached = await MainActor.run {
                     !(self?.tabsByProject[projectId]?.isEmpty ?? true)
@@ -2193,6 +2546,16 @@ final class TerminalControlStore {
     }
 
     private func mark(_ error: Error) {
+        // A CANCELLED request is NOT the host going offline — it's the normal
+        // result of the user navigating away mid-load (Phase B cancels the in-flight
+        // history GET on back-swipe). Treating cancellation as offline flipped the
+        // store to offline=true on every fast back-swipe (log: "offline false->true:
+        // cancelled"), flashing the offline banner and disabling the composer — the
+        // "выкинуло" feeling. Ignore cancellation entirely.
+        if (error as? URLError)?.code == .cancelled || error is CancellationError {
+            VCLog.log("Terminal", "ignore cancelled error (navigation), offline unchanged=\(offline)")
+            return
+        }
         let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         let beforeOffline = offline
         lastError = msg
@@ -2202,10 +2565,323 @@ final class TerminalControlStore {
     }
 
     private func isTerminalUnavailable(_ error: Error) -> Bool {
+        if (error as? URLError)?.code == .cancelled { return false }
         if error is URLError { return true }
         if case VoiceChatError.http(let code, _) = error {
             return code == 0 || code == 503
         }
         return false
+    }
+}
+
+// MARK: - In-flight ops registry (channel attribution)
+//
+// Per диагностика-логами.flow.md: "activeOps=0 in a gap log doesn't mean nothing
+// ran" — you need both what's in-flight NOW and what just completed. This is the
+// iOS analog of the flow's ipcAgg5s/recentOps5s: a thread-safe counter per channel
+// (url / sse / poll) plus the last completed op, snapshotted when the watchdog
+// fires so a hang can be ATTRIBUTED to a subsystem instead of "logged nearby".
+final class OpsRegistry: @unchecked Sendable {
+    static let shared = OpsRegistry()
+    private let lock = NSLock()
+    private var inFlight: [String: Int] = [:]
+    private var liveOps: [Int: (channel: String, op: String, started: Date)] = [:]
+    private var nextToken = 0
+    private var lastCompleted = "—"
+    private var lastCompletedAt = Date()
+
+    func begin(_ channel: String, op: String = "") -> Int {
+        lock.lock()
+        nextToken += 1
+        let token = nextToken
+        liveOps[token] = (channel, op.isEmpty ? channel : op, Date())
+        inFlight[channel, default: 0] += 1
+        lock.unlock()
+        return token
+    }
+
+    func end(_ token: Int) {
+        lock.lock()
+        guard let live = liveOps.removeValue(forKey: token) else {
+            lock.unlock()
+            return
+        }
+        let channel = live.channel
+        inFlight[channel, default: 1] -= 1
+        if inFlight[channel, default: 0] <= 0 { inFlight[channel] = nil }
+        lastCompleted = "\(channel):\(live.op)"
+        lastCompletedAt = Date()
+        lock.unlock()
+    }
+
+    func snapshot() -> (inFlight: String, last: String, lastAgeMs: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let live: String
+        if liveOps.isEmpty {
+            live = "none"
+        } else {
+            live = liveOps
+                .sorted { $0.key < $1.key }
+                .map { pair in
+                    let op = pair.value
+                    let ageMs = Int(Date().timeIntervalSince(op.started) * 1000)
+                    return "\(op.channel):\(op.op)@\(ageMs)ms"
+                }
+                .joined(separator: ",")
+        }
+        return (live, lastCompleted, Int(Date().timeIntervalSince(lastCompletedAt) * 1000))
+    }
+}
+
+final class TerminalPerfContext: @unchecked Sendable {
+    static let shared = TerminalPerfContext()
+    private let lock = NSLock()
+    private var navId = 0
+    private var label = "idle"
+    private var phase = "idle"
+    private var startedAt = Date()
+    private var phaseAt = Date()
+
+    func begin(id: Int, label: String, phase: String) {
+        lock.lock()
+        navId = id
+        self.label = label
+        self.phase = phase
+        let now = Date()
+        startedAt = now
+        phaseAt = now
+        lock.unlock()
+    }
+
+    func setPhase(_ phase: String) {
+        lock.lock()
+        self.phase = phase
+        phaseAt = Date()
+        lock.unlock()
+    }
+
+    func end(id: Int, note: String) {
+        lock.lock()
+        if navId == id {
+            label = label + " ended=\(note)"
+            phase = "idle"
+            phaseAt = Date()
+        }
+        lock.unlock()
+    }
+
+    func snapshot() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        let ageMs = Int(now.timeIntervalSince(startedAt) * 1000)
+        let phaseAgeMs = Int(now.timeIntervalSince(phaseAt) * 1000)
+        return "nav#\(navId) label=\"\(label)\" phase=\(phase) age=\(ageMs)ms phaseAge=\(phaseAgeMs)ms"
+    }
+}
+
+// MARK: - Main-thread hang watchdog
+//
+// Per диагностика-логами.flow.md: "for a real freeze the in-process logger is
+// blind at the moment of the problem — a watchdog is a different CLASS of
+// observation: a separate scheduler sees the silence from outside." A background
+// DispatchQueue (NOT the frozen main thread) pings main via a semaphore; if the
+// round-trip exceeds the threshold the main thread is wedged RIGHT NOW, so we
+// log immediately via os.Logger.fault (writes off-main, survives the wedge →
+// Console.app / sysdiagnose), snapshot the in-flight channel registry + last
+// main-actor activity marker for attribution, then wait out the rest to measure
+// the REAL gap and flush a copy into VCLog (→ the user's ios-chat.log pipeline).
+// Implementation validated June 2026 (ChatGPT-5.5 + verification agent, 18
+// sources: Jesse Squires watchdog, Apple hang docs, WWDC23 10248).
+//
+// Two log channels on purpose: `[hang]` via os.Logger fires DURING the freeze
+// (grep in Console.app / `log stream`); the VCLog copy lands AFTER recovery in
+// ios-chat.log with the real duration. Also: enable Settings → Developer → Hang
+// Detection on the device for a symbolicated main-thread stack with no Xcode.
+final class MainThreadWatchdog: @unchecked Sendable {
+    static let shared = MainThreadWatchdog()
+
+    private let oslog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "habittracker", category: "hang")
+    private let queue = DispatchQueue(label: "main-thread-watchdog", qos: .utility)
+    // Bands: 80ms catches even short render stalls (a couple dropped 60fps frames
+    // = ~33ms; 80ms = ~5 frames, the floor where a slide visibly hitches), 250ms
+    // is Apple's HANG floor. The 120ms band left the tabs/projects slide silent,
+    // so it's render work in even smaller bursts — drop the floor to see it. Ping
+    // faster (60ms) so a brief stall isn't missed between pings. band= in the log
+    // says which tier tripped.
+    private let hitchMs: Double = 80
+    private let thresholdMs: Double = 250
+    private let pingEvery: TimeInterval = 0.06
+    private var timer: DispatchSourceTimer?
+    private var started = false
+
+    // Last main-actor activity (set by mark()). Plain lock — touched from main
+    // (mark) and the watchdog queue (snapshot on hang).
+    private let actLock = NSLock()
+    private var lastActivityLabel = "idle"
+    private var lastActivityAt = Date()
+
+    nonisolated static func mark(_ label: String) { shared.mark(label) }
+    func mark(_ label: String) {
+        actLock.lock(); lastActivityLabel = label; lastActivityAt = Date(); actLock.unlock()
+    }
+    private func activitySnapshot() -> (String, Int) {
+        actLock.lock(); defer { actLock.unlock() }
+        return (lastActivityLabel, Int(Date().timeIntervalSince(lastActivityAt) * 1000))
+    }
+
+    static func start() { shared.start() }
+    func start() {
+        guard !started else { return }
+        started = true
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + pingEvery, repeating: pingEvery)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let sem = DispatchSemaphore(value: 0)
+            let sent = DispatchTime.now()
+            DispatchQueue.main.async { sem.signal() }
+            // Trip at the HITCH band (120ms) so animation frame-drops are caught,
+            // not just ≥250ms hangs. The recovered-gap value tells which it was.
+            if sem.wait(timeout: .now() + self.hitchMs / 1000) == .timedOut {
+                // Main is blocked NOW — capture before it recovers.
+                let ops = OpsRegistry.shared.snapshot()
+                let nav = TerminalPerfContext.shared.snapshot()
+                let (actLabel, actAge) = self.activitySnapshot()
+                self.oslog.fault("STALL ≥\(Int(self.hitchMs))ms inFlight=\(ops.inFlight, privacy: .public) lastOp=\(ops.last, privacy: .public) lastActivity=\(actLabel, privacy: .public) nav=\(nav, privacy: .public)")
+                // Wait out the rest to measure the true duration.
+                sem.wait()
+                let gapMs = Int(Double(DispatchTime.now().uptimeNanoseconds - sent.uptimeNanoseconds) / 1e6)
+                let band = Double(gapMs) >= self.thresholdMs ? "hang" : "hitch"
+                self.oslog.fault("STALL recovered band=\(band, privacy: .public) gap=\(gapMs)ms")
+                // Flush a copy into the user's pipeline (after recovery, so main is
+                // free again). Grep [hang] in ios-chat.log; band= distinguishes them.
+                DispatchQueue.main.async {
+                    VCLog.log("hang", "band=\(band) gap=\(gapMs)ms inFlight=\(ops.inFlight) lastOp=\(ops.last) lastOpAge=\(ops.lastAgeMs)ms lastActivity=\(actLabel) activityAge=\(actAge)ms nav=\(nav)")
+                }
+            }
+        }
+        t.resume()
+        timer = t
+        VCLog.log("hang", "watchdog started hitch=\(Int(hitchMs))ms hang=\(Int(thresholdMs))ms ping=\(Int(pingEvery * 1000))ms")
+    }
+}
+
+// MARK: - Frame-drop monitor (CADisplayLink)
+//
+// The main-thread watchdog stayed SILENT through the tabs/projects slide even at
+// 80ms — and the render probe showed no re-render storm — which proves the jank
+// is NOT main-thread blocking and NOT excessive body eval. That leaves the
+// GPU/compositing pass: a frame that's expensive to RENDER (heavy shadow, blur,
+// offscreen pass) drops even though main is idle. The only instrument that sees
+// that is CADisplayLink, which fires per VSYNC and lets us measure the gap
+// between presented frames. A healthy 60/120fps frame is 16.6/8.3ms; a gap of
+// 2+ frames during a slide is a visible hitch. We only watch during an active
+// terminal interaction (armed by the gesture layer) so it's silent at rest.
+// Grep [frame]. Validated against the research's hitch (33ms) thresholds.
+@MainActor
+final class FrameMonitor {
+    static let shared = FrameMonitor()
+    private var link: CADisplayLink?
+    private var lastTs: CFTimeInterval = 0
+    private var armedUntil: CFTimeInterval = 0
+    private var worstMs: Double = 0
+    private var dropped = 0
+    private var sampled = 0
+    private var windowStart: CFTimeInterval = 0
+    private var expectedFrameMs: Double = 16.6
+    private var windowSerial = 0
+    private var currentWindowId = 0
+    private var currentReason = "idle"
+    private var currentLabel = "idle"
+
+    // PHASE ATTRIBUTION (verification before the UIKit-snapshot rewrite). The
+    // research says the dropped frame is the destination view-tree's FIRST COMMIT,
+    // not the motion. To prove it on-device we tag which phase each dropped frame
+    // lands in: "commit" = the window between mounting the destination subtree and
+    // the animation starting; "animate" = the offset actually moving. If drops
+    // cluster in commit → first-commit cost confirmed → snapshot fix is right. If
+    // they cluster in animate → it's the moving tree and a different fix applies.
+    private var phase = "idle"
+    private var droppedByPhase: [String: Int] = [:]
+    private var worstByPhase: [String: Double] = [:]
+
+    func setPhase(_ p: String) {
+        phase = p
+        TerminalPerfContext.shared.setPhase(p)
+    }
+
+    // Arm for the duration of a navigation interaction (+ a tail). Cheap: the
+    // CADisplayLink runs only while armed.
+    @discardableResult
+    func arm(reason: String, label: String = "nav", phase initialPhase: String = "commit") -> Int {
+        let now = CACurrentMediaTime()
+        if link != nil, currentWindowId != 0 {
+            flushWindow(status: "interrupted")
+        }
+        windowSerial += 1
+        let id = windowSerial
+        currentWindowId = id
+        currentReason = reason
+        currentLabel = label
+        armedUntil = now + 1.2
+        lastTs = 0
+        worstMs = 0
+        dropped = 0
+        sampled = 0
+        windowStart = now
+        droppedByPhase = [:]
+        worstByPhase = [:]
+        phase = initialPhase
+        TerminalPerfContext.shared.begin(id: id, label: "\(reason) \(label)", phase: initialPhase)
+        if link == nil {
+            let l = CADisplayLink(target: self, selector: #selector(tick(_:)))
+            l.add(to: .main, forMode: .common)
+            link = l
+        }
+        VCLog.log("frame", "monitor armed id=\(id) reason=\(reason) label=\"\(label)\" phase=\(initialPhase)")
+        return id
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let ts = link.timestamp
+        // Use the device's actual refresh target for the dropped-frame math.
+        let target = link.targetTimestamp - link.timestamp
+        if target > 0.001 { expectedFrameMs = target * 1000 }
+        if lastTs != 0 {
+            let deltaMs = (ts - lastTs) * 1000
+            sampled += 1
+            if deltaMs > worstMs { worstMs = deltaMs }
+            if deltaMs > (worstByPhase[phase] ?? 0) { worstByPhase[phase] = deltaMs }
+            // A frame that took >1.5× the expected interval = at least one dropped.
+            if deltaMs > expectedFrameMs * 1.5 {
+                let n = Int((deltaMs / expectedFrameMs).rounded()) - 1
+                dropped += n
+                droppedByPhase[phase, default: 0] += n
+            }
+        }
+        lastTs = ts
+
+        if ts >= armedUntil {
+            // Flush the window summary and stop until next arm.
+            flushWindow(status: "done")
+            link.invalidate()
+            self.link = nil
+            lastTs = 0
+            phase = "idle"
+            currentWindowId = 0
+        }
+    }
+
+    private func flushWindow(status: String) {
+        guard currentWindowId != 0 else { return }
+        let phaseBreak = droppedByPhase.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)/\(Int(worstByPhase[$0.key] ?? 0))ms" }
+            .joined(separator: " ")
+        let durationMs = Int((CACurrentMediaTime() - windowStart) * 1000)
+        VCLog.log(
+            "frame",
+            "window id=\(currentWindowId) status=\(status) reason=\(currentReason) label=\"\(currentLabel)\" frames=\(sampled) dropped=\(dropped) worst=\(String(format: "%.0f", worstMs))ms expected=\(String(format: "%.1f", expectedFrameMs))ms duration=\(durationMs)ms byPhase[\(phaseBreak.isEmpty ? "none" : phaseBreak)] nav=\(TerminalPerfContext.shared.snapshot())"
+        )
+        TerminalPerfContext.shared.end(id: currentWindowId, note: status)
     }
 }

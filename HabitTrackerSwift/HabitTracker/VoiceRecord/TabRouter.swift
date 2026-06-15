@@ -16,7 +16,30 @@ import UIKit
 final class TabRouter: ObservableObject {
     enum Tab: String, CaseIterable { case chat, voice, habits }
 
-    @Published var selected: Tab = .voice
+    @Published var selected: Tab = .voice {
+        didSet {
+            guard selected != oldValue else { return }
+            // Settings section follows the tab you're ON: switching root tabs
+            // re-defaults the unified settings to that tab's section. While you
+            // stay on one tab, your in-settings swipe/segment choice persists
+            // across open/close (settingsSection is reset only here, on a real
+            // tab change). User model: «захожу из AI Chat → открываются настройки
+            // AI Chat, даже если в прошлый раз листал на Voice; но пока я в AI
+            // Chat, листание между секциями настроек сохраняется».
+            settingsSection = selected
+        }
+    }
+
+    // Unified settings, presented full-screen over everything at the root.
+    // `showSettings` is the presentation flag; `settingsSection` is the visible
+    // segment — re-seeded from the current tab on every tab change (see `selected`
+    // didSet), then freely changed by the in-settings segmented control / swipe.
+    @Published var showSettings: Bool = false
+    @Published var settingsSection: Tab = .voice
+
+    func openSettings() {
+        showSettings = true
+    }
 
     // Custom horizontal pager (RootTabView): the visual order is `Tab.allCases`
     // (chat · voice · habits). The pager binds its `scrollPosition(id:)` to this
