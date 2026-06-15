@@ -103,3 +103,57 @@ padding.
 rm -rf build/DerivedData/Build/Intermediates.noindex/XCBuildData
 ```
 Полную `DerivedData` сносить не нужно — достаточно build-базы. Не путать с нехваткой места (`fact-xcode-disk-usage.md`) — тут база битая, а не диск полный.
+
+### 9. Terminal navigation jank: не main-thread, не строки, а commit/render поверхности
+
+**Симптом**: переходы `projects → project tabs → chat` и back-свайпы в Terminal визуально
+дёргались. Сначала пара переходов могла быть плавной, потом лаг появлялся; если подождать
+5-10 секунд, часть back-переходов становилась нормальной. На больших чатах отдельный симптом
+был жёстче: при открытии или возврате из вкладки приложение могло зависнуть на сотни мс или
+секунды, хотя сеть уже ответила.
+
+Диагностика сработала только когда появились три независимых наблюдателя. Main-thread
+watchdog пинговал main с фоновой очереди и ловил реальные блокировки (`[hang]`); он молчал
+на обычных 44-79ms slide-hitch'ах, значит это не полный main hang. CADisplayLink
+`FrameMonitor` видел предъявленные кадры и фазировал окно на `mount/animate/swap/settle` —
+это отделило render-server/commit hitch от движения offset'а. `TerminalRenderProbe` считал
+body eval строк (`row bodies/distinct`); когда bodies совпадали с числом строк без повторов,
+гипотеза "штормит весь список" отпала. `OpsRegistry` и `TerminalPerfContext` добавили
+`inFlight`, `lastOp` и `nav#`, чтобы не путать nearby network log с причиной кадра.
+
+Что оказалось не причиной. Prefetch действительно мог попадать в окно анимации, поэтому его
+припарковали, но это не объясняло постоянный `commit≈77-95ms`. `.drawingGroup()` на moving
+layers дал чёрный ScrollView и не уменьшил dropped frames — значит причина не "слишком много
+пикселей каждый кадр". Snapshot-cover поверх живого экрана сделал хуже: коммит всё равно
+платится под обложкой, плюс обложка добавляет ещё один render. Off-main normalize/history
+нужен, но если после него остаётся 12s freeze, это уже не парсинг, а layout гигантского
+`Text` в одном row. `activeOps=0` тоже не доказывает idle — нужен recent/last op контекст.
+
+Первый большой корень был системный navigation bar. Все три Terminal-level'а жили внутри
+одного shared `NavigationStack`, но каждый объявлял свой `.toolbar` и
+`.toolbarBackground(.visible)`. При custom `.offset`-slide SwiftUI не делает настоящий
+push/pop, но всё равно пересобирает iOS 26 Liquid Glass nav-bar chrome на swap уровня.
+Фазовые логи показали тяжёлые кадры в `commit/swap`, а не в `animate`; `toolbarBackground`
+DIAG улучшал только случаи с похожими header'ами; визуальный симптом "gear/hamburger
+двоится на кадр" совпадал с двумя nav bar chrome. Фикс: убрать системный toolbar из этих
+трёх уровней, поставить custom `TerminalHeaderBar` и `.navigationBarHidden(true)`.
+
+Второй оставшийся корень — project→tabs transition surface. Свежие логи после toolbar-fix:
+`pushProject ... cachedTabs=true fresh=true skip tabs reload`, но `worst=44-59ms` в
+`animate/commit`. Это уже не сеть и не `loadTabs`; тяжёлым оказался сам moving tabs-list:
+`ScrollView + TerminalTabRow + AgentIconView + glass refresh + contextMenu/FAB` даже на
+3-10 строках. Текущий mitigation: forward project snapshot рендерит lightweight rows без
+ScrollView, asset lookup, spinner, glass-refresh и floating controls; live tabs view во
+время `interactionsSuspended` тоже сначала показывает дешёвый список, а полные controls
+появляются в `settle`. Следующий лог должен проверять именно фазы: если дорогой кадр остался
+в `animate` — moving surface всё ещё тяжёлая; если ушёл в `settle` — навигация чистая, а
+интерактивные controls дорисовываются после неё.
+
+Отдельный фикс для history: публикация загруженной истории не имеет права попадать в back
+transition. Старый guard содержал `|| historyLoading.contains(tabId)` и поэтому никогда не
+дропал publish для вкладки, с которой пользователь уже ушёл; 250 entries могли переписать
+`entriesByTab` во время следующего экрана. Сейчас история нормализуется в `Task.detached`,
+публикуется только если tab всё ещё selected, а при активной навигации пишет
+`history publish WAIT interaction` и после ожидания либо публикует, либо `DROP after wait`.
+Именно это объясняет свежий пользовательский результат: "во время подгрузки чата лагов нет,
+перехожу в чат, возвращаюсь обратно — лага нет".
