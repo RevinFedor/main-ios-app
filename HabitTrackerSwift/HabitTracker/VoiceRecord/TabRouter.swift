@@ -17,6 +17,7 @@ final class TabRouter: ObservableObject {
     @Published var selected: Tab = .chat {
         didSet {
             guard selected != oldValue else { return }
+            CrashBreadcrumbs.mark("root-tab \(oldValue.rawValue)->\(selected.rawValue)", log: true)
             // Settings section follows the tab you're ON: switching root tabs
             // re-defaults the unified settings to that tab's section. While you
             // stay on one tab, your in-settings swipe/segment choice persists
@@ -74,6 +75,7 @@ final class TabRouter: ObservableObject {
     /// Order matters: set the request BEFORE switching tabs so the chat tab sees
     /// it whether it reacts to the request change or to becoming the active tab.
     func openChat(_ chatId: String?) {
+        CrashBreadcrumbs.mark("router openChat chat=\(chatId.map { String($0.suffix(8)) } ?? "nil")", log: true)
         pendingChatRequest = ChatRequest(seq: UUID(), chatId: chatId)
         selected = .chat
     }
@@ -90,10 +92,18 @@ final class TabRouter: ObservableObject {
         switch url.host {
         // Both "habits" (new) and "home" (legacy, kept for any old widget
         // builds still installed) route to the habits tab.
-        case "habits", "home": selected = .habits
-        case "voice":          selected = .voice
-        case "remote":         selected = .chat
-        case "chat":           selected = .chat
+        case "habits", "home":
+            CrashBreadcrumbs.mark("deeplink habits url=\(url.absoluteString)", log: true)
+            selected = .habits
+        case "voice":
+            CrashBreadcrumbs.mark("deeplink voice url=\(url.absoluteString)", log: true)
+            selected = .voice
+        case "remote":
+            CrashBreadcrumbs.mark("deeplink remote url=\(url.absoluteString)", log: true)
+            selected = .chat
+        case "chat":
+            CrashBreadcrumbs.mark("deeplink chat url=\(url.absoluteString)", log: true)
+            selected = .chat
         default:               break
         }
     }

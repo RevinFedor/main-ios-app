@@ -643,6 +643,7 @@ struct TerminalControlRootView: View {
             }
             .background(CTPageBackground.ignoresSafeArea())
             .onAppear {
+                CrashBreadcrumbs.mark("terminal-root appear \(terminalRootCrashState())", log: true)
                 store.resetNavigationToProjectsOnFirstOpen()
                 store.start()
                 chatLogLineCount = VCLog.lineCount()
@@ -660,6 +661,7 @@ struct TerminalControlRootView: View {
                 syncPersistentTerminalSelection()
             }
             .onDisappear {
+                CrashBreadcrumbs.mark("terminal-root disappear \(terminalRootCrashState())", log: true)
                 if let tabId = store.selectedTab?.tabId, !tabId.isEmpty {
                     VoiceChatStore.shared.clearActiveComposerKey(VoiceChatStore.terminalComposerKey(tabId: tabId))
                 }
@@ -704,6 +706,13 @@ struct TerminalControlRootView: View {
         if let tab = store.selectedTab {
             persistentTab = tab
         }
+    }
+
+    private func terminalRootCrashState() -> String {
+        let project = store.selectedProject.map { String($0.id.suffix(8)) } ?? "nil"
+        let tabId = store.selectedTab?.tabId ?? store.selectedTab?.id
+        let tab = tabId.map { String($0.suffix(8)) } ?? "nil"
+        return "project=\(project) tab=\(tab) canBack=\(store.canStepBack)"
     }
 
     @ViewBuilder
@@ -2403,6 +2412,7 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        CrashBreadcrumbs.mark("terminal-uikit viewDidLoad", log: true)
         view.backgroundColor = ctUIKitColor(gray: 0.055)
         installShell(projectsShell)
         installShell(tabsShell)
@@ -2450,6 +2460,7 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
     }
 
     deinit {
+        CrashBreadcrumbs.mark("terminal-uikit deinit", log: true)
         syncTimer?.invalidate()
     }
 
@@ -2522,6 +2533,10 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
         let selectedProjectId = store.selectedProject?.id
         let selectedTabId = store.selectedTab?.tabId
         if selectedProjectId != lastSelectedProjectId || selectedTabId != lastSelectedTabId {
+            CrashBreadcrumbs.mark(
+                "terminal-uikit state project=\(selectedProjectId.map { String($0.suffix(8)) } ?? "nil") tab=\(selectedTabId.map { String($0.suffix(8)) } ?? "nil") level=\(currentLevel.rawValue)",
+                log: true
+            )
             lastSelectedProjectId = selectedProjectId
             lastSelectedTabId = selectedTabId
             rebuildChatIfNeeded(force: true)
@@ -2638,6 +2653,7 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
     private func rebuildChatIfNeeded(force: Bool) {
         guard let tab = store.selectedTab else {
             if let chatController {
+                CrashBreadcrumbs.mark("terminal-uikit removeChat force=\(force)", log: true)
                 chatController.willMove(toParent: nil)
                 chatController.view.removeFromSuperview()
                 chatController.removeFromParent()
@@ -2648,6 +2664,10 @@ private final class TerminalUIKitNavigationController: UIViewController, UIGestu
         }
         let tabId = tab.tabId ?? tab.id
         if !force, chatController != nil, lastSelectedTabId == tabId { return }
+        CrashBreadcrumbs.mark(
+            "terminal-uikit rebuildChat force=\(force) tab=\(String(tabId.suffix(8))) tool=\(tab.effectiveToolType ?? "nil")",
+            log: true
+        )
         let root: AnyView
         if let router {
             root = AnyView(
@@ -4595,6 +4615,39 @@ private struct TerminalScrollMetrics: Equatable {
     }
 }
 
+private final class TerminalWeakViewBox: ObservableObject {
+    weak var view: UIView?
+}
+
+private struct TerminalHostingUIViewReader: UIViewRepresentable {
+    let onResolve: (UIView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async { onResolve(view) }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async { onResolve(uiView) }
+    }
+}
+
+private extension CGRect {
+    var terminalKeyboardDebug: String {
+        "x=\(Int(origin.x)) y=\(Int(origin.y)) w=\(Int(width)) h=\(Int(height))"
+    }
+}
+
+private struct TerminalHostHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct TerminalChatDetailView: View {
     let tab: CTTabInfo
     let onShowHistory: () -> Void
@@ -4624,6 +4677,7 @@ private struct TerminalChatDetailView: View {
     @State private var scrollMetrics: TerminalScrollMetrics = .zero
     @State private var lastScrollLogAt = Date.distantPast
     @State private var lastDriftPinAt = Date.distantPast
+    @StateObject private var hostViewBox = TerminalWeakViewBox()
     // Auto-send arming (see ComposerSendButton). Armed → purple spinner on the
     // send button; the next dictation insert auto-submits instead of just
     // landing in the field.
@@ -4638,6 +4692,9 @@ private struct TerminalChatDetailView: View {
     // (NOT safeAreaInset — the documented overlay-composer model).
     @State private var keyboardOverlap: CGFloat = 0
     @State private var keyboardLiftAnim: Animation = .easeOut(duration: 0.22)
+    @State private var keyboardRawHeight: CGFloat = 0
+    @State private var keyboardSafeBottom: CGFloat = 0
+    @State private var terminalHostHeight: CGFloat = 0
 
     @AppStorage(VoiceChatConfig.Keys.chatFont, store: UserDefaults(suiteName: VoiceRecordConfig.appGroup))
     private var chatFont: Double = 15
@@ -4816,6 +4873,22 @@ private struct TerminalChatDetailView: View {
         }
         }
         .navigationBarHidden(true)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .background {
+            TerminalHostingUIViewReader { view in
+                hostViewBox.view = view
+            }
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: TerminalHostHeightPreferenceKey.self, value: proxy.size.height)
+            }
+        }
+        .onPreferenceChange(TerminalHostHeightPreferenceKey.self) { height in
+            guard abs(terminalHostHeight - height) > 0.5 else { return }
+            terminalHostHeight = height
+            reconcileTerminalKeyboard(reason: "host-height")
+        }
         .onAppear {
             if !tabId.isEmpty {
                 voiceStore.setActiveComposerKey(voiceComposerKey)
@@ -5265,22 +5338,47 @@ private struct TerminalChatDetailView: View {
         .buttonStyle(.plain)
     }
 
-    // Compute keyboard overlap against the key window and lift the composer by
-    // it. Mirrors the Gemini chat's overlay-keyboard model but kept minimal and
-    // self-contained for the terminal chat. Subtract the bottom safe-area inset
-    // because the composer already floats above the home indicator via padding.
+    // Compute keyboard overlap against both the key window and this hosted view.
+    // SwiftUI/iOS can still auto-lift a hosted subtree in some NavigationStack +
+    // keyboard combinations; applying the full manual lift on top sends the
+    // terminal composer to the top of the screen. Subtract any lift that the host
+    // already received, matching the ordinary ChatDetailView keyboard model.
     private func applyTerminalKeyboard(_ note: Notification, hiding: Bool) {
         if let isLocal = note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool, !isLocal { return }
         var overlap: CGFloat = 0
+        var raw: CGFloat = 0
+        var safeBottom: CGFloat = 0
+        var alreadyApplied: CGFloat = 0
+        var windowSummary = "nil"
+        var readerSummary = "nil"
+        var frameInWindowSummary = "nil"
+        var frameInViewSummary = "nil"
         if !hiding,
            let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
            let win = UIApplication.vcKeyWindow {
-            let inWindow = win.convert(end, from: win.screen.coordinateSpace)
+            let sourceScreen = (note.object as? UIScreen) ?? win.screen
+            let inWindow = win.convert(end, from: sourceScreen.coordinateSpace)
             let inter = win.bounds.intersection(inWindow)
-            let raw = inter.isNull ? 0 : inter.height
-            let safeBottom = win.safeAreaInsets.bottom
-            overlap = max(0, raw - safeBottom)
+            let windowHeight = inter.isNull || inter.isEmpty ? 0 : inter.height
+            windowSummary = win.bounds.terminalKeyboardDebug
+            frameInWindowSummary = inWindow.terminalKeyboardDebug
+
+            var viewHeight: CGFloat = 0
+            if let view = hostViewBox.view, view.window === win {
+                let inView = view.convert(end, from: sourceScreen.coordinateSpace)
+                let viewInter = view.bounds.intersection(inView)
+                viewHeight = viewInter.isNull || viewInter.isEmpty ? 0 : viewInter.height
+                readerSummary = view.bounds.terminalKeyboardDebug
+                frameInViewSummary = inView.terminalKeyboardDebug
+            }
+
+            raw = max(windowHeight, viewHeight)
+            safeBottom = win.safeAreaInsets.bottom
+            alreadyApplied = terminalAutomaticKeyboardLiftAlreadyApplied()
+            overlap = max(0, raw - safeBottom - alreadyApplied)
         }
+        keyboardRawHeight = raw
+        keyboardSafeBottom = safeBottom
         // Match the keyboard's own duration/curve (private curve 7 on iOS 26 has
         // no faithful SwiftUI mapping → front-loaded open / easeOut close).
         let rawDur = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
@@ -5298,10 +5396,32 @@ private struct TerminalChatDetailView: View {
         } else {
             keyboardLiftAnim = .easeOut(duration: dur)
         }
-        if keyboardOverlap != overlap {
+        if abs(keyboardOverlap - overlap) > 0.5 {
             withAnimation(keyboardLiftAnim) { keyboardOverlap = overlap }
-            VCLog.log("term-kbd", "overlap=\(Int(overlap)) hiding=\(hiding) curve=\(curve) dur=\(String(format: "%.2f", dur))")
         }
+        VCLog.log(
+            "term-kbd",
+            "overlap=\(Int(overlap)) raw=\(Int(raw)) safe=\(Int(safeBottom)) autoLift=\(Int(alreadyApplied)) hiding=\(hiding) inWindow=\(frameInWindowSummary) inView=\(frameInViewSummary) window=\(windowSummary) reader=\(readerSummary) curve=\(curve) dur=\(String(format: "%.2f", dur))"
+        )
+    }
+
+    private func reconcileTerminalKeyboard(reason: String) {
+        guard keyboardRawHeight > 0 || keyboardOverlap > 0 else { return }
+        let alreadyApplied = terminalAutomaticKeyboardLiftAlreadyApplied()
+        let overlap = max(0, keyboardRawHeight - keyboardSafeBottom - alreadyApplied)
+        guard abs(keyboardOverlap - overlap) > 0.5 else { return }
+        withAnimation(.easeOut(duration: 0.12)) { keyboardOverlap = overlap }
+        VCLog.log(
+            "term-kbd",
+            "reconcile reason=\(reason) overlap=\(Int(overlap)) raw=\(Int(keyboardRawHeight)) safe=\(Int(keyboardSafeBottom)) autoLift=\(Int(alreadyApplied)) hostH=\(Int(terminalHostHeight))"
+        )
+    }
+
+    private func terminalAutomaticKeyboardLiftAlreadyApplied() -> CGFloat {
+        guard let view = hostViewBox.view, let window = view.window else { return 0 }
+        let frame = view.convert(view.bounds, to: window)
+        guard frame.height > 1, window.bounds.height > 1 else { return 0 }
+        return max(0, window.bounds.maxY - frame.maxY)
     }
 
     private func dismissTerminalKeyboard() {

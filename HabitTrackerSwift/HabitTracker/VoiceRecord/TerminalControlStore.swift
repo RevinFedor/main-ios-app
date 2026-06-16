@@ -1236,6 +1236,15 @@ final class TerminalControlStore {
         selectedTab != nil || selectedProject != nil
     }
 
+    private func navigationState() -> String {
+        let tabId = selectedTab?.tabId ?? selectedTab?.id
+        return "project=\(shortID(selectedProject?.id)) tab=\(shortID(tabId)) tool=\(selectedTab?.effectiveToolType ?? "nil") canBack=\(canStepBack) running=\(runningTabs.count) interaction=\(interactionActive)"
+    }
+
+    private func markNavigationBreadcrumb(_ event: String, log: Bool = false) {
+        CrashBreadcrumbs.mark("terminal-nav \(event) \(navigationState()) nav=\(TerminalPerfContext.shared.snapshot())", log: log)
+    }
+
     // A turn is in flight for this tab. Single source of truth for "controls
     // that change the running agent must be locked" — model/effort/think pickers
     // read this so they can't fire a live `/model` switch mid-answer. Mirrors the
@@ -1247,6 +1256,7 @@ final class TerminalControlStore {
     }
 
     func stepBackOneLevel() {
+        markNavigationBreadcrumb("stepBackOneLevel begin", log: true)
         if selectedTab != nil {
             backToTabs()
         } else if selectedProject != nil {
@@ -1259,6 +1269,7 @@ final class TerminalControlStore {
         didResetNavigationForCurrentAppLaunch = true
         guard selectedProject != nil || selectedTab != nil else { return }
         VCLog.log("TerminalNav", "reset to projects on first open")
+        markNavigationBreadcrumb("reset-to-projects-first-open", log: true)
         selectedProject = nil
         selectedTab = nil
         stopLiveChannel()
@@ -1515,6 +1526,7 @@ final class TerminalControlStore {
     }
 
     func selectProject(_ project: CTProject) {
+        CrashBreadcrumbs.mark("terminal-select-project begin id=\(shortID(project.id)) name=\(project.name) \(navigationState())", log: true)
         // Tear down the previous tab's live channels. Forward navigation never did
         // this (only back did) — so after chat→tabs→another project, the OLD tab's
         // 4s status poll + SSE stream stayed alive and kept mutating statusByTab /
@@ -1525,6 +1537,7 @@ final class TerminalControlStore {
         stopLiveChannel()
         selectedProject = project
         selectedTab = nil
+        markNavigationBreadcrumb("selectProject set id=\(shortID(project.id))", log: true)
         let hasCachedTabs = !(tabsByProject[project.id]?.isEmpty ?? true)
         // Skip the network reload entirely when the cache is FRESH. The user
         // rapid-taps projects; each tap was firing a redundant /tabs GET even
@@ -1696,8 +1709,10 @@ final class TerminalControlStore {
     @discardableResult
     func selectTabForDisplay(_ tab: CTTabInfo, project: CTProject?) -> String? {
         guard let tabId = tab.tabId else { return nil }
+        CrashBreadcrumbs.mark("terminal-select-tab begin tab=\(shortID(tabId)) name=\(tab.name) tool=\(tab.effectiveToolType ?? "nil") project=\(shortID((project ?? selectedProject)?.id)) \(navigationState())", log: true)
         selectedProject = project ?? selectedProject
         selectedTab = tab
+        markNavigationBreadcrumb("selectTab set tab=\(shortID(tabId)) tool=\(tab.effectiveToolType ?? "nil")", log: true)
         if let status = tab.sessionStatus { statusByTab[tabId] = status }
         // Show the history spinner IMMEDIATELY (before the network GET starts) when
         // there's nothing cached, so opening a chat reads as "loading…" from the
@@ -1710,6 +1725,7 @@ final class TerminalControlStore {
     }
 
     func activateSelectedTab(tabId: String) async {
+        CrashBreadcrumbs.mark("terminal-activate begin tab=\(shortID(tabId)) cachedEntries=\(entriesByTab[tabId]?.count ?? 0) \(navigationState())", log: true)
         // Guard every step against the user navigating away mid-load. Without
         // this, stepping back (backToTabs → selectedTab=nil + stopLiveChannel)
         // while this chain is awaiting the remote tunnel still ran connectSSE /
@@ -1720,17 +1736,21 @@ final class TerminalControlStore {
         await loadHistory(tabId: tabId)
         guard selectedTab?.tabId == tabId else {
             VCLog.log("TerminalSSE", "activate ABORT after history (tab changed) tab=\(shortID(tabId))")
+            CrashBreadcrumbs.mark("terminal-activate abort-after-history tab=\(shortID(tabId)) \(navigationState())", log: true)
             return
         }
+        CrashBreadcrumbs.mark("terminal-activate history-done tab=\(shortID(tabId)) entries=\(entriesByTab[tabId]?.count ?? 0) \(navigationState())")
         await refreshParams(tabId: tabId)
         guard selectedTab?.tabId == tabId else { return }
         await refreshStatus(tabId: tabId)
         guard selectedTab?.tabId == tabId else {
             VCLog.log("TerminalSSE", "activate ABORT before SSE (tab changed) tab=\(shortID(tabId))")
+            CrashBreadcrumbs.mark("terminal-activate abort-before-sse tab=\(shortID(tabId)) \(navigationState())", log: true)
             return
         }
         connectSSE(tabId: tabId)
         startStatusPolling(tabId: tabId)
+        CrashBreadcrumbs.mark("terminal-activate done tab=\(shortID(tabId)) \(navigationState())", log: true)
     }
 
     func openTab(_ tab: CTTabInfo, project: CTProject?) async {
@@ -1739,14 +1759,18 @@ final class TerminalControlStore {
     }
 
     func backToProjects() {
+        markNavigationBreadcrumb("backToProjects begin", log: true)
         selectedProject = nil
         selectedTab = nil
         stopLiveChannel()
+        markNavigationBreadcrumb("backToProjects end", log: true)
     }
 
     func backToTabs() {
+        markNavigationBreadcrumb("backToTabs begin", log: true)
         selectedTab = nil
         stopLiveChannel()
+        markNavigationBreadcrumb("backToTabs selectedTab=nil", log: true)
         guard let id = selectedProject?.id else { return }
         let hasCachedTabs = !(tabsByProject[id]?.isEmpty ?? true)
         guard hasCachedTabs else {

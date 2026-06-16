@@ -358,6 +358,8 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
     private let dimControl = UIControl()
     private var panRecognizer: SideDrawerPanRecognizer?
     private var lastCommandID: UUID?
+    private var animationGeneration: UInt64 = 0
+    private var lastBlackDiagnosticAt: TimeInterval = 0
     private var startOffset: CGFloat = 0
     private var offset: CGFloat = 0
 
@@ -456,13 +458,16 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
         let velocity = normalizedTranslation(recognizer.velocity(in: view).x)
         switch recognizer.state {
         case .began:
-            startOffset = offset.clamped(to: 0...width)
+            animationGeneration &+= 1
+            startOffset = syncOffsetFromPresentation(width: width)
+            logGeometry(event: "began", currentOffset: startOffset)
             onBegan(startOffset)
         case .changed:
             applyOffset(rubberBand(startOffset + translation, width: width), notify: false)
         case .ended:
             let current = (startOffset + translation).clamped(to: 0...width)
             let target = targetForEnd(startOffset: startOffset, current: current, velocity: velocity, width: width)
+            logGeometry(event: "end target=\(target == .open ? "open" : "closed") velocity=\(Int(velocity))", currentOffset: current)
             settle(to: target, velocity: velocity, animated: true, notifyStart: true)
         case .cancelled, .failed:
             let target: SideDrawerTarget = offset > width * 0.5 ? .open : .closed
@@ -473,6 +478,8 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
     }
 
     private func settle(to target: SideDrawerTarget, velocity: CGFloat, animated: Bool, notifyStart: Bool) {
+        animationGeneration &+= 1
+        let generation = animationGeneration
         let width = max(0, drawerWidth)
         let destination = target.offset(width: width)
         if notifyStart {
@@ -482,8 +489,10 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
             self.applyOffset(destination, notify: false)
         }
         let completion: (Bool) -> Void = { _ in
+            guard self.animationGeneration == generation else { return }
             self.offset = destination
             self.applyOffset(destination, notify: false)
+            self.logGeometry(event: "settled target=\(target == .open ? "open" : "closed")", currentOffset: destination)
             self.onSettled(target)
         }
         guard animated, !reduceMotion else {
@@ -521,9 +530,76 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
         dimControl.alpha = 0.20 * progress
         dimControl.isHidden = progress < 0.01
         dimControl.isUserInteractionEnabled = progress > 0.02
+        logBlackElementIfSuspicious(progress: progress, drawerX: drawerX, width: width, bounds: bounds)
         if notify {
             onBegan(clamped)
         }
+    }
+
+    private func syncOffsetFromPresentation(width: CGFloat) -> CGFloat {
+        let width = max(0, width)
+        guard width > 1 else {
+            offset = 0
+            return 0
+        }
+
+        let frame = drawerHost.view.layer.presentation()?.frame ?? drawerHost.view.frame
+        let visibleOffset: CGFloat
+        switch edge {
+        case .leading:
+            visibleOffset = frame.minX + width
+        case .trailing:
+            visibleOffset = view.bounds.width - frame.minX
+        }
+        let current = visibleOffset.clamped(to: 0...width)
+        drawerHost.view.layer.removeAllAnimations()
+        mainHost.view.layer.removeAllAnimations()
+        dimControl.layer.removeAllAnimations()
+        applyOffset(current, notify: false)
+        return current
+    }
+
+    private func logGeometry(event: String, currentOffset: CGFloat) {
+        let width = max(0, drawerWidth)
+        let clamped = width <= 0 ? 0 : currentOffset.clamped(to: 0...width)
+        let drawerX = Int(drawerHost.view.frame.minX)
+        let drawerW = Int(drawerHost.view.frame.width)
+        let boundsW = Int(view.bounds.width)
+        let progress = width <= 1 ? 0 : clamped / width
+        VCLog.log(
+            "drawer-geo",
+            "event=\(event) edge=\(edge == .leading ? "leading" : "trailing") movesMain=\(movesMain) off=\(Int(clamped))/\(Int(width)) progress=\(String(format: "%.2f", progress)) drawerX=\(drawerX) drawerW=\(drawerW) boundsW=\(boundsW) dim=\(String(format: "%.2f", dimControl.alpha))"
+        )
+    }
+
+    private func logBlackElementIfSuspicious(progress: CGFloat, drawerX: CGFloat, width: CGFloat, bounds: CGRect) {
+        guard progress > 0.08, width > 1, bounds.width > 1 else { return }
+        let visibleWidth: CGFloat
+        switch edge {
+        case .leading:
+            visibleWidth = (drawerX + width).clamped(to: 0...width)
+        case .trailing:
+            visibleWidth = (bounds.width - drawerX).clamped(to: 0...width)
+        }
+
+        let expectedVisible = width * progress
+        let visibleMismatch = abs(visibleWidth - expectedVisible) > max(18, width * 0.18)
+        let dimWithoutDrawer = dimControl.alpha > 0.03 && visibleWidth < 10
+        let invalidFrame =
+            drawerHost.view.frame.width < width - 1 ||
+            drawerHost.view.frame.height < bounds.height - 1 ||
+            drawerHost.view.frame.minX.isNaN ||
+            drawerHost.view.frame.minY.isNaN
+
+        guard visibleMismatch || dimWithoutDrawer || invalidFrame else { return }
+        let now = Date().timeIntervalSince1970
+        guard now - lastBlackDiagnosticAt > 0.12 else { return }
+        lastBlackDiagnosticAt = now
+
+        VCLog.log(
+            "drawer-black",
+            "edge=\(edge == .leading ? "leading" : "trailing") reason[mismatch=\(visibleMismatch) dimNoDrawer=\(dimWithoutDrawer) invalidFrame=\(invalidFrame)] progress=\(String(format: "%.2f", progress)) visible=\(Int(visibleWidth)) expected=\(Int(expectedVisible)) drawerFrame=(\(Int(drawerHost.view.frame.minX)),\(Int(drawerHost.view.frame.minY)),\(Int(drawerHost.view.frame.width)),\(Int(drawerHost.view.frame.height))) bounds=(\(Int(bounds.width)),\(Int(bounds.height))) dimAlpha=\(String(format: "%.2f", dimControl.alpha)) dimHidden=\(dimControl.isHidden) drawerHidden=\(drawerHost.view.isHidden) drawerAlpha=\(String(format: "%.2f", drawerHost.view.alpha)) mainSubviews=\(mainHost.view.subviews.count) drawerSubviews=\(drawerHost.view.subviews.count)"
+        )
     }
 
     private func targetForEnd(startOffset: CGFloat, current: CGFloat, velocity: CGFloat, width: CGFloat) -> SideDrawerTarget {
@@ -564,43 +640,52 @@ final class SideDrawerUIKitController: UIViewController, UIGestureRecognizerDele
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === panRecognizer,
-              isGestureEnabled,
-              drawerWidth > 1,
               let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
 
         let translation = pan.translation(in: view)
         let velocity = pan.velocity(in: view)
         let normalizedX = normalizedTranslation(translation.x)
         let normalizedVelocity = normalizedTranslation(velocity.x)
-        let horizontal =
-            (abs(translation.x) >= 8 && abs(translation.x) >= abs(translation.y) * 0.75) ||
-            (abs(velocity.x) >= 220 && abs(velocity.x) >= abs(velocity.y) * 0.80)
-        guard horizontal else { return false }
-
         let width = max(1, drawerWidth)
         let clamped = offset.clamped(to: 0...width)
         let isClosed = clamped <= 1
         let isOpen = clamped >= width - 1
-        if !isClosed && !isOpen { return true }
+        let locationX = pan.location(in: view).x
+        let decide: (Bool, String) -> Bool = { allow, reason in
+            VCLog.log(
+                "drawer-gesture",
+                "shouldBegin=\(allow ? "YES" : "NO") reason=\(reason) edge=\(self.edge == .leading ? "leading" : "trailing") loc=\(Int(locationX)) t=(\(Int(translation.x)),\(Int(translation.y))) v=(\(Int(velocity.x)),\(Int(velocity.y))) nx=\(Int(normalizedX)) nv=\(Int(normalizedVelocity)) off=\(Int(clamped))/\(Int(width)) closed=\(isClosed) open=\(isOpen) navBack=\(self.navigationCanGoBack) full=\(self.fullScreenOpenEnabled)"
+            )
+            return allow
+        }
+
+        guard isGestureEnabled else { return decide(false, "disabled") }
+        guard drawerWidth > 1 else { return decide(false, "zero-width") }
+
+        let horizontal =
+            (abs(translation.x) >= 8 && abs(translation.x) >= abs(translation.y) * 0.75) ||
+            (abs(velocity.x) >= 220 && abs(velocity.x) >= abs(velocity.y) * 0.80)
+        guard horizontal else { return decide(false, "not-horizontal") }
+
+        if !isClosed && !isOpen { return decide(true, "mid-transition") }
 
         if isClosed {
-            guard !navigationCanGoBack else { return false }
-            guard normalizedX > 0 || normalizedVelocity > 0 else { return false }
-            guard !fullScreenOpenEnabled else { return true }
-            let locationX = pan.location(in: view).x
+            guard !navigationCanGoBack else { return decide(false, "nav-can-go-back") }
+            guard normalizedX > 0 || normalizedVelocity > 0 else { return decide(false, "closed-wrong-direction") }
+            guard !fullScreenOpenEnabled else { return decide(true, "closed-fullscreen") }
             switch edge {
             case .leading:
-                return locationX <= edgeActivationWidth
+                return decide(locationX <= edgeActivationWidth, "closed-leading-edge")
             case .trailing:
-                return locationX >= view.bounds.width - edgeActivationWidth
+                return decide(locationX >= view.bounds.width - edgeActivationWidth, "closed-trailing-edge")
             }
         }
 
         if isOpen {
-            return normalizedX < 0 || normalizedVelocity < -120
+            return decide(normalizedX < 0 || normalizedVelocity < -120, "open-close-direction")
         }
 
-        return false
+        return decide(false, "fallback")
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -835,6 +920,7 @@ struct VoiceChatTabView: View {
     @State private var renameTarget: VCChatMeta? = nil
     @State private var chatComposerFocused = false
     @State private var terminalMode = true
+    @State private var terminalMountReady = true
     @State private var terminalComposerFocused = false
     @State private var allChatsSearchActive = false
 
@@ -890,8 +976,10 @@ struct VoiceChatTabView: View {
             consumePending()
             router.pagingLocked = pagingShouldLock
             router.chatKeyboardUp = textInputActive
+            recordSurfaceBreadcrumb("appear", log: true)
         }
         .onDisappear {
+            recordSurfaceBreadcrumb("disappear", log: true)
             router.pagingLocked = false
             router.chatKeyboardUp = false
         }
@@ -903,12 +991,30 @@ struct VoiceChatTabView: View {
                 consumePending()
                 router.pagingLocked = pagingShouldLock
                 router.chatKeyboardUp = textInputActive
+                recordSurfaceBreadcrumb("root-selected-chat", log: true)
             } else {
+                recordSurfaceBreadcrumb("root-left-chat-to-\(sel.rawValue)", log: true)
                 router.pagingLocked = false   // never freeze paging on another tab
                 router.chatKeyboardUp = false // and always restore the bar off-chat
             }
         }
+        .onChange(of: terminalMode) { _, value in
+            recordSurfaceBreadcrumb("terminalMode=\(value)", log: true)
+        }
+        .onChange(of: showingAllChats) { _, value in
+            recordSurfaceBreadcrumb("showingAllChats=\(value)", log: true)
+        }
+        .onChange(of: selectedChatId) { _, value in
+            recordSurfaceBreadcrumb("selectedChat=\(shortID(value))", log: true)
+        }
+        .onChange(of: terminal.selectedProject?.id) { _, value in
+            recordSurfaceBreadcrumb("terminalProject=\(shortID(value))", log: true)
+        }
+        .onChange(of: terminal.selectedTab?.tabId) { _, value in
+            recordSurfaceBreadcrumb("terminalTab=\(shortID(value))", log: true)
+        }
         .onChange(of: scenePhase) { _, p in
+            CrashBreadcrumbs.mark("voice-chat scene=\(p) \(surfaceState())")
             if p == .active {
                 store.start()
                 terminal.start()
@@ -980,11 +1086,17 @@ struct VoiceChatTabView: View {
                              onSelectChat: @escaping (String) -> Void,
                              onNewChat: @escaping () -> Void) -> some View {
         if terminalMode {
-            TerminalControlRootView(
-                onShowHistory: onShowSidebar,
-                onComposerFocusChange: { focused in terminalComposerFocused = focused },
-                swipeBackEnabled: !terminalComposerFocused
-            )
+            if terminalMountReady {
+                TerminalControlRootView(
+                    onShowHistory: onShowSidebar,
+                    onComposerFocusChange: { focused in terminalComposerFocused = focused },
+                    swipeBackEnabled: !terminalComposerFocused
+                )
+            } else {
+                VCPageBackground
+                    .ignoresSafeArea()
+                    .onAppear { releaseTerminalMountAfterChatTeardown() }
+            }
         } else if showingAllChats {
             AllChatsView(
                 selectedChatId: selectedChatId,
@@ -1017,6 +1129,50 @@ struct VoiceChatTabView: View {
         switch target {
         case .closed: return "closed"
         case .open: return "open"
+        }
+    }
+
+    private func drawerPhaseLabel(_ phase: HistoryDrawerPhase) -> String {
+        switch phase {
+        case .closed: return "closed"
+        case .draggingOpen: return "dragging-open"
+        case .open: return "open"
+        case .draggingClosed: return "dragging-closed"
+        case .settling(let target): return "settling-\(drawerTargetLabel(target))"
+        }
+    }
+
+    private func shortID(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "nil" }
+        return String(value.suffix(8))
+    }
+
+    private func surfaceState() -> String {
+        let terminalTabId = terminal.selectedTab?.tabId ?? terminal.selectedTab?.id
+        let terminalTool = terminal.selectedTab?.effectiveToolType ?? "nil"
+        return "mode=\(terminalMode ? "terminal" : "chat") allChats=\(showingAllChats) chat=\(shortID(selectedChatId)) drawer=\(drawerPhaseLabel(drawerPhase)) drawerOff=\(Int(drawerOffset)) termProject=\(shortID(terminal.selectedProject?.id)) termTab=\(shortID(terminalTabId)) termTool=\(terminalTool) termCanBack=\(terminal.canStepBack)"
+    }
+
+    private func recordSurfaceBreadcrumb(_ reason: String, log: Bool = false) {
+        CrashBreadcrumbs.mark("voice-surface \(reason) \(surfaceState())", log: log)
+    }
+
+    private func armDeferredTerminalMount() {
+        guard !terminalMode else {
+            terminalMountReady = true
+            return
+        }
+        terminalMountReady = false
+        CrashBreadcrumbs.mark("voice-surface terminal-mount armed \(surfaceState())", log: true)
+    }
+
+    private func releaseTerminalMountAfterChatTeardown() {
+        CrashBreadcrumbs.mark("voice-surface terminal-placeholder appear \(surfaceState())", log: true)
+        Task { @MainActor in
+            await Task.yield()
+            guard terminalMode, !terminalMountReady else { return }
+            CrashBreadcrumbs.mark("voice-surface terminal-placeholder release \(surfaceState())", log: true)
+            terminalMountReady = true
         }
     }
 
@@ -1224,30 +1380,38 @@ struct VoiceChatTabView: View {
     }
 
     private func applyDrawerCloseAction(_ action: DrawerCloseAction) {
+        CrashBreadcrumbs.mark("drawer-action begin \(action.label) \(surfaceState())", log: true)
         switch action {
         case .startNewChat:
             selectedChatId = nil
             draftToken = UUID()
             showingAllChats = false
+            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .selectChat(let id):
             selectedChatId = id
             draftToken = UUID()
             showingAllChats = false
+            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .showAllChats:
             showingAllChats = true
+            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .showTerminal:
+            dismissChatKeyboard()
             showingAllChats = false
+            armDeferredTerminalMount()
             terminalMode = true
         case .showChat:
             terminalComposerFocused = false
+            terminalMountReady = true
             terminalMode = false
         }
+        CrashBreadcrumbs.mark("drawer-action end \(action.label) \(surfaceState())", log: true)
     }
 
     private func waitForDrawerOpenBeforeSurfaceSwap(width: CGFloat) async {
@@ -1263,6 +1427,7 @@ struct VoiceChatTabView: View {
     }
 
     private func startNewChat(closeWidth width: CGFloat?) {
+        CrashBreadcrumbs.mark("drawer-tap new-chat \(surfaceState())", log: true)
         if let width {
             closeHistory(width: width, after: .startNewChat)
         } else {
@@ -1272,6 +1437,7 @@ struct VoiceChatTabView: View {
     }
 
     private func selectChat(_ id: String, closeWidth width: CGFloat?) {
+        CrashBreadcrumbs.mark("drawer-tap select-chat chat=\(shortID(id)) \(surfaceState())", log: true)
         if let width {
             closeHistory(width: width, after: .selectChat(id))
         } else {
@@ -1281,6 +1447,7 @@ struct VoiceChatTabView: View {
     }
 
     private func showAllChats(closeWidth width: CGFloat?) {
+        CrashBreadcrumbs.mark("drawer-tap all-chats \(surfaceState())", log: true)
         if let width {
             closeHistory(width: width, after: .showAllChats)
         } else {
@@ -1290,20 +1457,10 @@ struct VoiceChatTabView: View {
     }
 
     private func openTerminal(closeWidth width: CGFloat?) {
+        CrashBreadcrumbs.mark("drawer-tap terminal \(surfaceState())", log: true)
         dismissChatKeyboard()
         if let width {
-            Task { @MainActor in
-                // If the Terminal row is tapped while the drawer is still settling
-                // open, do NOT mount the Terminal root in that same frame window.
-                // That was the new first-open hitch: `drag surface=chat` absorbed the
-                // terminalMode mount. Wait for the drawer-open monitor to finish,
-                // then pre-mount behind the now-static drawer before closing it.
-                await waitForDrawerOpenBeforeSurfaceSwap(width: width)
-                showingAllChats = false
-                terminalMode = true
-                try? await Task.sleep(for: .milliseconds(120))
-                closeHistory(width: width)
-            }
+            closeHistory(width: width, after: .showTerminal)
         } else {
             applyDrawerCloseAction(.showTerminal)
             resetDrawerClosed()
@@ -1314,16 +1471,11 @@ struct VoiceChatTabView: View {
     // (selectedChatId is preserved, so we land on the last open chat / new chat);
     // otherwise enter Terminal mode.
     private func toggleTerminal(closeWidth width: CGFloat?) {
+        CrashBreadcrumbs.mark("drawer-tap terminal-toggle fromTerminal=\(terminalMode) \(surfaceState())", log: true)
         if terminalMode {
             dismissChatKeyboard()
             if let width {
-                Task { @MainActor in
-                    await waitForDrawerOpenBeforeSurfaceSwap(width: width)
-                    terminalComposerFocused = false
-                    terminalMode = false
-                    try? await Task.sleep(for: .milliseconds(120))
-                    closeHistory(width: width)
-                }
+                closeHistory(width: width, after: .showChat)
             } else {
                 applyDrawerCloseAction(.showChat)
                 resetDrawerClosed()
@@ -1335,10 +1487,12 @@ struct VoiceChatTabView: View {
 
     private func consumePending() {
         guard let req = router.pendingChatRequest, handledSeq != req.seq else { return }
+        CrashBreadcrumbs.mark("consume-pending-chat chat=\(shortID(req.chatId)) \(surfaceState())", log: true)
         handledSeq = req.seq
         selectedChatId = req.chatId
         draftToken = UUID()
         showingAllChats = false
+        terminalMountReady = true
         terminalMode = false
         terminalComposerFocused = false
         resetDrawerClosed()
@@ -1853,6 +2007,12 @@ struct ChatDetailView: View {
         _chatId = State(initialValue: initialChatId)
     }
 
+    private var chatCrashState: String {
+        let id = chatId.map { String($0.suffix(8)) } ?? "nil"
+        let messageCount = conv?.messages.count ?? 0
+        return "id=\(id) messages=\(messageCount) displayed=\(displayedMessages.count) input=\(input.count) running=\(effectiveRunning) focus=\(composerFocused)"
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -2026,14 +2186,17 @@ struct ChatDetailView: View {
         .toolbarBackground(VCHeaderBackground, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .onAppear {
+            CrashBreadcrumbs.mark("chat-detail appear \(chatCrashState)", log: true)
             VoiceChatConfig.ensureMobileModelPresetDefaults()
             store.setActiveComposer(chatId: chatId)
             consumePendingDictationInsert()
         }
         .onDisappear {
+            CrashBreadcrumbs.mark("chat-detail disappear begin \(chatCrashState)", log: true)
             onComposerFocusChange(false)
             store.clearActiveComposer(chatId: chatId)
             autoSendArmed = false   // arming is ephemeral to this composer surface
+            CrashBreadcrumbs.mark("chat-detail disappear end \(chatCrashState)", log: true)
         }
         .task {
             if let id = initialChatId, let conv = await store.loadConversation(id), let b = conv.bypass {
@@ -2224,7 +2387,21 @@ struct ChatDetailView: View {
 
     private func keyboardLift(in geo: GeometryProxy) -> CGFloat {
         let baseline = baseBottomInset > 0 ? baseBottomInset : geo.safeAreaInsets.bottom
-        return keyboardVisible ? max(0, keyboardHeight - baseline) : 0
+        guard keyboardVisible else { return 0 }
+        let manualLift = max(0, keyboardHeight - baseline)
+        // In a few NavigationStack/keyboard combinations SwiftUI already shrinks
+        // the hosted page above the keyboard despite the outer ignoresSafeArea.
+        // Applying the full manual lift on top of that sends the composer almost
+        // to the top of the screen. Subtract the lift that the container already
+        // received; if there was none, this stays the old manual path.
+        return max(0, manualLift - automaticKeyboardLiftAlreadyApplied())
+    }
+
+    private func automaticKeyboardLiftAlreadyApplied() -> CGFloat {
+        guard let view = hostViewBox.view, let window = view.window else { return 0 }
+        let frame = view.convert(view.bounds, to: window)
+        guard frame.height > 1, window.bounds.height > 1 else { return 0 }
+        return max(0, window.bounds.maxY - frame.maxY)
     }
 
     private func rememberBaseBottomInset(_ inset: CGFloat) {
@@ -2251,9 +2428,14 @@ struct ChatDetailView: View {
 
         let sourceScreen = (note.object as? UIScreen) ?? window.screen
         let keyboardFrameInWindow = window.convert(endFrame, from: sourceScreen.coordinateSpace)
-        let intersection = window.bounds.intersection(keyboardFrameInWindow)
-        let height = intersection.isNull || intersection.isEmpty ? 0 : intersection.height
-        let visible = height > 0.5
+        let windowIntersection = window.bounds.intersection(keyboardFrameInWindow)
+        let windowHeight = windowIntersection.isNull || windowIntersection.isEmpty ? 0 : windowIntersection.height
+        let keyboardFrameInView = view.convert(endFrame, from: sourceScreen.coordinateSpace)
+        let viewIntersection = view.bounds.intersection(keyboardFrameInView)
+        let viewHeight = viewIntersection.isNull || viewIntersection.isEmpty ? 0 : viewIntersection.height
+        let visible = max(windowHeight, viewHeight) > 0.5
+        let height = visible ? max(windowHeight, viewHeight) : 0
+        let alreadyApplied = automaticKeyboardLiftAlreadyApplied()
         // App-owned dismiss already animated the collapse: swallow the redundant
         // system HIDE frame (a SHOW must always pass through so opening animates).
         if !visible, Date() < suppressSystemKeyboardHideUntil {
@@ -2270,10 +2452,10 @@ struct ChatDetailView: View {
             keyboardVisible = visible
         }
         let baseline = baseBottomInset
-        let lift = visible ? max(0, height - baseline) : 0
+        let lift = visible ? max(0, height - baseline - alreadyApplied) : 0
         VCLog.log(
             "Keyboard",
-            "frameEnd=\(endFrame.vcDebug) inWindow=\(keyboardFrameInWindow.vcDebug) window=\(window.bounds.vcDebug) reader=\(view.bounds.vcDebug) safeBase=\(Int(baseline)) height=\(Int(height)) lift=\(Int(lift)) visible=\(visible) curve=\(note.vcKeyboardCurveDebug)"
+            "frameEnd=\(endFrame.vcDebug) inWindow=\(keyboardFrameInWindow.vcDebug) inView=\(keyboardFrameInView.vcDebug) window=\(window.bounds.vcDebug) reader=\(view.bounds.vcDebug) safeBase=\(Int(baseline)) height=\(Int(height)) autoLift=\(Int(alreadyApplied)) lift=\(Int(lift)) visible=\(visible) curve=\(note.vcKeyboardCurveDebug)"
             + " anim=\(note.vcKeyboardAnimationDebug(opening: visible))"
         )
     }

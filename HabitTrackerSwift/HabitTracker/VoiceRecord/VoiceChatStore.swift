@@ -523,6 +523,73 @@ enum VCLog {
     }
 }
 
+enum CrashBreadcrumbs {
+    private static let runningKey = "ios.crashTrail.running"
+    private static let sessionKey = "ios.crashTrail.session"
+    private static let sceneKey = "ios.crashTrail.scene"
+    private static let startedKey = "ios.crashTrail.startedAt"
+    private static let breadcrumbsKey = "ios.crashTrail.lines"
+    private static let reportedSessionKey = "ios.crashTrail.reportedSession"
+    private static let maxLines = 60
+    nonisolated(unsafe) private static var didStartCurrentProcess = false
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
+    }()
+
+    private static var defaults: UserDefaults { AppGroupContainer.defaults }
+
+    static func appStarted() {
+        guard !didStartCurrentProcess else { return }
+        didStartCurrentProcess = true
+        let previousRunning = defaults.bool(forKey: runningKey)
+        let previousSession = defaults.string(forKey: sessionKey) ?? "unknown"
+        let previousScene = defaults.string(forKey: sceneKey) ?? "unknown"
+        let reported = defaults.string(forKey: reportedSessionKey)
+        let previousLines = defaults.stringArray(forKey: breadcrumbsKey) ?? []
+        if previousRunning, previousScene != "background", reported != previousSession {
+            let started = defaults.double(forKey: startedKey)
+            let startedText = started > 0 ? String(format: "%.0f", started) : "-"
+            VCLog.log(
+                "CrashTrail",
+                "previous run ended unexpectedly session=\(previousSession) scene=\(previousScene) started=\(startedText) last=[\(previousLines.suffix(16).joined(separator: " | "))]"
+            )
+            defaults.set(previousSession, forKey: reportedSessionKey)
+        }
+
+        let session = UUID().uuidString
+        defaults.set(session, forKey: sessionKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: startedKey)
+        defaults.set("active", forKey: sceneKey)
+        defaults.set(true, forKey: runningKey)
+        defaults.set([], forKey: breadcrumbsKey)
+        defaults.synchronize()
+        mark("app-start session=\(String(session.prefix(8)))")
+    }
+
+    static func scenePhase(_ phase: ScenePhase) {
+        let label: String
+        switch phase {
+        case .active: label = "active"
+        case .inactive: label = "inactive"
+        case .background: label = "background"
+        @unknown default: label = "unknown"
+        }
+        defaults.set(label, forKey: sceneKey)
+        defaults.set(phase != .background, forKey: runningKey)
+        mark("scene=\(label)")
+    }
+
+    static func mark(_ message: String, log: Bool = false) {
+        var lines = defaults.stringArray(forKey: breadcrumbsKey) ?? []
+        let line = stamp.string(from: Date()) + " " + message
+        lines.append(line)
+        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+        defaults.set(lines, forKey: breadcrumbsKey)
+        defaults.synchronize()
+        if log { VCLog.log("CrashTrail", message) }
+    }
+}
+
 // MARK: - Store
 
 @MainActor
@@ -766,6 +833,7 @@ final class VoiceChatStore: ObservableObject {
 
     @discardableResult
     func loadConversation(_ id: String) async -> VCConversation? {
+        CrashBreadcrumbs.mark("chat-load begin id=\(String(id.suffix(8))) cachedMessages=\(conversations[id]?.messages.count ?? 0)")
         do {
             let conv: VCConversation = try await VoiceChatAPI.getJSON("/api/chats/" + id)
             conversations[id] = conv
@@ -789,6 +857,7 @@ final class VoiceChatStore: ObservableObject {
             }
             mergeConfirms(chatId: id, fromServer: conv.pendingConfirms ?? [])
             offline = false
+            CrashBreadcrumbs.mark("chat-load done id=\(String(id.suffix(8))) messages=\(conv.messages.count) running=\(conv.running == true)", log: true)
             return conv
         } catch {
             // 404 = the chat no longer exists (e.g. a first-message Stop unwound
@@ -798,9 +867,11 @@ final class VoiceChatStore: ObservableObject {
                 conversations[id] = nil
                 running.remove(id)
                 confirms[id] = []
+                CrashBreadcrumbs.mark("chat-load 404 id=\(String(id.suffix(8)))", log: true)
                 return nil
             }
             VCLog.log("Store", "loadConversation FAILED id=\(id.suffix(8)): \(error.localizedDescription)")
+            CrashBreadcrumbs.mark("chat-load failed id=\(String(id.suffix(8))) err=\(error.localizedDescription)", log: true)
             markOfflineIfConnectionError(error)
             return nil
         }

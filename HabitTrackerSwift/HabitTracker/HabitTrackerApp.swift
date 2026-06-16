@@ -52,11 +52,13 @@ struct HabitTrackerApp: App {
                 .preferredColorScheme(.dark)
                 .onOpenURL { url in router.handle(url: url) }
                 .task {
+                    CrashBreadcrumbs.appStarted()
                     MainThreadWatchdog.start()
                     router.consumeVoiceTabFlagIfSet()
                     TerminalControlStore.shared.start()
                 }
                 .onChange(of: scenePhase) { _, newPhase in
+                    CrashBreadcrumbs.scenePhase(newPhase)
                     if newPhase == .active {
                         router.consumeVoiceTabFlagIfSet()
                         TerminalControlStore.shared.start()
