@@ -1296,7 +1296,6 @@ final class TerminalControlStore {
                let live = project.liveSdkCount,
                live > 0 {
                 count += live
-                streaming = true
                 continue
             }
 
@@ -1304,7 +1303,7 @@ final class TerminalControlStore {
                 let rawId = tab.tabId ?? tab.id
                 guard seen.insert(rawId).inserted else { continue }
                 let status = tab.tabId.flatMap { statusByTab[$0] } ?? tab.sessionStatus ?? "inactive"
-                if status == "busy" || status == "running" {
+                if status == "active" || status == "busy" || status == "running" || runningTabs.contains(rawId) {
                     count += 1
                 }
                 if status == "busy" || status == "running" || runningTabs.contains(rawId) {

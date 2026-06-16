@@ -51,6 +51,7 @@ git grep -E 'recordingtape|isLong|longActive|toggleLong|LongAudioFileWriter' HEA
 - **Не делать on-device Wake-on-LAN для пробуждения Mac — пробовали, отклонили.** Unicast-magic-packet будит только ~5 мин после засыпания (потом ARP-запись истекает, кадр дропается), broadcast закрыт `multicast`-entitlement'ом (недоступен free Apple ID), sleep-proxy нет. Фичу удалили, юзер выбрал «не усыплять Mac». Надёжный wake потребовал бы always-on relay в LAN. Не переизобретать. См. `knowledge/fix-пробуждение-mac.md`.
 - **Не строить AI Chat history drawer на SwiftUI `DragGesture` / hidden `UIViewRepresentable` superview bridge.** Это root-level custom container transition, конкурирующий с `UIScrollView`, search/text input, iOS 26 back-swipe и tab bar. Compact iPhone drawer делается через `UIGestureRecognizerRepresentable` + кастомный `UIPanGestureRecognizer` с intent-lock и scroll arbitration; regular width — `NavigationSplitView`. См. `knowledge/fact-voice-chat-tab.md::History drawer gesture`.
 - **Не возвращать Terminal `projects/tabs/chat` навигацию на SwiftUI `.offset` / snapshot / bitmap overlay.** Для интерактивного back-swipe и стабильного scroll ownership граница уровней живёт в UIKit-owned container (`TerminalUIKitNavigationController` + `UITableView` для projects/tabs). См. `knowledge/fix-ios-stability.md::Terminal navigation jank`.
+- **Не ставить нижние floating/composer/FAB элементы без `bottomBarInset`.** Всё, что может оказаться у нижнего края экрана, поднимается над root glass tab bar через `bottomBarInset` + локальный gap; не хардкодить высоту нижней менюшки.
 
 ## Стандарт long-press (единый по проекту)
 
@@ -75,6 +76,8 @@ Wireless через WiFi, USB не нужен. Сертификат беспла
 ## Логирование (AI Chat)
 
 Нативный чат (`VoiceChatStore.swift::VCLog`) шлёт свои debug-строки на Mac: батч каждые ~3 сек → `POST /api/log` voice-record'а → **`~/Library/Logs/voice-record/ios-chat.log`** (НА МАКЕ, не на телефоне). Параллельно последние строки лежат в локальном буфере телефона: AI Chat Settings → Diagnostics → Show debug log / Copy. Теги: `[SSE]`, `[Store]`, `[Confirm]`, `[Keyboard]`. Дебаг чата = grep `ios-chat.log` рядом с `voice-record.log` + при UI/keyboard багах копия локального лога из settings. Новые подозрительные точки в чате логируй через `VCLog.log(tag, msg)` — попадут в оба места.
+
+Verbose terminal scroll logs are gated by `TerminalControlUI.swift::CTVerboseScrollLogging` and must stay `false` unless reproducing a scroll bug.
 
 ## Документация
 

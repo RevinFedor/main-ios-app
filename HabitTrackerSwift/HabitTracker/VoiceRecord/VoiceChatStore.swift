@@ -598,6 +598,7 @@ final class VoiceChatStore: ObservableObject {
 
     @Published var chats: [VCChatMeta] = []
     @Published var conversations: [String: VCConversation] = [:]
+    @Published var loadingConversations: Set<String> = []
     // Chats with an in-flight turn RIGHT NOW. Union of the server's `running`
     // flags (truth, survives anything) and live SSE 'user'/'done' events
     // (immediacy between refreshes).
@@ -646,6 +647,7 @@ final class VoiceChatStore: ObservableObject {
 
     private var sseTask: Task<Void, Never>?
     private var sseWatchdog: Task<Void, Never>?
+    private var loadingConversationCounts: [String: Int] = [:]
     private var started = false
     // Last time ANY line (incl. `: hb` heartbeats every 25s) arrived on the SSE
     // stream. The zombie-socket detector: iOS freezes the socket in background
@@ -833,6 +835,8 @@ final class VoiceChatStore: ObservableObject {
 
     @discardableResult
     func loadConversation(_ id: String) async -> VCConversation? {
+        beginLoadingConversation(id)
+        defer { endLoadingConversation(id) }
         CrashBreadcrumbs.mark("chat-load begin id=\(String(id.suffix(8))) cachedMessages=\(conversations[id]?.messages.count ?? 0)")
         do {
             let conv: VCConversation = try await VoiceChatAPI.getJSON("/api/chats/" + id)
@@ -874,6 +878,21 @@ final class VoiceChatStore: ObservableObject {
             CrashBreadcrumbs.mark("chat-load failed id=\(String(id.suffix(8))) err=\(error.localizedDescription)", log: true)
             markOfflineIfConnectionError(error)
             return nil
+        }
+    }
+
+    private func beginLoadingConversation(_ id: String) {
+        loadingConversationCounts[id, default: 0] += 1
+        loadingConversations.insert(id)
+    }
+
+    private func endLoadingConversation(_ id: String) {
+        let next = max(0, (loadingConversationCounts[id] ?? 1) - 1)
+        if next == 0 {
+            loadingConversationCounts[id] = nil
+            loadingConversations.remove(id)
+        } else {
+            loadingConversationCounts[id] = next
         }
     }
 

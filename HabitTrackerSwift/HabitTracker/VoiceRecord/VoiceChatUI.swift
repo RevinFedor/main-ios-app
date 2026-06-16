@@ -18,6 +18,18 @@ import UIKit
 private let VCAccent = Color(hex: "7c3aed")
 private let VCPageBackground = Color(white: 0.055)
 private let VCHeaderBackground = Color(white: 0.055)
+private let VCVerboseKeyboardLogging = false
+private let VCVerboseBarLogging = false
+
+private func vcKeyboardLog(_ message: @autoclosure () -> String) {
+    guard VCVerboseKeyboardLogging else { return }
+    VCLog.log("Keyboard", message())
+}
+
+private func vcBarLog(_ message: @autoclosure () -> String) {
+    guard VCVerboseBarLogging else { return }
+    VCLog.log("bar", message())
+}
 
 private final class VCWeakViewBox: ObservableObject {
     weak var view: UIView?
@@ -920,7 +932,6 @@ struct VoiceChatTabView: View {
     @State private var renameTarget: VCChatMeta? = nil
     @State private var chatComposerFocused = false
     @State private var terminalMode = true
-    @State private var terminalMountReady = true
     @State private var terminalComposerFocused = false
     @State private var allChatsSearchActive = false
 
@@ -930,6 +941,10 @@ struct VoiceChatTabView: View {
 
     private var textInputActive: Bool {
         chatComposerFocused || terminalComposerFocused || allChatsSearchActive
+    }
+
+    private var rootBarShouldHide: Bool {
+        textInputActive || drawerPhase != .closed
     }
 
     // Coarse lock for the root pager: typing and the history drawer always own
@@ -960,22 +975,21 @@ struct VoiceChatTabView: View {
         // this surface, so the page-swipe must yield while any is active.
         .onChange(of: pagingShouldLock) { _, lock in
             router.pagingLocked = lock
-            VCLog.log("bar", "pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed) terminalChat=\(terminalMode && terminal.selectedTab != nil)]")
+            vcBarLog("pagingLocked=\(lock) reason[input=\(textInputActive) drawer=\(drawerPhase != .closed) terminalChat=\(terminalMode && terminal.selectedTab != nil)]")
         }
-        // Focus-driven bar hide: the moment the composer/search is focused, tell
-        // the root shell to slide its glass bar away (and back on blur). Synchronous
-        // with focus so the bar and the keyboard-lifted composer move together — no
-        // notification lag. Mirrors textInputActive; terminal composer included.
-        .onChange(of: textInputActive) { _, active in
-            router.chatKeyboardUp = active
-            VCLog.log("bar", "textInputActive=\(active) chatFocus=\(chatComposerFocused) termFocus=\(terminalComposerFocused) search=\(allChatsSearchActive)")
+        // Reuse the root-bar hide channel for both text input and the history
+        // drawer. While the drawer is open, the bottom bar would otherwise remain
+        // tappable above it, causing cross-tab taps through the history surface.
+        .onChange(of: rootBarShouldHide) { _, hide in
+            router.chatKeyboardUp = hide
+            vcBarLog("rootBarHide=\(hide) input=\(textInputActive) drawer=\(drawerPhase != .closed) chatFocus=\(chatComposerFocused) termFocus=\(terminalComposerFocused) search=\(allChatsSearchActive)")
         }
         .onAppear {
             store.start()
             terminal.start()
             consumePending()
             router.pagingLocked = pagingShouldLock
-            router.chatKeyboardUp = textInputActive
+            router.chatKeyboardUp = rootBarShouldHide
             recordSurfaceBreadcrumb("appear", log: true)
         }
         .onDisappear {
@@ -990,7 +1004,7 @@ struct VoiceChatTabView: View {
                 terminal.start()
                 consumePending()
                 router.pagingLocked = pagingShouldLock
-                router.chatKeyboardUp = textInputActive
+                router.chatKeyboardUp = rootBarShouldHide
                 recordSurfaceBreadcrumb("root-selected-chat", log: true)
             } else {
                 recordSurfaceBreadcrumb("root-left-chat-to-\(sel.rawValue)", log: true)
@@ -1047,14 +1061,11 @@ struct VoiceChatTabView: View {
                 onSettleStarted: { target, velocity in drawerSettleStarted(target: target, velocityX: velocity, width: drawerWidth) },
                 onSettled: { target in drawerSettled(target: target, width: drawerWidth) }
             ) {
-                NavigationStack {
-                    chatContent(
-                        onShowSidebar: { openHistory(width: drawerWidth) },
-                        onSelectChat: { id in selectChat(id, closeWidth: drawerWidth) },
-                        onNewChat: { startNewChat(closeWidth: drawerWidth) }
-                    )
-                }
-                .background(VCPageBackground.ignoresSafeArea())
+                voiceSurfaceContent(
+                    onShowSidebar: { openHistory(width: drawerWidth) },
+                    onSelectChat: { id in selectChat(id, closeWidth: drawerWidth) },
+                    onNewChat: { startNewChat(closeWidth: drawerWidth) }
+                )
             } drawer: {
                 historyDrawer(width: drawerWidth)
             }
@@ -1071,33 +1082,49 @@ struct VoiceChatTabView: View {
             historyDrawer(width: 340)
                 .frame(minWidth: 280, idealWidth: 340, maxWidth: 420)
         } detail: {
-            NavigationStack {
-                chatContent(
-                    onShowSidebar: {},
-                    onSelectChat: { id in selectChat(id, closeWidth: nil) },
-                    onNewChat: { startNewChat(closeWidth: nil) }
-                )
+            voiceSurfaceContent(
+                onShowSidebar: {},
+                onSelectChat: { id in selectChat(id, closeWidth: nil) },
+                onNewChat: { startNewChat(closeWidth: nil) }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func voiceSurfaceContent(onShowSidebar: @escaping () -> Void,
+                                     onSelectChat: @escaping (String) -> Void,
+                                     onNewChat: @escaping () -> Void) -> some View {
+        ZStack {
+            TerminalControlRootView(
+                onShowHistory: onShowSidebar,
+                onComposerFocusChange: { focused in terminalComposerFocused = focused },
+                swipeBackEnabled: !terminalComposerFocused
+            )
+            .opacity(terminalMode ? 1 : 0)
+            .allowsHitTesting(terminalMode)
+            .accessibilityHidden(!terminalMode)
+            .zIndex(terminalMode ? 2 : 0)
+
+            if !terminalMode {
+                NavigationStack {
+                    chatContent(
+                        onShowSidebar: onShowSidebar,
+                        onSelectChat: onSelectChat,
+                        onNewChat: onNewChat
+                    )
+                }
+                .background(VCPageBackground.ignoresSafeArea())
+                .zIndex(3)
             }
         }
+        .background(VCPageBackground.ignoresSafeArea())
     }
 
     @ViewBuilder
     private func chatContent(onShowSidebar: @escaping () -> Void,
                              onSelectChat: @escaping (String) -> Void,
                              onNewChat: @escaping () -> Void) -> some View {
-        if terminalMode {
-            if terminalMountReady {
-                TerminalControlRootView(
-                    onShowHistory: onShowSidebar,
-                    onComposerFocusChange: { focused in terminalComposerFocused = focused },
-                    swipeBackEnabled: !terminalComposerFocused
-                )
-            } else {
-                VCPageBackground
-                    .ignoresSafeArea()
-                    .onAppear { releaseTerminalMountAfterChatTeardown() }
-            }
-        } else if showingAllChats {
+        if showingAllChats {
             AllChatsView(
                 selectedChatId: selectedChatId,
                 onShowSidebar: onShowSidebar,
@@ -1155,25 +1182,6 @@ struct VoiceChatTabView: View {
 
     private func recordSurfaceBreadcrumb(_ reason: String, log: Bool = false) {
         CrashBreadcrumbs.mark("voice-surface \(reason) \(surfaceState())", log: log)
-    }
-
-    private func armDeferredTerminalMount() {
-        guard !terminalMode else {
-            terminalMountReady = true
-            return
-        }
-        terminalMountReady = false
-        CrashBreadcrumbs.mark("voice-surface terminal-mount armed \(surfaceState())", log: true)
-    }
-
-    private func releaseTerminalMountAfterChatTeardown() {
-        CrashBreadcrumbs.mark("voice-surface terminal-placeholder appear \(surfaceState())", log: true)
-        Task { @MainActor in
-            await Task.yield()
-            guard terminalMode, !terminalMountReady else { return }
-            CrashBreadcrumbs.mark("voice-surface terminal-placeholder release \(surfaceState())", log: true)
-            terminalMountReady = true
-        }
     }
 
     private func preferredDrawerWidth(in size: CGSize) -> CGFloat {
@@ -1383,88 +1391,67 @@ struct VoiceChatTabView: View {
         CrashBreadcrumbs.mark("drawer-action begin \(action.label) \(surfaceState())", log: true)
         switch action {
         case .startNewChat:
+            dismissChatKeyboard()
             selectedChatId = nil
             draftToken = UUID()
             showingAllChats = false
-            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .selectChat(let id):
+            dismissChatKeyboard()
             selectedChatId = id
             draftToken = UUID()
             showingAllChats = false
-            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .showAllChats:
+            dismissChatKeyboard()
             showingAllChats = true
-            terminalMountReady = true
             terminalMode = false
             terminalComposerFocused = false
         case .showTerminal:
             dismissChatKeyboard()
             showingAllChats = false
-            armDeferredTerminalMount()
             terminalMode = true
         case .showChat:
+            dismissChatKeyboard()
             terminalComposerFocused = false
-            terminalMountReady = true
             terminalMode = false
         }
         CrashBreadcrumbs.mark("drawer-action end \(action.label) \(surfaceState())", log: true)
     }
 
-    private func waitForDrawerOpenBeforeSurfaceSwap(width: CGFloat) async {
-        guard width > 0 else { return }
-        var waits = 0
-        while waits < 28 {
-            if case .open = drawerPhase { return }
-            if drawerOffset >= width - 2 && !scrollLockedByDrawer { return }
-            try? await Task.sleep(for: .milliseconds(20))
-            waits += 1
+    private func applyDrawerActionAndClose(_ action: DrawerCloseAction, closeWidth width: CGFloat?) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            applyDrawerCloseAction(action)
         }
-        VCLog.log("drawer", "surface swap wait timeout phase=\(drawerTargetLabel(drawerOffset > width * 0.5 ? .open : .closed)) off=\(Int(drawerOffset)) width=\(Int(width))")
+        if let width {
+            closeHistory(width: width)
+        } else {
+            resetDrawerClosed()
+        }
     }
 
     private func startNewChat(closeWidth width: CGFloat?) {
         CrashBreadcrumbs.mark("drawer-tap new-chat \(surfaceState())", log: true)
-        if let width {
-            closeHistory(width: width, after: .startNewChat)
-        } else {
-            applyDrawerCloseAction(.startNewChat)
-            resetDrawerClosed()
-        }
+        applyDrawerActionAndClose(.startNewChat, closeWidth: width)
     }
 
     private func selectChat(_ id: String, closeWidth width: CGFloat?) {
         CrashBreadcrumbs.mark("drawer-tap select-chat chat=\(shortID(id)) \(surfaceState())", log: true)
-        if let width {
-            closeHistory(width: width, after: .selectChat(id))
-        } else {
-            applyDrawerCloseAction(.selectChat(id))
-            resetDrawerClosed()
-        }
+        applyDrawerActionAndClose(.selectChat(id), closeWidth: width)
     }
 
     private func showAllChats(closeWidth width: CGFloat?) {
         CrashBreadcrumbs.mark("drawer-tap all-chats \(surfaceState())", log: true)
-        if let width {
-            closeHistory(width: width, after: .showAllChats)
-        } else {
-            applyDrawerCloseAction(.showAllChats)
-            resetDrawerClosed()
-        }
+        applyDrawerActionAndClose(.showAllChats, closeWidth: width)
     }
 
     private func openTerminal(closeWidth width: CGFloat?) {
         CrashBreadcrumbs.mark("drawer-tap terminal \(surfaceState())", log: true)
-        dismissChatKeyboard()
-        if let width {
-            closeHistory(width: width, after: .showTerminal)
-        } else {
-            applyDrawerCloseAction(.showTerminal)
-            resetDrawerClosed()
-        }
+        applyDrawerActionAndClose(.showTerminal, closeWidth: width)
     }
 
     // Drawer Terminal row tap. Toggle: in Terminal → back to the chat surface
@@ -1473,13 +1460,7 @@ struct VoiceChatTabView: View {
     private func toggleTerminal(closeWidth width: CGFloat?) {
         CrashBreadcrumbs.mark("drawer-tap terminal-toggle fromTerminal=\(terminalMode) \(surfaceState())", log: true)
         if terminalMode {
-            dismissChatKeyboard()
-            if let width {
-                closeHistory(width: width, after: .showChat)
-            } else {
-                applyDrawerCloseAction(.showChat)
-                resetDrawerClosed()
-            }
+            applyDrawerActionAndClose(.showChat, closeWidth: width)
         } else {
             openTerminal(closeWidth: width)
         }
@@ -1489,10 +1470,10 @@ struct VoiceChatTabView: View {
         guard let req = router.pendingChatRequest, handledSeq != req.seq else { return }
         CrashBreadcrumbs.mark("consume-pending-chat chat=\(shortID(req.chatId)) \(surfaceState())", log: true)
         handledSeq = req.seq
+        dismissChatKeyboard()
         selectedChatId = req.chatId
         draftToken = UUID()
         showingAllChats = false
-        terminalMountReady = true
         terminalMode = false
         terminalComposerFocused = false
         resetDrawerClosed()
@@ -1942,11 +1923,6 @@ struct ChatDetailView: View {
     // value with a different curve, or the composer bobbles "down→up→down". The
     // flag swallows that redundant second animation for a short window.
     @State private var suppressSystemKeyboardHideUntil: Date = .distantPast
-    // Measured height of the docked composer (input + tool row + any attachment/
-    // confirm strips). The bottom scroll sentinel is sized to THIS instead of a
-    // fixed 142, so the gap between the last message and the input is exact — no
-    // oversized dead space (the "слишком большой отступ" the user noticed).
-    @State private var composerDockHeight: CGFloat = 0
     @State private var optimisticMessages: [VCMessage] = []
     @State private var localSending = false
     // Auto-send arming: when true the trailing send button is a purple spinner
@@ -1978,6 +1954,7 @@ struct ChatDetailView: View {
     private var turnError: String? { chatId.flatMap { store.turnError[$0] } }
     private var pendingConfirms: [VCConfirmRequest] { chatId.flatMap { store.confirms[$0] } ?? [] }
     private var runningBgTasks: [VCBackgroundTask] { store.bgTasks.filter { $0.running } }
+    private var showsInitialChatSkeleton: Bool { chatId != nil && conv == nil }
     private var displayedMessages: [VCMessage] {
         let real = conv?.messages ?? []
         let pending = optimisticMessages.filter { local in
@@ -2024,48 +2001,48 @@ struct ChatDetailView: View {
                         } else {
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 10) {
-                                    if displayedMessages.isEmpty && conv == nil && chatId == nil {
+                                    if showsInitialChatSkeleton {
+                                        ChatLoadingSkeleton(chatFont: chatFont)
+                                            .padding(.top, 8)
+                                    } else if displayedMessages.isEmpty && conv == nil && chatId == nil {
                                         draftHint
                                     }
-                                    ForEach(displayedMessages) { msg in
-                                        MessageView(msg: msg, chatFont: chatFont, onPreviewAttachment: openGtPreview)
-                                            .id(msg.id)
-                                    }
-                                    // Live tool cards of the in-flight turn.
-                                    ForEach(liveTools) { tc in
-                                        ToolCardView(tool: tc, chatFont: chatFont, defaultOpen: tc.isRunning || tc.isError)
-                                    }
-                                    if let err = turnError {
-                                        Text(err)
-                                            .font(.system(size: chatFont - 2))
-                                            .foregroundStyle(Color(hex: "f87171"))
-                                            .padding(.horizontal, 10)
-                                    }
-                                    if effectiveRunning {
-                                        HStack(spacing: 8) {
-                                            ProgressView().controlSize(.small).tint(VCAccent)
-                                            Text(localSending && liveTools.isEmpty ? "отправляю…" : (liveTools.isEmpty ? "думаю…" : "агент работает…"))
-                                                .font(.system(size: chatFont - 2)).foregroundStyle(.secondary)
-                                            // Elapsed derives from the store's turn START time,
-                                            // not a local counter — surviving tab switches and
-                                            // remounts (the "секундомер сбрасывается" bug).
-                                            // `secs` is only the 1Hz re-render tick.
-                                            if let t0 = chatId.flatMap({ store.turnStartedAt[$0] }) {
-                                                let _ = secs
-                                                Text("\(max(0, Int(Date().timeIntervalSince(t0))))s")
-                                                    .font(.system(size: chatFont - 3).monospacedDigit())
-                                                    .foregroundStyle(.secondary.opacity(0.7))
-                                            }
+                                    if !showsInitialChatSkeleton {
+                                        ForEach(displayedMessages) { msg in
+                                            MessageView(msg: msg, chatFont: chatFont, onPreviewAttachment: openGtPreview)
+                                                .id(msg.id)
                                         }
-                                        .padding(.horizontal, 10).padding(.vertical, 4)
+                                        // Live tool cards of the in-flight turn.
+                                        ForEach(liveTools) { tc in
+                                            ToolCardView(tool: tc, chatFont: chatFont, defaultOpen: tc.isRunning || tc.isError)
+                                        }
+                                        if let err = turnError {
+                                            Text(err)
+                                                .font(.system(size: chatFont - 2))
+                                                .foregroundStyle(Color(hex: "f87171"))
+                                                .padding(.horizontal, 10)
+                                        }
+                                        if effectiveRunning {
+                                            HStack(spacing: 8) {
+                                                ProgressView().controlSize(.small).tint(VCAccent)
+                                                Text(localSending && liveTools.isEmpty ? "отправляю…" : (liveTools.isEmpty ? "думаю…" : "агент работает…"))
+                                                    .font(.system(size: chatFont - 2)).foregroundStyle(.secondary)
+                                                // Elapsed derives from the store's turn START time,
+                                                // not a local counter — surviving tab switches and
+                                                // remounts (the "секундомер сбрасывается" bug).
+                                                // `secs` is only the 1Hz re-render tick.
+                                                if let t0 = chatId.flatMap({ store.turnStartedAt[$0] }) {
+                                                    let _ = secs
+                                                    Text("\(max(0, Int(Date().timeIntervalSince(t0))))s")
+                                                        .font(.system(size: chatFont - 3).monospacedDigit())
+                                                        .foregroundStyle(.secondary.opacity(0.7))
+                                                }
+                                            }
+                                            .padding(.horizontal, 10).padding(.vertical, 4)
+                                        }
                                     }
-                                    // Sentinel = real composer height (measured) +
-                                    // a small gap, so the last message sits just
-                                    // above the input. The composer is lifted by
-                                    // bottomBarInset when the keyboard is down, so
-                                    // include that; fall back to 132 until measured.
                                     Color.clear
-                                        .frame(height: (composerDockHeight > 1 ? composerDockHeight : 132) + bottomBarInset + 12)
+                                        .frame(height: 12)
                                         .id("BOTTOM")
                                 }
                                 .padding(.horizontal, 8)
@@ -2093,16 +2070,8 @@ struct ChatDetailView: View {
                             .onChange(of: pendingConfirms.count) { _, _ in pin(proxy) }
                         }
                     }
-                    .overlay(alignment: .bottom) {
-                        composerDock(proxy: proxy, keyboardLift: keyboardLift(in: geo))
-                            .background(
-                                GeometryReader { p in
-                                    Color.clear.preference(key: ComposerDockHeightKey.self, value: p.size.height)
-                                }
-                            )
-                    }
-                    .onPreferenceChange(ComposerDockHeightKey.self) { h in
-                        if h > 1 { composerDockHeight = h }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        composerDock(proxy: proxy)
                     }
                 }
             }
@@ -2118,7 +2087,6 @@ struct ChatDetailView: View {
                 rememberBaseBottomInset(inset)
             }
         }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -2230,7 +2198,7 @@ struct ChatDetailView: View {
             consumePendingDictationInsert()
         }
         .onChange(of: composerFocused) { _, focused in
-            VCLog.log("Keyboard", "composer focus=\(focused)")
+            vcKeyboardLog("composer focus=\(focused)")
             onComposerFocusChange(focused)
         }
         .onChange(of: store.offline) { _, offline in
@@ -2344,7 +2312,7 @@ struct ChatDetailView: View {
         .padding(.bottom, 80)
     }
 
-    private func composerDock(proxy: ScrollViewProxy, keyboardLift: CGFloat) -> some View {
+    private func composerDock(proxy: ScrollViewProxy) -> some View {
         VStack(spacing: 8) {
             ForEach(pendingConfirms) { req in
                 ConfirmCardView(req: req, chatFont: chatFont) { approve in
@@ -2378,23 +2346,8 @@ struct ChatDetailView: View {
                 .disabled(store.offline)
                 .opacity(store.offline ? 0.45 : 1)
         }
-        // Lift the composer above the root glass bar when the keyboard is DOWN
-        // (when it's up, the keyboard lift already clears the bar). Without this
-        // the composer sat at the screen edge, fully under the bar.
-        .offset(y: -(keyboardLift + (keyboardVisible ? 0 : bottomBarInset)))
+        .padding(.bottom, keyboardVisible ? 0 : bottomBarInset)
         .animation(.easeInOut(duration: 0.16), value: shouldShowScrollToBottomButton)
-    }
-
-    private func keyboardLift(in geo: GeometryProxy) -> CGFloat {
-        let baseline = baseBottomInset > 0 ? baseBottomInset : geo.safeAreaInsets.bottom
-        guard keyboardVisible else { return 0 }
-        let manualLift = max(0, keyboardHeight - baseline)
-        // In a few NavigationStack/keyboard combinations SwiftUI already shrinks
-        // the hosted page above the keyboard despite the outer ignoresSafeArea.
-        // Applying the full manual lift on top of that sends the composer almost
-        // to the top of the screen. Subtract the lift that the container already
-        // received; if there was none, this stays the old manual path.
-        return max(0, manualLift - automaticKeyboardLiftAlreadyApplied())
     }
 
     private func automaticKeyboardLiftAlreadyApplied() -> CGFloat {
@@ -2407,7 +2360,7 @@ struct ChatDetailView: View {
     private func rememberBaseBottomInset(_ inset: CGFloat) {
         guard !keyboardVisible else { return }
         baseBottomInset = inset
-        VCLog.log("Keyboard", "baseBottomInset=\(Int(inset))")
+        vcKeyboardLog("baseBottomInset=\(Int(inset))")
     }
 
     private var shouldShowScrollToBottomButton: Bool {
@@ -2441,7 +2394,7 @@ struct ChatDetailView: View {
         if !visible, Date() < suppressSystemKeyboardHideUntil {
             keyboardHeight = 0
             keyboardVisible = false
-            VCLog.log("Keyboard", "willChangeFrame HIDE suppressed (app-owned collapse owns it)")
+            vcKeyboardLog("willChangeFrame HIDE suppressed (app-owned collapse owns it)")
             return
         }
         let animation = note.vcKeyboardAnimation(opening: visible)
@@ -2453,8 +2406,7 @@ struct ChatDetailView: View {
         }
         let baseline = baseBottomInset
         let lift = visible ? max(0, height - baseline - alreadyApplied) : 0
-        VCLog.log(
-            "Keyboard",
+        vcKeyboardLog(
             "frameEnd=\(endFrame.vcDebug) inWindow=\(keyboardFrameInWindow.vcDebug) inView=\(keyboardFrameInView.vcDebug) window=\(window.bounds.vcDebug) reader=\(view.bounds.vcDebug) safeBase=\(Int(baseline)) height=\(Int(height)) autoLift=\(Int(alreadyApplied)) lift=\(Int(lift)) visible=\(visible) curve=\(note.vcKeyboardCurveDebug)"
             + " anim=\(note.vcKeyboardAnimationDebug(opening: visible))"
         )
@@ -2465,7 +2417,7 @@ struct ChatDetailView: View {
         if Date() < suppressSystemKeyboardHideUntil {
             keyboardHeight = 0
             keyboardVisible = false
-            VCLog.log("Keyboard", "willHide suppressed (app-owned collapse owns it)")
+            vcKeyboardLog("willHide suppressed (app-owned collapse owns it)")
             return
         }
         let priorHeight = keyboardHeight
@@ -2477,8 +2429,7 @@ struct ChatDetailView: View {
             keyboardHeight = 0
             keyboardVisible = false
         }
-        VCLog.log(
-            "Keyboard",
+        vcKeyboardLog(
             "willHide priorHeight=\(Int(priorHeight)) priorLift=\(Int(priorLift)) safeBase=\(Int(baseBottomInset)) curve=\(note.vcKeyboardCurveDebug)"
             + " anim=\(note.vcKeyboardAnimationDebug(opening: false, zeroDurationFallback: 0.22))"
         )
@@ -2497,8 +2448,7 @@ struct ChatDetailView: View {
             keyboardHeight = 0
             keyboardVisible = false
         }
-        VCLog.log(
-            "Keyboard",
+        vcKeyboardLog(
             "collapse reason=\(reason) priorHeight=\(Int(priorHeight)) priorLift=\(Int(priorLift)) safeBase=\(Int(baseBottomInset)) anim=proactive/easeOut/\(String(format: "%.3f", duration))"
         )
     }
@@ -2532,7 +2482,7 @@ struct ChatDetailView: View {
                     .contentShape(Rectangle())
                     .simultaneousGesture(
                         TapGesture().onEnded {
-                            VCLog.log("Keyboard", "input tap focused=\(composerFocused) visible=\(keyboardVisible) height=\(Int(keyboardHeight))")
+                            vcKeyboardLog("input tap focused=\(composerFocused) visible=\(keyboardVisible) height=\(Int(keyboardHeight))")
                             if !composerFocused { composerFocused = true }
                         }
                     )
@@ -2578,7 +2528,7 @@ struct ChatDetailView: View {
             .padding(.bottom, 10)
             .vcLiquidGlassRoundedSurface(cornerRadius: 28)
         }
-        .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 8)
+        .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 2)
     }
 
     private var keyboardDismissButton: some View {
@@ -2813,6 +2763,56 @@ struct ComposerAttachmentChip: View {
 struct GTFilePreviewTarget: Identifiable {
     let attachment: VCAttachment
     var id: String { attachment.filePath ?? attachment.id }
+}
+
+private struct ChatLoadingSkeleton: View {
+    let chatFont: Double
+
+    private var lineHeight: CGFloat { max(10, CGFloat(chatFont) * 0.74) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            statusLine
+            skeletonBubble(width: 236, lineWidths: [0.92, 0.58], alignTrailing: false)
+            skeletonBubble(width: 264, lineWidths: [0.95, 0.74, 0.46], alignTrailing: true)
+            skeletonBubble(width: 220, lineWidths: [0.84, 0.62], alignTrailing: false)
+        }
+        .padding(.horizontal, 4)
+        .accessibilityLabel("Чат загружается")
+    }
+
+    private var statusLine: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(VCAccent)
+            Text("загружаем чат…")
+                .font(.system(size: chatFont - 2, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
+
+    private func skeletonBubble(width: CGFloat, lineWidths: [CGFloat], alignTrailing: Bool) -> some View {
+        HStack {
+            if alignTrailing { Spacer(minLength: 42) }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(lineWidths.enumerated()), id: \.offset) { _, factor in
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: width * factor, height: lineHeight)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(alignTrailing ? 0.10 : 0.07))
+            )
+            if !alignTrailing { Spacer(minLength: 42) }
+        }
+    }
 }
 
 private struct MessageView: View {
@@ -5133,13 +5133,6 @@ private struct FontStepper: View {
         editing = false
         if let v = Double(draft) { value = min(24, max(10, v)) }
     }
-}
-
-// Measures the docked composer's height so the transcript's bottom sentinel can
-// be sized to it exactly (no fixed-142 dead space above the input).
-private struct ComposerDockHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 private extension Notification {

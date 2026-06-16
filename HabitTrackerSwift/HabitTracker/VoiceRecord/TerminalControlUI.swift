@@ -7,6 +7,18 @@ private let CTHeaderBackground = Color(white: 0.055)
 private let CTGreen = Color(hex: "22c55e")
 private let CTCodexGreen = Color(hex: "22c55e")
 private let CTViolet = Color(hex: "a78bfa")
+private let CTVerboseScrollLogging = false
+private let CTVerboseKeyboardLogging = false
+
+private func ctScrollLog(_ message: @autoclosure () -> String) {
+    guard CTVerboseScrollLogging else { return }
+    VCLog.log("TerminalScroll", message())
+}
+
+private func ctKeyboardLog(_ message: @autoclosure () -> String) {
+    guard CTVerboseKeyboardLogging else { return }
+    VCLog.log("term-kbd", message())
+}
 
 // MARK: - Terminal back-swipe (UIKit recognizer)
 //
@@ -360,13 +372,13 @@ private final class TerminalActivityRingUIView: UIView {
         layer.addSublayer(outlineLayer)
         layer.addSublayer(arcLayer)
 
-        fillLayer.fillColor = UIColor.white.withAlphaComponent(0.075).cgColor
+        fillLayer.fillColor = UIColor(red: 0x22 / 255, green: 0xc5 / 255, blue: 0x5e / 255, alpha: 0.22).cgColor
         outlineLayer.fillColor = UIColor.clear.cgColor
-        outlineLayer.strokeColor = UIColor.white.withAlphaComponent(0.16).cgColor
-        outlineLayer.lineWidth = 1
+        outlineLayer.strokeColor = UIColor(red: 0x22 / 255, green: 0xc5 / 255, blue: 0x5e / 255, alpha: 0.42).cgColor
+        outlineLayer.lineWidth = 1.2
         arcLayer.fillColor = UIColor.clear.cgColor
         arcLayer.strokeColor = UIColor(red: 0x22 / 255, green: 0xc5 / 255, blue: 0x5e / 255, alpha: 1).cgColor
-        arcLayer.lineWidth = 1.5
+        arcLayer.lineWidth = 2
         arcLayer.lineCap = .round
         arcLayer.strokeStart = 0.08
         arcLayer.strokeEnd = 0.78
@@ -3006,7 +3018,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
         if !restoredSavedAnchor, let savedAnchorId, let row = projects.firstIndex(where: { $0.id == savedAnchorId }) {
             restoredSavedAnchor = true
             tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .top, animated: false)
-            VCLog.log("TerminalScroll", "projects restore id=\(String(savedAnchorId.suffix(8)))")
+            ctScrollLog("projects restore id=\(String(savedAnchorId.suffix(8)))")
         } else if force || offset.y > -tableView.adjustedContentInset.top {
             tableView.setContentOffset(offset, animated: false)
         }
@@ -3036,7 +3048,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
         guard projects.indices.contains(indexPath.row) else { return }
         let project = projects[indexPath.row]
         commitAnchor(reason: "click")
-        VCLog.log("TerminalScroll", "projects open click id=\(String(project.id.suffix(8)))")
+        ctScrollLog("projects open click id=\(String(project.id.suffix(8)))")
         onOpenProject(project)
     }
 
@@ -3066,7 +3078,7 @@ private final class TerminalUIKitProjectsController: UIViewController, UITableVi
         let id = projects[first.row].id
         if TerminalControlStore.shared.projectsScrollAnchorId != id {
             TerminalControlStore.shared.projectsScrollAnchorId = id
-            VCLog.log("TerminalScroll", "projects anchor \(reason) id=\(String(id.suffix(8)))")
+            ctScrollLog("projects anchor \(reason) id=\(String(id.suffix(8)))")
         }
     }
 
@@ -3205,7 +3217,7 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
                   let row = tabs.firstIndex(where: { ($0.tabId ?? $0.id) == savedAnchorId }) {
             restoredAnchorByProject.insert(project.id)
             tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .top, animated: false)
-            VCLog.log("TerminalScroll", "tabs restore project=\(String(project.id.suffix(8))) tab=\(String(savedAnchorId.suffix(8)))")
+            ctScrollLog("tabs restore project=\(String(project.id.suffix(8))) tab=\(String(savedAnchorId.suffix(8)))")
         } else if force || previousOffset.y > -tableView.adjustedContentInset.top {
             tableView.setContentOffset(previousOffset, animated: false)
         }
@@ -3256,7 +3268,7 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
         if let project {
             commitAnchor(reason: "click")
             offsetByProject[project.id] = tableView.contentOffset
-            VCLog.log("TerminalScroll", "tabs open click project=\(String(project.id.suffix(8))) tab=\(String((tab.tabId ?? tab.id).suffix(8)))")
+            ctScrollLog("tabs open click project=\(String(project.id.suffix(8))) tab=\(String((tab.tabId ?? tab.id).suffix(8)))")
         }
         onOpenTab(tab)
     }
@@ -3289,7 +3301,7 @@ private final class TerminalUIKitTabsController: UIViewController, UITableViewDa
         offsetByProject[project.id] = tableView.contentOffset
         if TerminalControlStore.shared.tabsScrollAnchorByProject[project.id] != id {
             TerminalControlStore.shared.tabsScrollAnchorByProject[project.id] = id
-            VCLog.log("TerminalScroll", "tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(id.suffix(8)))")
+            ctScrollLog("tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(id.suffix(8)))")
         }
     }
 
@@ -3357,7 +3369,6 @@ private final class TerminalUIKitProjectCell: UITableViewCell {
         pathLabel.text = project.path
         var meta = ["\(project.tabCount ?? 0) tabs"]
         if (project.liveSdkCount ?? 0) > 0 { meta.append("live \(project.liveSdkCount ?? 0)") }
-        if project.isOpen == true { meta.append("open") }
         metaLabel.text = meta.joined(separator: "  ")
         awaitingDot.isHidden = project.hasAwaiting != true
         if activity.count > 0 {
@@ -3988,7 +3999,7 @@ private struct TerminalProjectsView: View {
     private func commitProjectsScrollAnchor(reason: String) {
         guard !interactionsSuspended, let anchor = visibleProjectIds.first else { return }
         if store.projectsScrollAnchorId != anchor {
-            VCLog.log("TerminalScroll", "projects anchor \(reason) id=\(String(anchor.suffix(8)))")
+            ctScrollLog("projects anchor \(reason) id=\(String(anchor.suffix(8)))")
             store.projectsScrollAnchorId = anchor
         }
     }
@@ -4074,7 +4085,6 @@ private struct TerminalProjectRow: View, Equatable {
                 HStack(spacing: 8) {
                     Text("\(project.tabCount ?? 0) tabs")
                     if (project.liveSdkCount ?? 0) > 0 { Text("live \(project.liveSdkCount ?? 0)") }
-                    if project.isOpen == true { Text("open") }
                 }
                 .font(.system(size: uiFont - 4).monospacedDigit())
                 .foregroundStyle(.secondary.opacity(0.75))
@@ -4274,7 +4284,7 @@ private struct TerminalProjectTabsView: View {
     private func commitTabsScrollAnchor(reason: String) {
         guard !interactionsSuspended, let anchor = visibleTabIds.first else { return }
         if store.tabsScrollAnchorByProject[project.id] != anchor {
-            VCLog.log("TerminalScroll", "tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(anchor.suffix(8)))")
+            ctScrollLog("tabs anchor \(reason) project=\(String(project.id.suffix(8))) tab=\(String(anchor.suffix(8)))")
             store.tabsScrollAnchorByProject[project.id] = anchor
         }
     }
@@ -4295,7 +4305,7 @@ private struct TerminalProjectTabsView: View {
         Task { @MainActor in
             await Task.yield()
             proxy.scrollTo(target, anchor: .top)
-            VCLog.log("TerminalScroll", "tabs restore project=\(String(projectId.suffix(8))) tab=\(String(target.suffix(8)))")
+            ctScrollLog("tabs restore project=\(String(projectId.suffix(8))) tab=\(String(target.suffix(8)))")
         }
     }
 }
@@ -4683,13 +4693,11 @@ private struct TerminalChatDetailView: View {
     // landing in the field.
     @State private var autoSendArmed = false
     @FocusState private var composerFocused: Bool
-    // Keyboard lift for the docked composer. The terminal chat previously had NO
-    // keyboard handling at all — it relied on the system's automatic avoidance,
-    // which the root pager's containerRelativeFrame + ignoresSafeArea defeat, so
-    // the keyboard rose but the composer stayed pinned behind it (user: "инпут не
-    // поднимается"). We mirror the Gemini ChatDetailView overlay model: measure
-    // keyboard overlap against the window and lift the composer by an offset
-    // (NOT safeAreaInset — the documented overlay-composer model).
+    // Keyboard diagnostics for the docked composer. Terminal chat is embedded in
+    // a UIKit-owned UIHostingController; that host already participates in
+    // keyboard safe-area avoidance. The composer itself is attached through
+    // safeAreaInset, so these values are logged to catch double-lift regressions
+    // but must not drive a second visual offset.
     @State private var keyboardOverlap: CGFloat = 0
     @State private var keyboardLiftAnim: Animation = .easeOut(duration: 0.22)
     @State private var keyboardRawHeight: CGFloat = 0
@@ -4802,7 +4810,7 @@ private struct TerminalChatDetailView: View {
                                         .equatable()   // Phase D: skip unchanged rows during streaming
                                 }
                             }
-                            Color.clear.frame(height: 142 + bottomBarInset).id("BOTTOM")
+                            Color.clear.frame(height: 12).id("BOTTOM")
                         }
                         .padding(.horizontal, 8)
                         .padding(.top, 48)
@@ -4841,13 +4849,8 @@ private struct TerminalChatDetailView: View {
                     .padding(.top, 8)
                     .padding(.trailing, 10)
                 }
-                .overlay(alignment: .bottom) {
+                .safeAreaInset(edge: .bottom, spacing: 0) {
                     terminalComposer(proxy: proxy)
-                        // Lift above the keyboard. When the keyboard is up,
-                        // keyboardOverlap = its height minus the home-indicator
-                        // inset already baked into the composer's bottom padding.
-                        .offset(y: -keyboardOverlap)
-                        .animation(keyboardLiftAnim, value: keyboardOverlap)
                 }
                 .onChange(of: entries.count) { _, _ in pin(proxy, reason: "entries") }
                 .onChange(of: busy) { _, _ in pin(proxy, reason: "busy") }
@@ -4873,7 +4876,6 @@ private struct TerminalChatDetailView: View {
         }
         }
         .navigationBarHidden(true)
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .background {
             TerminalHostingUIViewReader { view in
                 hostViewBox.view = view
@@ -4953,11 +4955,9 @@ private struct TerminalChatDetailView: View {
             }
         }
         .onChange(of: composerFocused) { _, focused in onComposerFocusChange(focused) }
-        // Keyboard lift: drive the composer offset off the real keyboard frame.
-        // willChangeFrame covers show/predictive/interactive; willHide covers
-        // dismissal. Overlap = how much the keyboard intrudes into the window
-        // minus the home-indicator safe area (the composer already floats above
-        // that via its bottom padding), so we don't double-count it.
+        // Keyboard diagnostics: willChangeFrame covers show/predictive/interactive;
+        // willHide covers dismissal. In Terminal mode the composer is safeAreaInset-
+        // owned, so the measured overlap is logged but not applied as an offset.
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             applyTerminalKeyboard(note, hiding: false)
         }
@@ -5121,20 +5121,14 @@ private struct TerminalChatDetailView: View {
         let now = Date()
         guard suspicious || followChanged || now.timeIntervalSince(lastScrollLogAt) * 1000 > 450 else { return }
         lastScrollLogAt = now
-        VCLog.log(
-            "TerminalScroll",
-            "geom tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) dOff=\(Int(new.offsetY - old.offsetY)) dContent=\(Int(new.contentHeight - old.contentHeight)) old[\(old.logSummary)] new[\(new.logSummary)]"
-        )
+        ctScrollLog("geom tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) dOff=\(Int(new.offsetY - old.offsetY)) dContent=\(Int(new.contentHeight - old.contentHeight)) old[\(old.logSummary)] new[\(new.logSummary)]")
     }
 
     private func logScroll(_ message: String, force: Bool = false) {
         let now = Date()
         guard force || now.timeIntervalSince(lastScrollLogAt) * 1000 > 650 else { return }
         lastScrollLogAt = now
-        VCLog.log(
-            "TerminalScroll",
-            "\(message) tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) \(scrollMetrics.logSummary)"
-        )
+        ctScrollLog("\(message) tab=\(tabId.suffix(6)) entries=\(entries.count) tail=\(entries.last?.text.count ?? 0) busy=\(busy) follow=\(followBottom) touch=\(userTouching) userScroll=\(userScrollIntent) focus=\(composerFocused) kb=\(Int(keyboardOverlap)) \(scrollMetrics.logSummary)")
     }
 
     private func pin(_ proxy: ScrollViewProxy, reason: String) {
@@ -5304,13 +5298,11 @@ private struct TerminalChatDetailView: View {
                 .padding(.horizontal, 10)
             }
         }
-        // Lift the WHOLE dock — composer, Resume banner, Starting strip, question
-        // card — above the root glass bar by the same amount. Previously only the
-        // composer branch carried this inset, so the Resume banner sat lower and
-        // the bar clipped it (user's Image #5: "resume session тоже вылазит").
-        // When the keyboard is up the root bar hides and the lift already clears
-        // it, so the inset drops to a small constant gap.
-        .padding(.bottom, 8 + (composerFocused ? 0 : bottomBarInset))
+        // The whole dock — composer, Resume banner, Starting strip, question card —
+        // is attached through safeAreaInset. When the keyboard is down, keep it
+        // above the root glass bar; when focused, the system keyboard safe area
+        // owns vertical placement and we keep only a small visual gap.
+        .padding(.bottom, composerFocused ? 0 : bottomBarInset)
         .background(LinearGradient(colors: [CTPageBackground.opacity(0), CTPageBackground], startPoint: .top, endPoint: .bottom).allowsHitTesting(false))
     }
 
@@ -5338,14 +5330,13 @@ private struct TerminalChatDetailView: View {
         .buttonStyle(.plain)
     }
 
-    // Compute keyboard overlap against both the key window and this hosted view.
-    // SwiftUI/iOS can still auto-lift a hosted subtree in some NavigationStack +
-    // keyboard combinations; applying the full manual lift on top sends the
-    // terminal composer to the top of the screen. Subtract any lift that the host
-    // already received, matching the ordinary ChatDetailView keyboard model.
+    // Terminal lives inside a UIKit-owned navigation container. Unlike the root
+    // Gemini chat, this host already participates in UIKit keyboard avoidance;
+    // applying a second SwiftUI offset sends the composer toward the top. We
+    // still log the measured overlap, but the visual lift stays host-owned.
     private func applyTerminalKeyboard(_ note: Notification, hiding: Bool) {
         if let isLocal = note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool, !isLocal { return }
-        var overlap: CGFloat = 0
+        var measuredOverlap: CGFloat = 0
         var raw: CGFloat = 0
         var safeBottom: CGFloat = 0
         var alreadyApplied: CGFloat = 0
@@ -5372,10 +5363,14 @@ private struct TerminalChatDetailView: View {
                 frameInViewSummary = inView.terminalKeyboardDebug
             }
 
-            raw = max(windowHeight, viewHeight)
+            // TerminalChatDetailView is hosted inside a UIKit navigation cell/shell,
+            // so the key-window intersection includes area below this SwiftUI
+            // subtree. Prefer the hosted view's own intersection; fall back to
+            // window only when the host view is not resolved yet.
+            raw = viewHeight > 0 ? viewHeight : windowHeight
             safeBottom = win.safeAreaInsets.bottom
             alreadyApplied = terminalAutomaticKeyboardLiftAlreadyApplied()
-            overlap = max(0, raw - safeBottom - alreadyApplied)
+            measuredOverlap = max(0, raw - safeBottom - alreadyApplied)
         }
         keyboardRawHeight = raw
         keyboardSafeBottom = safeBottom
@@ -5384,7 +5379,7 @@ private struct TerminalChatDetailView: View {
         let rawDur = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
         let dur = rawDur <= 0.01 ? 0.22 : rawDur
         let curve = note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? -1
-        let opening = overlap > 0
+        let opening = measuredOverlap > 0
         if curve == 7 {
             keyboardLiftAnim = opening
                 ? .timingCurve(0.17, 0.84, 0.44, 1.0, duration: min(0.28, max(0.18, dur * 0.70)))
@@ -5396,24 +5391,20 @@ private struct TerminalChatDetailView: View {
         } else {
             keyboardLiftAnim = .easeOut(duration: dur)
         }
-        if abs(keyboardOverlap - overlap) > 0.5 {
-            withAnimation(keyboardLiftAnim) { keyboardOverlap = overlap }
+        let visualOverlap: CGFloat = 0
+        if abs(keyboardOverlap - visualOverlap) > 0.5 {
+            withAnimation(keyboardLiftAnim) { keyboardOverlap = visualOverlap }
         }
-        VCLog.log(
-            "term-kbd",
-            "overlap=\(Int(overlap)) raw=\(Int(raw)) safe=\(Int(safeBottom)) autoLift=\(Int(alreadyApplied)) hiding=\(hiding) inWindow=\(frameInWindowSummary) inView=\(frameInViewSummary) window=\(windowSummary) reader=\(readerSummary) curve=\(curve) dur=\(String(format: "%.2f", dur))"
+        ctKeyboardLog(
+            "overlap=\(Int(visualOverlap)) measured=\(Int(measuredOverlap)) raw=\(Int(raw)) safe=\(Int(safeBottom)) autoLift=\(Int(alreadyApplied)) hostAvoidance=true hiding=\(hiding) inWindow=\(frameInWindowSummary) inView=\(frameInViewSummary) window=\(windowSummary) reader=\(readerSummary) curve=\(curve) dur=\(String(format: "%.2f", dur))"
         )
     }
 
     private func reconcileTerminalKeyboard(reason: String) {
-        guard keyboardRawHeight > 0 || keyboardOverlap > 0 else { return }
-        let alreadyApplied = terminalAutomaticKeyboardLiftAlreadyApplied()
-        let overlap = max(0, keyboardRawHeight - keyboardSafeBottom - alreadyApplied)
-        guard abs(keyboardOverlap - overlap) > 0.5 else { return }
-        withAnimation(.easeOut(duration: 0.12)) { keyboardOverlap = overlap }
-        VCLog.log(
-            "term-kbd",
-            "reconcile reason=\(reason) overlap=\(Int(overlap)) raw=\(Int(keyboardRawHeight)) safe=\(Int(keyboardSafeBottom)) autoLift=\(Int(alreadyApplied)) hostH=\(Int(terminalHostHeight))"
+        guard keyboardOverlap > 0.5 else { return }
+        withAnimation(.easeOut(duration: 0.12)) { keyboardOverlap = 0 }
+        ctKeyboardLog(
+            "reconcile reason=\(reason) overlap=0 raw=\(Int(keyboardRawHeight)) safe=\(Int(keyboardSafeBottom)) autoLift=\(Int(terminalAutomaticKeyboardLiftAlreadyApplied())) hostH=\(Int(terminalHostHeight)) hostAvoidance=true"
         )
     }
 
@@ -6357,6 +6348,7 @@ private struct TerminalTimelineSheet: View {
     var showsGrabber = true
     var onClose: (() -> Void)? = nil
     private let store = TerminalControlStore.shared   // @Observable singleton (Phase C)
+    @Environment(\.bottomBarInset) private var bottomBarInset
 
     private var entries: [CTTimelineEntry]? { store.timelineByTab[tabId] }
     private var loading: Bool { store.timelineLoading.contains(tabId) }
@@ -6420,11 +6412,11 @@ private struct TerminalTimelineSheet: View {
                                 TerminalTimelineEntryRow(entry: e)
                             }
                             Color.clear
-                                .frame(height: 1)
+                                .frame(height: bottomBarInset + 12)
                                 .id("TIMELINE_BOTTOM")
                         }
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 18)
+                        .padding(.bottom, 8)
                     }
                     .defaultScrollAnchor(.bottom)
                     .onAppear { scrollTimelineToBottom(proxy) }
